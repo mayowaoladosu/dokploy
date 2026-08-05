@@ -99,6 +99,10 @@ export const setupDockerContainerLogsWebSocketServer = (
 					serviceId,
 					organizationId,
 				);
+				if (target.runtime !== "swarm") {
+					ws.close(4003, "Direct container access is unavailable");
+					return;
+				}
 				serverId = target.serverId;
 				const config = await getConfig(containerId, serverId);
 				const labels = config?.Config?.Labels ?? {};

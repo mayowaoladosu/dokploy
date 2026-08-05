@@ -1,8 +1,6 @@
-import { db } from "@dokploy/server/db";
-import { platformNodePools } from "@dokploy/server/db/schema";
+import { IS_MANAGED_PAAS } from "@dokploy/server/constants";
 import type { ApplicationNested } from "@dokploy/server/utils/builders";
 import type { RegistryCredentialMode } from "@dokploy/server/utils/cluster/upload";
-import { and, asc, eq } from "drizzle-orm";
 import { createKubernetesBuildExecutor } from "./kubernetes/build-executor";
 import { createKubernetesControlPlane } from "./kubernetes/client";
 import { createKubernetesRuntimeScheduler } from "./kubernetes/runtime-scheduler";
@@ -12,6 +10,7 @@ import { createReleaseOrchestrator } from "./release-orchestrator";
 export type PlatformReleasePlan = {
 	orchestrator: ReturnType<typeof createReleaseOrchestrator>;
 	registryCredentialMode: RegistryCredentialMode;
+	usesPlatformRegistry: boolean;
 };
 
 export const createPlatformReleasePlan = async (
@@ -20,50 +19,59 @@ export const createPlatformReleasePlan = async (
 	const placement = await findApplicationPlatformPlacement(
 		application.applicationId,
 	);
-	if (!placement || placement.runtime !== "kubernetes") {
+	if (!placement) {
+		if (IS_MANAGED_PAAS) {
+			throw new Error("Managed application has no platform placement");
+		}
 		return {
 			orchestrator: createReleaseOrchestrator(),
 			registryCredentialMode: "inline",
+			usesPlatformRegistry: false,
 		};
 	}
+	const { runtimeTarget, buildPool } = placement;
+	const { cluster } = runtimeTarget;
 	if (
-		placement.cluster.runtime !== "kubernetes" ||
-		placement.cluster.status !== "active" ||
-		placement.cluster.region.status !== "active"
+		runtimeTarget.runtime !== "kubernetes" ||
+		runtimeTarget.status !== "active" ||
+		buildPool.runtime !== "kubernetes" ||
+		buildPool.status !== "active" ||
+		cluster.runtime !== "kubernetes" ||
+		cluster.status !== "active" ||
+		cluster.region.status !== "active"
 	) {
 		throw new Error("The assigned Kubernetes placement is not active");
 	}
 
 	const client = createKubernetesControlPlane({
-		kubeconfig: placement.cluster.kubeconfig,
-		inCluster: placement.cluster.metadata.inCluster,
+		kubeconfig: cluster.kubeconfig,
+		inCluster: cluster.metadata.inCluster,
 	});
-	const buildNodePool =
-		(await db.query.platformNodePools.findFirst({
-			where: and(
-				eq(platformNodePools.clusterId, placement.clusterId),
-				eq(platformNodePools.purpose, "build"),
-				eq(platformNodePools.status, "active"),
-			),
-			orderBy: [asc(platformNodePools.name)],
-		})) ?? null;
+	const runtimeMetadata = {
+		...cluster.metadata,
+		registrySecretName:
+			buildPool.runtimeRegistrySecretName ||
+			cluster.metadata.registrySecretName,
+	};
 
 	return {
 		orchestrator: createReleaseOrchestrator({
 			buildExecutor: createKubernetesBuildExecutor({
 				client,
 				placement,
-				clusterMetadata: placement.cluster.metadata,
-				nodePool: buildNodePool,
+				clusterMetadata: cluster.metadata,
+				buildPool,
+				nodePool: buildPool.nodePool,
 			}),
 			runtimeScheduler: createKubernetesRuntimeScheduler({
 				client,
 				placement,
-				clusterMetadata: placement.cluster.metadata,
-				nodePool: placement.nodePool,
+				clusterMetadata: runtimeMetadata,
+				nodePool: runtimeTarget.nodePool,
 			}),
 		}),
 		registryCredentialMode: "environment",
+		usesPlatformRegistry: true,
 	};
 };
 

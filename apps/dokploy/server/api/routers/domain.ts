@@ -181,7 +181,7 @@ export const domainRouter = createTRPCRouter({
 				const placement = await findApplicationPlatformPlacement(
 					domain.applicationId,
 				);
-				if (placement?.runtime === "kubernetes") {
+				if (placement?.runtimeTarget.runtime === "kubernetes") {
 					await reconcilePlatformDomainRoutes({
 						applicationId: domain.applicationId,
 						appName: domain.application?.appName || "application",
@@ -250,7 +250,7 @@ export const domainRouter = createTRPCRouter({
 				const placement = await findApplicationPlatformPlacement(
 					domain.applicationId,
 				);
-				if (placement?.runtime === "kubernetes") {
+				if (placement?.runtimeTarget.runtime === "kubernetes") {
 					await reconcilePlatformDomainRoutes({
 						applicationId: domain.applicationId,
 						appName: domain.application?.appName || "application",
@@ -293,7 +293,7 @@ export const domainRouter = createTRPCRouter({
 				const placement = await findApplicationPlatformPlacement(
 					domain.applicationId,
 				);
-				if (placement?.runtime === "kubernetes") {
+				if (placement?.runtimeTarget.runtime === "kubernetes") {
 					await reconcilePlatformDomainRoutes({
 						applicationId: domain.applicationId,
 						appName: domain.application?.appName || "application",

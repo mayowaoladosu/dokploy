@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import type {
+	PlatformBuildPool,
 	PlatformClusterMetadata,
 	PlatformNodePool,
 	PlatformPlacement,
@@ -9,10 +10,7 @@ import { findBitbucketById } from "@dokploy/server/services/bitbucket";
 import { findGiteaById } from "@dokploy/server/services/gitea";
 import { findGithubById } from "@dokploy/server/services/github";
 import { findGitlabById } from "@dokploy/server/services/gitlab";
-import { findRegistryByIdWithCredentials } from "@dokploy/server/services/registry";
 import { findSSHKeyById } from "@dokploy/server/services/ssh-key";
-import { getImageName } from "@dokploy/server/utils/builders";
-import { getRegistryCredentialEnvironment } from "@dokploy/server/utils/cluster/upload";
 import { getBitbucketCredentialEnvironmentNames } from "@dokploy/server/utils/providers/bitbucket";
 import { getDockerSourceCredentialEnvironmentNames } from "@dokploy/server/utils/providers/docker";
 import { getCustomGitCredentialEnvironmentNames } from "@dokploy/server/utils/providers/git";
@@ -30,6 +28,7 @@ import {
 	refreshGitlabToken,
 } from "@dokploy/server/utils/providers/gitlab";
 import type { KubernetesObject, V1Pod } from "@kubernetes/client-node";
+import { quote } from "shell-quote";
 import { z } from "zod";
 import {
 	type BuildExecutionArtifact,
@@ -47,6 +46,7 @@ type KubernetesBuildExecutorInput = {
 	client: KubernetesControlPlane;
 	placement: PlatformPlacement;
 	clusterMetadata: PlatformClusterMetadata;
+	buildPool: PlatformBuildPool;
 	nodePool: PlatformNodePool | null;
 	pollIntervalMs?: number;
 	sleep?: (durationMs: number) => Promise<void>;
@@ -58,7 +58,11 @@ const buildTerminationMessage = z.object({
 		.array(z.string().regex(/^[^\s@]+@sha256:[a-f0-9]{64}$/))
 		.max(100)
 		.nullable(),
-	imageSizeBytes: z.number().int().positive().max(100 * 1024 ** 3),
+	imageSizeBytes: z
+		.number()
+		.int()
+		.positive()
+		.max(100 * 1024 ** 3),
 });
 
 const defaultSleep = (durationMs: number) =>
@@ -111,27 +115,55 @@ const terminatedBuilder = (pods: V1Pod[]) => {
 	return null;
 };
 
-const registrySecretsFor = async (
-	application: Parameters<BuildExecutor["execute"]>[0]["application"],
-) => {
-	const registryIds = [
-		application.registry?.registryId,
-		application.buildRegistry?.registryId,
-		...(application.rollbackActive
-			? [application.rollbackRegistry?.registryId]
-			: []),
-	].filter((id): id is string => Boolean(id));
+const registrySecretsFor = async (buildPool: PlatformBuildPool) => {
 	const secrets: Record<string, string> = {};
-	for (const registryId of new Set(registryIds)) {
-		Object.assign(
-			secrets,
-			getRegistryCredentialEnvironment(
-				await findRegistryByIdWithCredentials(registryId),
-			),
-		);
+	if (buildPool.registryAuthMode === "basic") {
+		secrets.VLYV_PLATFORM_REGISTRY_HOST = buildPool.registryHost || "";
+		secrets.VLYV_PLATFORM_REGISTRY_USERNAME = buildPool.registryUsername || "";
+		secrets.VLYV_PLATFORM_REGISTRY_PASSWORD = buildPool.registryPassword || "";
 	}
 	return secrets;
 };
+
+export const buildPoolImageRef = (
+	buildPool: Pick<
+		PlatformBuildPool,
+		"registryHost" | "registryRepositoryPrefix"
+	>,
+	applicationId: string,
+	deploymentId: string,
+) => {
+	const host = buildPool.registryHost
+		?.replace(/^https?:\/\//, "")
+		.replace(/\/+$/, "");
+	const prefix = buildPool.registryRepositoryPrefix
+		?.replace(/^\/+|\/+$/g, "")
+		.toLowerCase();
+	if (!host || !prefix) {
+		throw new Error("The selected build pool has no artifact registry");
+	}
+	const repository = applicationId.toLowerCase().replace(/[^a-z0-9._-]/g, "-");
+	const tag = deploymentId.toLowerCase().replace(/[^a-z0-9._-]/g, "-");
+	return `${host}/${prefix}/${repository}:${tag}`;
+};
+
+const platformRegistryPushCommand = ({
+	buildPool,
+	localImageRef,
+	runtimeImageRef,
+}: {
+	buildPool: PlatformBuildPool;
+	localImageRef: string;
+	runtimeImageRef: string;
+}) => `
+${
+	buildPool.registryAuthMode === "basic"
+		? 'printf %s "$VLYV_PLATFORM_REGISTRY_PASSWORD" | docker login "$VLYV_PLATFORM_REGISTRY_HOST" -u "$VLYV_PLATFORM_REGISTRY_USERNAME" --password-stdin'
+		: "true"
+}
+docker tag ${quote([localImageRef])} ${quote([runtimeImageRef])}
+docker push ${quote([runtimeImageRef])}
+`;
 
 const sourceSecretsFor = async (
 	application: Parameters<BuildExecutor["execute"]>[0]["application"],
@@ -211,11 +243,12 @@ export const createKubernetesBuildExecutor = ({
 	client,
 	placement,
 	clusterMetadata,
+	buildPool,
 	nodePool,
 	pollIntervalMs = 2_000,
 	sleep = defaultSleep,
 }: KubernetesBuildExecutorInput): BuildExecutor => {
-	const builderImage = clusterMetadata.builderImage;
+	const builderImage = buildPool.builderImage;
 	if (!builderImage) {
 		throw new Error(
 			"Kubernetes cluster metadata must configure a rootless builderImage",
@@ -281,58 +314,68 @@ export const createKubernetesBuildExecutor = ({
 				input.application.applicationId,
 			);
 			const jobName = kubernetesManifestName(`build-${input.deploymentId}`);
-			const runtimeImageRef = await getImageName(input.application);
+			const runtimeImageRef = buildPoolImageRef(
+				buildPool,
+				input.application.applicationId,
+				input.deploymentId,
+			);
 			const localImageRef =
 				input.application.sourceType === "docker"
-					? runtimeImageRef
+					? input.application.dockerImage || ""
 					: `${input.application.appName}:latest`;
+			if (!localImageRef) throw new Error("Docker source image is required");
 			const timeoutMs = Number.parseInt(
 				process.env.PLATFORM_BUILD_TIMEOUT_MS || "900000",
 				10,
 			);
 			const completionTimeoutMs = timeoutMs + 30_000;
 			const secrets = {
-				...(await registrySecretsFor(input.application)),
+				...(await registrySecretsFor(buildPool)),
 				...(await sourceSecretsFor(input.application)),
 			};
 			const manifests = buildKubernetesBuildManifests({
-					applicationId: input.application.applicationId,
-					organizationId: input.application.environment.project.organizationId,
-					deploymentId: input.deploymentId,
-					namespace,
-					appName: input.application.appName,
-					builderImage,
-					command: input.command,
+				applicationId: input.application.applicationId,
+				organizationId: input.application.environment.project.organizationId,
+				deploymentId: input.deploymentId,
+				namespace,
+				appName: input.application.appName,
+				builderImage,
+				command: `${input.command}\n${platformRegistryPushCommand({
+					buildPool,
 					localImageRef,
 					runtimeImageRef,
-					runtimeClassName:
-						nodePool?.runtimeClassName || clusterMetadata.buildRuntimeClassName,
-					nodeSelector: nodePool?.labels,
-					tolerations: nodePool?.taints,
-					activeDeadlineSeconds: Math.max(
-						Math.ceil(completionTimeoutMs / 1000),
-						60,
-					),
-					resources: buildResources(),
-					secrets,
-					allowedEgressCidrs: clusterMetadata.allowedEgressCidrs,
-				});
+				})}`,
+				localImageRef: runtimeImageRef,
+				runtimeImageRef,
+				runtimeClassName:
+					nodePool?.runtimeClassName || clusterMetadata.buildRuntimeClassName,
+				nodeSelector: nodePool?.labels,
+				tolerations: nodePool?.taints,
+				activeDeadlineSeconds: Math.max(
+					Math.ceil(completionTimeoutMs / 1000),
+					60,
+				),
+				resources: buildResources(),
+				secrets,
+				allowedEgressCidrs: clusterMetadata.allowedEgressCidrs,
+			});
 			const credentialSecret = manifests.find(
 				(manifest) => manifest.kind === "Secret",
 			);
 			let result: Awaited<ReturnType<typeof waitForBuild>>;
 			try {
 				await client.apply(manifests);
-				result = await waitForBuild(
-					namespace,
-					jobName,
-					completionTimeoutMs,
-				);
+				result = await waitForBuild(namespace, jobName, completionTimeoutMs);
 			} finally {
 				if (credentialSecret) {
-					await client.delete(credentialSecret).catch((error) =>
-						console.error("Failed to delete Kubernetes build credentials", error),
-					);
+					await client
+						.delete(credentialSecret)
+						.catch((error) =>
+							console.error(
+								"Failed to delete Kubernetes build credentials",
+								error,
+							),
+						);
 				}
 			}
 			if (result.logs) {
@@ -357,7 +400,8 @@ export const createKubernetesBuildExecutor = ({
 				executor: "kubernetes-job",
 				durationMs: Date.now() - startedAt,
 				metadata: {
-					clusterId: placement.clusterId,
+					clusterId: buildPool.clusterId,
+					buildPoolId: buildPool.buildPoolId,
 					namespace,
 					jobName,
 					podName: result.podName,

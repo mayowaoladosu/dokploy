@@ -46,6 +46,19 @@ export const platformNodePoolStatus = pgEnum("platformNodePoolStatus", [
 	"offline",
 ]);
 
+export const platformTargetStatus = pgEnum("platformTargetStatus", [
+	"provisioning",
+	"active",
+	"draining",
+	"error",
+	"offline",
+]);
+
+export const platformRegistryAuthMode = pgEnum("platformRegistryAuthMode", [
+	"basic",
+	"workload_identity",
+]);
+
 export const platformPlacementStatus = pgEnum("platformPlacementStatus", [
 	"pending",
 	"active",
@@ -133,6 +146,11 @@ export type PlatformNodeTaint = {
 	effect: "NoSchedule" | "PreferNoSchedule" | "NoExecute";
 };
 
+export type PlatformBuildPoolMetadata = {
+	registryCredentialHelperConfigured?: boolean;
+	runtimeImagePullIdentityConfigured?: boolean;
+};
+
 export const platformNodePools = pgTable(
 	"platform_node_pool",
 	{
@@ -174,6 +192,91 @@ export const platformNodePools = pgTable(
 	],
 );
 
+export const platformRuntimeTargets = pgTable(
+	"platform_runtime_target",
+	{
+		runtimeTargetId: text("runtime_target_id")
+			.primaryKey()
+			.$defaultFn(() => nanoid()),
+		clusterId: text("cluster_id")
+			.notNull()
+			.references(() => platformClusters.clusterId, { onDelete: "cascade" }),
+		nodePoolId: text("node_pool_id").references(
+			() => platformNodePools.nodePoolId,
+			{ onDelete: "restrict" },
+		),
+		name: text("name").notNull(),
+		runtime: platformClusterRuntime("runtime").notNull(),
+		status: platformTargetStatus("status").notNull().default("provisioning"),
+		maxPlacements: integer("max_placements").notNull().default(1_000),
+		weight: integer("weight").notNull().default(100),
+		metadata: jsonb("metadata")
+			.$type<Record<string, unknown>>()
+			.notNull()
+			.default({}),
+		createdAt: timestamp("created_at").defaultNow().notNull(),
+		updatedAt: timestamp("updated_at").defaultNow().notNull(),
+	},
+	(table) => [
+		uniqueIndex("platformRuntimeTarget_clusterName_unique").on(
+			table.clusterId,
+			table.name,
+		),
+		index("platformRuntimeTarget_runtimeStatus_idx").on(
+			table.runtime,
+			table.status,
+		),
+		index("platformRuntimeTarget_nodePoolId_idx").on(table.nodePoolId),
+	],
+);
+
+export const platformBuildPools = pgTable(
+	"platform_build_pool",
+	{
+		buildPoolId: text("build_pool_id")
+			.primaryKey()
+			.$defaultFn(() => nanoid()),
+		clusterId: text("cluster_id")
+			.notNull()
+			.references(() => platformClusters.clusterId, { onDelete: "cascade" }),
+		nodePoolId: text("node_pool_id").references(
+			() => platformNodePools.nodePoolId,
+			{ onDelete: "restrict" },
+		),
+		name: text("name").notNull(),
+		runtime: platformClusterRuntime("runtime").notNull(),
+		status: platformTargetStatus("status").notNull().default("provisioning"),
+		builderImage: text("builder_image"),
+		runtimeClassName: text("runtime_class_name"),
+		maxConcurrentBuilds: integer("max_concurrent_builds").notNull().default(10),
+		registryHost: text("registry_host"),
+		registryRepositoryPrefix: text("registry_repository_prefix"),
+		registryAuthMode: platformRegistryAuthMode("registry_auth_mode")
+			.notNull()
+			.default("basic"),
+		registryUsername: encryptedText("registry_username"),
+		registryPassword: encryptedText("registry_password"),
+		runtimeRegistrySecretName: text("runtime_registry_secret_name"),
+		metadata: jsonb("metadata")
+			.$type<PlatformBuildPoolMetadata>()
+			.notNull()
+			.default({}),
+		createdAt: timestamp("created_at").defaultNow().notNull(),
+		updatedAt: timestamp("updated_at").defaultNow().notNull(),
+	},
+	(table) => [
+		uniqueIndex("platformBuildPool_clusterName_unique").on(
+			table.clusterId,
+			table.name,
+		),
+		index("platformBuildPool_runtimeStatus_idx").on(
+			table.runtime,
+			table.status,
+		),
+		index("platformBuildPool_nodePoolId_idx").on(table.nodePoolId),
+	],
+);
+
 export const platformPlacements = pgTable(
 	"platform_placement",
 	{
@@ -186,14 +289,16 @@ export const platformPlacements = pgTable(
 		organizationId: text("organization_id")
 			.notNull()
 			.references(() => organization.id, { onDelete: "cascade" }),
-		clusterId: text("cluster_id")
+		runtimeTargetId: text("runtime_target_id")
 			.notNull()
-			.references(() => platformClusters.clusterId, { onDelete: "restrict" }),
-		nodePoolId: text("node_pool_id").references(
-			() => platformNodePools.nodePoolId,
-			{ onDelete: "set null" },
-		),
-		runtime: platformClusterRuntime("runtime").notNull(),
+			.references(() => platformRuntimeTargets.runtimeTargetId, {
+				onDelete: "restrict",
+			}),
+		buildPoolId: text("build_pool_id")
+			.notNull()
+			.references(() => platformBuildPools.buildPoolId, {
+				onDelete: "restrict",
+			}),
 		namespace: text("namespace").notNull(),
 		status: platformPlacementStatus("status").notNull().default("pending"),
 		desiredReplicas: integer("desired_replicas").notNull().default(1),
@@ -210,10 +315,11 @@ export const platformPlacements = pgTable(
 			table.applicationId,
 		),
 		uniqueIndex("platformPlacement_namespace_unique").on(table.namespace),
-		index("platformPlacement_clusterStatus_idx").on(
-			table.clusterId,
+		index("platformPlacement_runtimeTargetStatus_idx").on(
+			table.runtimeTargetId,
 			table.status,
 		),
+		index("platformPlacement_buildPoolId_idx").on(table.buildPoolId),
 		index("platformPlacement_organizationId_idx").on(table.organizationId),
 	],
 );
@@ -231,7 +337,8 @@ export const platformClusterRelations = relations(
 			references: [platformRegions.regionId],
 		}),
 		nodePools: many(platformNodePools),
-		placements: many(platformPlacements),
+		runtimeTargets: many(platformRuntimeTargets),
+		buildPools: many(platformBuildPools),
 	}),
 );
 
@@ -241,6 +348,37 @@ export const platformNodePoolRelations = relations(
 		cluster: one(platformClusters, {
 			fields: [platformNodePools.clusterId],
 			references: [platformClusters.clusterId],
+		}),
+		runtimeTargets: many(platformRuntimeTargets),
+		buildPools: many(platformBuildPools),
+	}),
+);
+
+export const platformRuntimeTargetRelations = relations(
+	platformRuntimeTargets,
+	({ one, many }) => ({
+		cluster: one(platformClusters, {
+			fields: [platformRuntimeTargets.clusterId],
+			references: [platformClusters.clusterId],
+		}),
+		nodePool: one(platformNodePools, {
+			fields: [platformRuntimeTargets.nodePoolId],
+			references: [platformNodePools.nodePoolId],
+		}),
+		placements: many(platformPlacements),
+	}),
+);
+
+export const platformBuildPoolRelations = relations(
+	platformBuildPools,
+	({ one, many }) => ({
+		cluster: one(platformClusters, {
+			fields: [platformBuildPools.clusterId],
+			references: [platformClusters.clusterId],
+		}),
+		nodePool: one(platformNodePools, {
+			fields: [platformBuildPools.nodePoolId],
+			references: [platformNodePools.nodePoolId],
 		}),
 		placements: many(platformPlacements),
 	}),
@@ -257,13 +395,13 @@ export const platformPlacementRelations = relations(
 			fields: [platformPlacements.organizationId],
 			references: [organization.id],
 		}),
-		cluster: one(platformClusters, {
-			fields: [platformPlacements.clusterId],
-			references: [platformClusters.clusterId],
+		runtimeTarget: one(platformRuntimeTargets, {
+			fields: [platformPlacements.runtimeTargetId],
+			references: [platformRuntimeTargets.runtimeTargetId],
 		}),
-		nodePool: one(platformNodePools, {
-			fields: [platformPlacements.nodePoolId],
-			references: [platformNodePools.nodePoolId],
+		buildPool: one(platformBuildPools, {
+			fields: [platformPlacements.buildPoolId],
+			references: [platformBuildPools.buildPoolId],
 		}),
 	}),
 );
@@ -271,4 +409,6 @@ export const platformPlacementRelations = relations(
 export type PlatformRegion = typeof platformRegions.$inferSelect;
 export type PlatformCluster = typeof platformClusters.$inferSelect;
 export type PlatformNodePool = typeof platformNodePools.$inferSelect;
+export type PlatformRuntimeTarget = typeof platformRuntimeTargets.$inferSelect;
+export type PlatformBuildPool = typeof platformBuildPools.$inferSelect;
 export type PlatformPlacement = typeof platformPlacements.$inferSelect;

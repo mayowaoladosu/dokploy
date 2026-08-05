@@ -1,3 +1,5 @@
+import type { ApplicationNested } from "@dokploy/server/utils/builders";
+import { getBuildCommand } from "@dokploy/server/utils/builders";
 import { cloneBitbucketRepository } from "@dokploy/server/utils/providers/bitbucket";
 import { cloneGitRepository } from "@dokploy/server/utils/providers/git";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -63,5 +65,25 @@ describe("Kubernetes source credential commands", () => {
 
 		expect(command).toContain("$VLYV_CUSTOM_GIT_SSH_KEY_1_PRIVATE_KEY");
 		expect(command).not.toContain("secret-key");
+	});
+
+	it("does not use organization registries for platform builds", async () => {
+		const application = {
+			applicationId: "application-1",
+			appName: "example-app",
+			sourceType: "docker",
+			dockerImage: "registry.example.com/source/image:latest",
+			registry: { registryId: "tenant-registry" },
+			buildRegistry: null,
+			rollbackRegistry: null,
+		} as unknown as ApplicationNested;
+
+		const command = await getBuildCommand(application, {
+			registryCredentialMode: "environment",
+			uploadApplicationRegistries: false,
+		});
+
+		expect(command).toBe("");
+		expect(command).not.toContain("tenant-registry");
 	});
 });

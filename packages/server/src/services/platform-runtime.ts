@@ -22,13 +22,18 @@ export const resolvePlatformRuntimeController = async (
 	appName: string,
 ): Promise<PlatformRuntimeController | null> => {
 	const placement = await findApplicationPlatformPlacement(applicationId);
-	if (!placement || placement.runtime !== "kubernetes") return null;
-	if (placement.cluster.runtime !== "kubernetes") {
+	if (!placement) return null;
+	const { runtimeTarget } = placement;
+	const { cluster } = runtimeTarget;
+	if (
+		runtimeTarget.runtime !== "kubernetes" ||
+		cluster.runtime !== "kubernetes"
+	) {
 		throw new Error("Placement runtime does not match its cluster");
 	}
 	const client = createKubernetesControlPlane({
-		kubeconfig: placement.cluster.kubeconfig,
-		inCluster: placement.cluster.metadata.inCluster,
+		kubeconfig: cluster.kubeconfig,
+		inCluster: cluster.metadata.inCluster,
 	});
 	const name = kubernetesApplicationResourceName(applicationId);
 	const hpaIdentity = {
@@ -83,7 +88,7 @@ export const resolvePlatformRuntimeController = async (
 			await updateStatus("pending");
 		},
 		delete: async () => {
-			const gatewayNamespace = placement.cluster.metadata.gatewayNamespace;
+			const gatewayNamespace = cluster.metadata.gatewayNamespace;
 			if (gatewayNamespace) {
 				await Promise.all([
 					client.delete({
@@ -113,11 +118,12 @@ export const reconcilePlatformDomainRoutes = async ({
 	port: number;
 }) => {
 	const placement = await findApplicationPlatformPlacement(applicationId);
-	if (!placement || placement.runtime !== "kubernetes") return false;
-	const metadata = placement.cluster.metadata;
+	if (!placement || placement.runtimeTarget.runtime !== "kubernetes")
+		return false;
+	const metadata = placement.runtimeTarget.cluster.metadata;
 	if (!metadata.gatewayNamespace || !metadata.gatewayName) return false;
 	const client = createKubernetesControlPlane({
-		kubeconfig: placement.cluster.kubeconfig,
+		kubeconfig: placement.runtimeTarget.cluster.kubeconfig,
 		inCluster: metadata.inCluster,
 	});
 	const verifiedDomains =

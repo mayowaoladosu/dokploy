@@ -94,7 +94,9 @@ export const setupDeploymentLogsWebSocketServer = (
 							serviceId,
 							organizationId,
 						);
-						serverId = deployment.buildServerId || target.serverId;
+						serverId =
+							deployment.buildServerId ||
+							(target.runtime === "swarm" ? target.serverId : null);
 					}
 				}
 			} catch {

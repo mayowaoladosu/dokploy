@@ -36,10 +36,17 @@ const authorizeDockerTarget = async (
 ) => {
 	if (IS_MANAGED_PAAS && input.serviceId) {
 		await checkServiceAccess(ctx, input.serviceId, "read");
-		return resolveManagedServiceExecutionTarget(
+		const target = await resolveManagedServiceExecutionTarget(
 			input.serviceId,
 			ctx.session.activeOrganizationId,
 		);
+		if (target.runtime !== "swarm") {
+			throw new TRPCError({
+				code: "FORBIDDEN",
+				message: "Direct container access is unavailable for managed runtimes",
+			});
+		}
+		return target;
 	}
 
 	if (IS_MANAGED_PAAS && !(await isPlatformAdmin(ctx.user.id))) {

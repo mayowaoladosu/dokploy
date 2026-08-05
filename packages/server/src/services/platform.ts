@@ -7,9 +7,9 @@ import {
 	mariadb,
 	mongo,
 	mysql,
+	platformPlacements,
 	postgres,
 	redis,
-	server,
 	user,
 } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
@@ -189,96 +189,10 @@ export const selectManagedComputeCandidate = (
 			);
 		})[0];
 
-const getManagedComputeCandidates = async (): Promise<
-	ManagedComputeCandidate[]
-> => {
-	const configuredIds = configuredPlatformAdminIds();
-	const configuredEmails = configuredPlatformAdminEmails();
-	const nodes = await db.query.server.findMany({
-		where: eq(server.serverStatus, "active"),
-		columns: {
-			serverId: true,
-			serverType: true,
-			buildsConcurrency: true,
-			sshKeyId: true,
-		},
-		with: {
-			organization: {
-				columns: { ownerId: true },
-				with: { owner: { columns: { id: true, email: true, role: true } } },
-			},
-			applications: { columns: { applicationId: true } },
-			buildApplications: { columns: { applicationId: true } },
-			buildDeployments: { columns: { status: true } },
-			compose: { columns: { composeId: true } },
-			libsql: { columns: { libsqlId: true } },
-			redis: { columns: { redisId: true } },
-			mariadb: { columns: { mariadbId: true } },
-			mongo: { columns: { mongoId: true } },
-			mysql: { columns: { mysqlId: true } },
-			postgres: { columns: { postgresId: true } },
-		},
-	});
-
-	return nodes
-		.filter(
-			(node) =>
-				Boolean(node.sshKeyId) &&
-				isPlatformAdminIdentity(
-					node.organization.owner,
-					configuredIds,
-					configuredEmails,
-				),
-		)
-		.map((node) => ({
-			serverId: node.serverId,
-			serverType: node.serverType,
-			buildsConcurrency: node.buildsConcurrency,
-			workloadCount:
-				node.serverType === "build"
-					? node.buildDeployments.filter(
-							(deployment) => deployment.status === "running",
-						).length
-					: node.applications.length +
-						node.compose.length +
-						node.libsql.length +
-						node.redis.length +
-						node.mariadb.length +
-						node.mongo.length +
-						node.mysql.length +
-						node.postgres.length,
-		}));
-};
-
-const getManagedRegistryId = async () => {
-	const configuredIds = configuredPlatformAdminIds();
-	const configuredEmails = configuredPlatformAdminEmails();
-	const registries = await db.query.registry.findMany({
-		columns: { registryId: true },
-		with: {
-			organization: {
-				columns: { ownerId: true },
-				with: { owner: { columns: { id: true, email: true, role: true } } },
-			},
-		},
-	});
-
-	return registries
-		.filter((entry) =>
-			isPlatformAdminIdentity(
-				entry.organization.owner,
-				configuredIds,
-				configuredEmails,
-			),
-		)
-		.sort((left, right) => left.registryId.localeCompare(right.registryId))[0]
-		?.registryId;
-};
-
 /**
- * Resolves platform-owned compute for a new workload. Callers do not need to
- * know where nodes come from or how they are balanced. In self-hosted mode the
- * requested server is preserved exactly.
+ * Preserves explicit server assignment only for the self-hosted target.
+ * Managed applications are placed through platformPlacements after creation;
+ * they never receive a server or registry owned by an administrator tenant.
  */
 export const resolveManagedCompute = async ({
 	requestedServerId,
@@ -291,55 +205,38 @@ export const resolveManagedCompute = async ({
 		return { serverId: requestedServerId || undefined };
 	}
 
-	if (kind === "application" && (await hasActiveKubernetesCapacity())) {
-		const managedRegistryId = await getManagedRegistryId();
-		if (!managedRegistryId) {
-			throw new TRPCError({
-				code: "PRECONDITION_FAILED",
-				message:
-					"Managed Kubernetes requires a platform registry for immutable release artifacts.",
-			});
-		}
-		return {
-			registryId: managedRegistryId,
-			buildRegistryId: managedRegistryId,
-			rollbackRegistryId: managedRegistryId,
-		};
-	}
-
-	const candidates = await getManagedComputeCandidates();
-	const deployNode = selectManagedComputeCandidate(candidates, "deploy");
-	if (!deployNode) {
+	if (kind === "application") {
+		if (await hasActiveKubernetesCapacity()) return {};
 		throw new TRPCError({
 			code: "PRECONDITION_FAILED",
 			message:
-				"Managed compute is not ready. A platform administrator must add and activate a deployment node.",
+				"Managed compute is not ready. A platform administrator must activate a runtime target and isolated build pool.",
 		});
 	}
 
-	if (kind === "service") {
-		return { serverId: deployNode.serverId };
-	}
-
-	const managedRegistryId = await getManagedRegistryId();
-	const buildNode = managedRegistryId
-		? selectManagedComputeCandidate(candidates, "build")
-		: undefined;
-	return {
-		serverId: deployNode.serverId,
-		buildServerId: buildNode?.serverId,
-		registryId: managedRegistryId,
-		buildRegistryId: managedRegistryId,
-		rollbackRegistryId: managedRegistryId,
-	};
+	throw new TRPCError({
+		code: "FORBIDDEN",
+		message:
+			"Container and compose services are unavailable in managed mode; use a managed data provider or application runtime",
+	});
 };
 
-export type ManagedServiceExecutionTarget = {
-	serviceId: string;
-	serverId: string;
-	appName: string;
-	organizationId: string;
-};
+export type ManagedServiceExecutionTarget =
+	| {
+			serviceId: string;
+			runtime: "swarm";
+			serverId: string;
+			appName: string;
+			organizationId: string;
+	  }
+	| {
+			serviceId: string;
+			runtime: "kubernetes";
+			placementId: string;
+			namespace: string;
+			appName: string;
+			organizationId: string;
+	  };
 
 type ManagedResourceValues = {
 	memoryLimit?: string | null;
@@ -440,6 +337,7 @@ export const resolveManagedServiceExecutionTarget = async (
 		mysqlService,
 		postgresService,
 		redisService,
+		placement,
 	] = await Promise.all([
 		db.query.applications.findFirst({
 			where: eq(applications.applicationId, serviceId),
@@ -521,6 +419,18 @@ export const resolveManagedServiceExecutionTarget = async (
 				},
 			},
 		}),
+		db.query.platformPlacements.findFirst({
+			where: eq(platformPlacements.applicationId, serviceId),
+			columns: {
+				placementId: true,
+				applicationId: true,
+				organizationId: true,
+				namespace: true,
+			},
+			with: {
+				runtimeTarget: { columns: { runtime: true } },
+			},
+		}),
 	]);
 
 	const service = [
@@ -536,9 +446,29 @@ export const resolveManagedServiceExecutionTarget = async (
 
 	if (
 		!service ||
-		service.environment.project.organizationId !== organizationId ||
-		!service.serverId
+		service.environment.project.organizationId !== organizationId
 	) {
+		throw new TRPCError({
+			code: "NOT_FOUND",
+			message: "Service execution target not found",
+		});
+	}
+	if (
+		application &&
+		placement?.applicationId === application.applicationId &&
+		placement.organizationId === organizationId &&
+		placement.runtimeTarget.runtime === "kubernetes"
+	) {
+		return {
+			serviceId,
+			runtime: "kubernetes",
+			placementId: placement.placementId,
+			namespace: placement.namespace,
+			appName: application.appName,
+			organizationId,
+		};
+	}
+	if (!service.serverId) {
 		throw new TRPCError({
 			code: "NOT_FOUND",
 			message: "Service execution target not found",
@@ -547,6 +477,7 @@ export const resolveManagedServiceExecutionTarget = async (
 
 	return {
 		serviceId,
+		runtime: "swarm",
 		serverId: service.serverId,
 		appName: service.appName,
 		organizationId,

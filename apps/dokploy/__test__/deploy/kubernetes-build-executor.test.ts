@@ -1,19 +1,14 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { PlatformPlacement } from "@dokploy/server/db/schema";
+import type {
+	PlatformBuildPool,
+	PlatformPlacement,
+} from "@dokploy/server/db/schema";
 import { createKubernetesBuildExecutor } from "@dokploy/server/services/kubernetes/build-executor";
 import type { KubernetesControlPlane } from "@dokploy/server/services/kubernetes/client";
 import type { ApplicationNested } from "@dokploy/server/utils/builders";
 import { afterEach, describe, expect, it, vi } from "vitest";
-
-const { getImageNameMock } = vi.hoisted(() => ({
-	getImageNameMock: vi.fn(),
-}));
-
-vi.mock("@dokploy/server/utils/builders", () => ({
-	getImageName: getImageNameMock,
-}));
 
 const logFiles: string[] = [];
 
@@ -25,9 +20,6 @@ afterEach(async () => {
 
 describe("Kubernetes build executor", () => {
 	it("captures a registry digest from ephemeral job termination metadata", async () => {
-		getImageNameMock.mockResolvedValue(
-			"registry.example.com/apps/example-app:latest",
-		);
 		const apply = vi.fn(async () => undefined);
 		const client: KubernetesControlPlane = {
 			apply,
@@ -49,7 +41,7 @@ describe("Kubernetes build executor", () => {
 												message: JSON.stringify({
 													imageId: `sha256:${"a".repeat(64)}`,
 													repoDigests: [
-														`registry.example.com/apps/example-app@sha256:${"b".repeat(64)}`,
+														`registry.example.com/apps/application-1@sha256:${"b".repeat(64)}`,
 													],
 													imageSizeBytes: 4096,
 												}),
@@ -69,15 +61,21 @@ describe("Kubernetes build executor", () => {
 		const placement = {
 			applicationId: "application-1",
 			organizationId: "organization-1",
-			clusterId: "cluster-1",
 		} as PlatformPlacement;
+		const buildPool = {
+			buildPoolId: "build-pool-1",
+			clusterId: "cluster-1",
+			builderImage: `registry.example.com/platform/builder@sha256:${"c".repeat(64)}`,
+			runtimeClassName: "gvisor",
+			registryHost: "registry.example.com",
+			registryRepositoryPrefix: "apps",
+			registryAuthMode: "workload_identity",
+		} as PlatformBuildPool;
 		const executor = createKubernetesBuildExecutor({
 			client,
 			placement,
-			clusterMetadata: {
-				builderImage: "registry.example.com/platform/builder@sha256:builder",
-				buildRuntimeClassName: "gvisor",
-			},
+			clusterMetadata: {},
+			buildPool,
 			nodePool: null,
 		});
 		const application = {
@@ -111,7 +109,7 @@ describe("Kubernetes build executor", () => {
 		expect(artifact).toMatchObject({
 			imageId: `sha256:${"a".repeat(64)}`,
 			imageDigest: `sha256:${"b".repeat(64)}`,
-			imageRef: `registry.example.com/apps/example-app@sha256:${"b".repeat(64)}`,
+			imageRef: `registry.example.com/apps/application-1@sha256:${"b".repeat(64)}`,
 			imageSizeBytes: 4096,
 			executor: "kubernetes-job",
 		});

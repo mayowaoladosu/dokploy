@@ -28,25 +28,30 @@ export const classifyKubernetesDeployment = (
 
 export const reconcileKubernetesPlacements = async () => {
 	const placements = await db.query.platformPlacements.findMany({
-		where: eq(platformPlacements.runtime, "kubernetes"),
 		with: {
-			cluster: { with: { region: true } },
+			runtimeTarget: { with: { cluster: { with: { region: true } } } },
+			buildPool: true,
 			application: { with: { ports: true } },
 		},
 	});
 	const summary = { active: 0, pending: 0, failed: 0, skipped: 0 };
 	for (const placement of placements) {
+		const { runtimeTarget, buildPool } = placement;
+		const { cluster } = runtimeTarget;
 		if (
-			placement.cluster.status !== "active" ||
-			placement.cluster.region.status !== "active"
+			runtimeTarget.runtime !== "kubernetes" ||
+			runtimeTarget.status !== "active" ||
+			buildPool.status !== "active" ||
+			cluster.status !== "active" ||
+			cluster.region.status !== "active"
 		) {
 			summary.skipped += 1;
 			continue;
 		}
 		try {
 			const client = createKubernetesControlPlane({
-				kubeconfig: placement.cluster.kubeconfig,
-				inCluster: placement.cluster.metadata.inCluster,
+				kubeconfig: cluster.kubeconfig,
+				inCluster: cluster.metadata.inCluster,
 			});
 			const deployment = await client.readDeployment(
 				placement.namespace,

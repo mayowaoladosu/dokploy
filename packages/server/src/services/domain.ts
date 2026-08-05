@@ -56,7 +56,7 @@ export const createDomain = async (input: z.infer<typeof apiCreateDomain>) => {
 			result.applicationId,
 		);
 		if (
-			placement?.runtime !== "kubernetes" &&
+			placement?.runtimeTarget.runtime !== "kubernetes" &&
 			(!IS_MANAGED_PAAS || (await isDomainVerified(result.domainId)))
 		) {
 			const application = await findApplicationById(result.applicationId);

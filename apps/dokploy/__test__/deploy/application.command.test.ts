@@ -231,7 +231,10 @@ describe("deployApplication - Command Generation Tests", () => {
 				customGitUrl: "https://github.com/Dokploy/examples.git",
 				buildPath: "/astro",
 			}),
-			{ registryCredentialMode: "inline" },
+			{
+				registryCredentialMode: "inline",
+				uploadApplicationRegistries: true,
+			},
 		);
 
 		expect(releaseExecuteMock).toHaveBeenCalledWith(
@@ -263,7 +266,10 @@ describe("deployApplication - Command Generation Tests", () => {
 			expect.objectContaining({
 				buildType: "railpack",
 			}),
-			{ registryCredentialMode: "inline" },
+			{
+				registryCredentialMode: "inline",
+				uploadApplicationRegistries: true,
+			},
 		);
 
 		expect(releaseExecuteMock).toHaveBeenCalledWith(

@@ -281,6 +281,7 @@ export const deployApplication = async ({
 
 		command += await getBuildCommand(application, {
 			registryCredentialMode: releasePlan.registryCredentialMode,
+			uploadApplicationRegistries: !releasePlan.usesPlatformRegistry,
 		});
 		await releasePlan.orchestrator.execute({
 			application,
@@ -373,6 +374,7 @@ export const rebuildApplication = async ({
 		const releasePlan = await createPlatformReleasePlan(application);
 		command += await getBuildCommand(application, {
 			registryCredentialMode: releasePlan.registryCredentialMode,
+			uploadApplicationRegistries: !releasePlan.usesPlatformRegistry,
 		});
 		await releasePlan.orchestrator.execute({
 			application,

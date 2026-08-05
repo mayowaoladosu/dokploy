@@ -50,7 +50,7 @@ describe("Kubernetes runtime scheduler", () => {
 			runtime: "kubernetes",
 			status: "pending",
 			desiredReplicas: 1,
-		} as PlatformPlacement;
+		} as unknown as PlatformPlacement;
 		const nodePool = {
 			labels: { "vlyv.dev/pool": "runtime" },
 			taints: [],

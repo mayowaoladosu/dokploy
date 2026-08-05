@@ -1,10 +1,14 @@
 import { isIP } from "node:net";
 import {
+	createPlatformBuildPool,
 	createPlatformCluster,
 	createPlatformNodePool,
 	createPlatformRegion,
+	createPlatformRuntimeTarget,
 	listPlatformInfrastructure,
+	updatePlatformBuildPool,
 	updatePlatformCluster,
+	updatePlatformRuntimeTarget,
 } from "@dokploy/server/services/platform-infrastructure";
 import { z } from "zod";
 import { createTRPCRouter, platformAdminProcedure } from "../trpc";
@@ -36,6 +40,55 @@ const clusterMetadataSchema = z.object({
 	certManagerEnabled: z.boolean().optional(),
 	certIssuerName: z.string().min(1).optional(),
 	allowedEgressCidrs: z.array(cidrSchema).max(50).optional(),
+});
+const targetStatusSchema = z.enum([
+	"provisioning",
+	"active",
+	"draining",
+	"error",
+	"offline",
+]);
+const registryHostSchema = z
+	.string()
+	.regex(
+		/^[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?(?::\d{1,5})?$/,
+		"Registry host must be hostname[:port] without a URL scheme",
+	);
+const registryRepositoryPrefixSchema = z
+	.string()
+	.regex(
+		/^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/,
+		"Registry repository prefix must be a lowercase OCI path",
+	);
+const runtimeTargetChangesSchema = z.object({
+	name: z.string().min(1).optional(),
+	nodePoolId: z.string().min(1).nullable().optional(),
+	status: targetStatusSchema.optional(),
+	maxPlacements: z.number().int().min(1).optional(),
+	weight: z.number().int().min(1).max(10_000).optional(),
+	metadata: metadataSchema.optional(),
+});
+const buildPoolChangesSchema = z.object({
+	name: z.string().min(1).optional(),
+	nodePoolId: z.string().min(1).nullable().optional(),
+	status: targetStatusSchema.optional(),
+	builderImage: z.string().min(1).nullable().optional(),
+	runtimeClassName: z.string().min(1).nullable().optional(),
+	maxConcurrentBuilds: z.number().int().min(1).max(1_000).optional(),
+	registryHost: registryHostSchema.nullable().optional(),
+	registryRepositoryPrefix: registryRepositoryPrefixSchema
+		.nullable()
+		.optional(),
+	registryAuthMode: z.enum(["basic", "workload_identity"]).optional(),
+	registryUsername: z.string().min(1).nullable().optional(),
+	registryPassword: z.string().min(1).nullable().optional(),
+	runtimeRegistrySecretName: z.string().min(1).nullable().optional(),
+	metadata: z
+		.object({
+			registryCredentialHelperConfigured: z.boolean().optional(),
+			runtimeImagePullIdentityConfigured: z.boolean().optional(),
+		})
+		.optional(),
 });
 
 export const platformInfrastructureRouter = createTRPCRouter({
@@ -113,4 +166,42 @@ export const platformInfrastructureRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(({ input }) => createPlatformNodePool(input)),
+	createRuntimeTarget: platformAdminProcedure
+		.input(
+			z.object({
+				clusterId: z.string().min(1),
+				name: z.string().min(1),
+				nodePoolId: z.string().min(1).optional(),
+				status: targetStatusSchema.optional(),
+				maxPlacements: z.number().int().min(1).optional(),
+				weight: z.number().int().min(1).max(10_000).optional(),
+				metadata: metadataSchema.optional(),
+			}),
+		)
+		.mutation(({ input }) => createPlatformRuntimeTarget(input)),
+	updateRuntimeTarget: platformAdminProcedure
+		.input(
+			runtimeTargetChangesSchema.extend({
+				runtimeTargetId: z.string().min(1),
+			}),
+		)
+		.mutation(({ input }) => {
+			const { runtimeTargetId, ...changes } = input;
+			return updatePlatformRuntimeTarget(runtimeTargetId, changes);
+		}),
+	createBuildPool: platformAdminProcedure
+		.input(
+			buildPoolChangesSchema.extend({
+				clusterId: z.string().min(1),
+				name: z.string().min(1),
+				nodePoolId: z.string().min(1).optional(),
+			}),
+		)
+		.mutation(({ input }) => createPlatformBuildPool(input)),
+	updateBuildPool: platformAdminProcedure
+		.input(buildPoolChangesSchema.extend({ buildPoolId: z.string().min(1) }))
+		.mutation(({ input }) => {
+			const { buildPoolId, ...changes } = input;
+			return updatePlatformBuildPool(buildPoolId, changes);
+		}),
 });

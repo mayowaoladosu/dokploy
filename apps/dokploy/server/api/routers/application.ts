@@ -83,6 +83,28 @@ import {
 } from "@/server/queues/queueSetup";
 import { cancelDeployment, deploy } from "@/server/utils/deploy";
 
+const redactManagedApplicationInfrastructure = <T extends object>(
+	application: T,
+): T => {
+	if (!IS_MANAGED_PAAS) return application;
+	const redacted = { ...application } as T & Record<string, unknown>;
+	for (const key of [
+		"serverId",
+		"buildServerId",
+		"registryId",
+		"buildRegistryId",
+		"rollbackRegistryId",
+		"server",
+		"buildServer",
+		"registry",
+		"buildRegistry",
+		"rollbackRegistry",
+	]) {
+		Reflect.deleteProperty(redacted, key);
+	}
+	return redacted;
+};
+
 export const applicationRouter = createTRPCRouter({
 	create: protectedProcedure
 		.input(apiCreateApplication)
@@ -153,16 +175,7 @@ export const applicationRouter = createTRPCRouter({
 					resourceId: newApplication.applicationId,
 					resourceName: newApplication.appName,
 				});
-				return IS_MANAGED_PAAS
-					? {
-							...newApplication,
-							serverId: null,
-							buildServerId: null,
-							registryId: null,
-							buildRegistryId: null,
-							rollbackRegistryId: null,
-						}
-					: newApplication;
+				return redactManagedApplicationInfrastructure(newApplication);
 			} catch (error: unknown) {
 				console.log("error", error);
 				if (error instanceof TRPCError) {
@@ -221,17 +234,11 @@ export const applicationRouter = createTRPCRouter({
 				}
 			}
 
-			return {
+			return redactManagedApplicationInfrastructure({
 				...application,
-				serverId: IS_MANAGED_PAAS ? null : application.serverId,
-				buildServerId: IS_MANAGED_PAAS ? null : application.buildServerId,
-				server: IS_MANAGED_PAAS ? null : application.server,
-				registry: IS_MANAGED_PAAS ? null : application.registry,
-				buildRegistry: IS_MANAGED_PAAS ? null : application.buildRegistry,
-				rollbackRegistry: IS_MANAGED_PAAS ? null : application.rollbackRegistry,
 				hasGitProviderAccess,
 				unauthorizedProvider,
-			};
+			});
 		}),
 
 	reload: protectedProcedure

@@ -41,35 +41,22 @@ const redactDeploymentInfrastructure = <T>(deployment: T): T => {
 		return deployment;
 	}
 
-	return {
+	const redacted = {
 		...(deployment as Record<string, unknown>),
-		serverId: null,
-		buildServerId: null,
-		server: null,
-		buildServer: null,
-		application:
-			"application" in deployment && deployment.application
-				? {
-						...(deployment.application as Record<string, unknown>),
-						serverId: null,
-						buildServerId: null,
-						server: null,
-						buildServer: null,
-					}
-				: "application" in deployment
-					? deployment.application
-					: undefined,
-		compose:
-			"compose" in deployment && deployment.compose
-				? {
-						...(deployment.compose as Record<string, unknown>),
-						serverId: null,
-						server: null,
-					}
-				: "compose" in deployment
-					? deployment.compose
-					: undefined,
-	} as T;
+	} as Record<string, unknown>;
+	for (const key of ["serverId", "buildServerId", "server", "buildServer"]) {
+		Reflect.deleteProperty(redacted, key);
+	}
+	for (const relation of ["application", "compose"] as const) {
+		const value = redacted[relation];
+		if (!value || typeof value !== "object") continue;
+		const nested = { ...(value as Record<string, unknown>) };
+		for (const key of ["serverId", "buildServerId", "server", "buildServer"]) {
+			Reflect.deleteProperty(nested, key);
+		}
+		redacted[relation] = nested;
+	}
+	return redacted as T;
 };
 
 export const deploymentRouter = createTRPCRouter({

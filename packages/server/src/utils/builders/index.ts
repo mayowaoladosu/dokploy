@@ -44,7 +44,10 @@ export type ApplicationNested = InferResultType<
 
 export const getBuildCommand = async (
 	application: ApplicationNested,
-	options: { registryCredentialMode?: RegistryCredentialMode } = {},
+	options: {
+		registryCredentialMode?: RegistryCredentialMode;
+		uploadApplicationRegistries?: boolean;
+	} = {},
 ) => {
 	let command = "";
 
@@ -73,9 +76,10 @@ export const getBuildCommand = async (
 	}
 
 	if (
-		application.registry ||
-		application.buildRegistry ||
-		application.rollbackRegistry
+		options.uploadApplicationRegistries !== false &&
+		(application.registry ||
+			application.buildRegistry ||
+			application.rollbackRegistry)
 	) {
 		command += await uploadImageRemoteCommand(
 			application,

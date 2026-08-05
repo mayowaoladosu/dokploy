@@ -1,5 +1,6 @@
 import { createKubernetesControlPlane } from "@dokploy/server/services/kubernetes/client";
 import {
+	assertBuildPoolReadiness,
 	assertKubernetesClusterReadiness,
 	buildApplicationNamespace,
 	selectKubernetesPlacementCandidate,
@@ -10,6 +11,10 @@ import { describe, expect, it } from "vitest";
 describe("platform infrastructure placement", () => {
 	const candidates = [
 		{
+			runtimeTargetId: "target-b",
+			runtimeTargetName: "runtime-b",
+			buildPoolId: "build-b",
+			buildPoolName: "build-b",
 			clusterId: "cluster-b",
 			clusterSlug: "b",
 			regionId: "region-east",
@@ -17,9 +22,16 @@ describe("platform infrastructure placement", () => {
 			nodePoolId: "pool-b",
 			nodePoolName: "runtime-b",
 			placementCount: 8,
-			maxNodes: 10,
+			maxPlacements: 10,
+			buildPlacementCount: 3,
+			maxConcurrentBuilds: 10,
+			weight: 100,
 		},
 		{
+			runtimeTargetId: "target-a",
+			runtimeTargetName: "runtime-a",
+			buildPoolId: "build-a",
+			buildPoolName: "build-a",
 			clusterId: "cluster-a",
 			clusterSlug: "a",
 			regionId: "region-west",
@@ -27,7 +39,10 @@ describe("platform infrastructure placement", () => {
 			nodePoolId: "pool-a",
 			nodePoolName: "runtime-a",
 			placementCount: 2,
-			maxNodes: 10,
+			maxPlacements: 10,
+			buildPlacementCount: 1,
+			maxConcurrentBuilds: 10,
+			weight: 100,
 		},
 	];
 
@@ -97,6 +112,45 @@ describe("Kubernetes cluster readiness", () => {
 					gatewayClassName: "cilium",
 					certManagerEnabled: true,
 					certIssuerName: "letsencrypt-production",
+				},
+			}),
+		).not.toThrow();
+	});
+
+	it("rejects active build pools without immutable builders and registry isolation", () => {
+		expect(() =>
+			assertBuildPoolReadiness({
+				runtime: "kubernetes",
+				status: "active",
+				builderImage: "registry.example.com/builder:latest",
+				runtimeClassName: null,
+				registryHost: null,
+				registryRepositoryPrefix: null,
+				registryAuthMode: "basic",
+				registryUsername: null,
+				registryPassword: null,
+				runtimeRegistrySecretName: null,
+				metadata: {},
+			}),
+		).toThrow("build pool cannot become active");
+	});
+
+	it("accepts an isolated digest-pinned build pool", () => {
+		expect(() =>
+			assertBuildPoolReadiness({
+				runtime: "kubernetes",
+				status: "active",
+				builderImage: `registry.example.com/builder@sha256:${"b".repeat(64)}`,
+				runtimeClassName: "gvisor",
+				registryHost: "registry.example.com",
+				registryRepositoryPrefix: "vlyv/apps",
+				registryAuthMode: "workload_identity",
+				registryUsername: null,
+				registryPassword: null,
+				runtimeRegistrySecretName: null,
+				metadata: {
+					registryCredentialHelperConfigured: true,
+					runtimeImagePullIdentityConfigured: true,
 				},
 			}),
 		).not.toThrow();
