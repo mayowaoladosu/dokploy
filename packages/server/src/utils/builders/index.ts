@@ -47,6 +47,7 @@ export const getBuildCommand = async (
 	options: {
 		registryCredentialMode?: RegistryCredentialMode;
 		uploadApplicationRegistries?: boolean;
+		buildEnvironmentMode?: "inline" | "environment";
 	} = {},
 ) => {
 	let command = "";
@@ -70,7 +71,9 @@ export const getBuildCommand = async (
 				command = getDockerCommand(application);
 				break;
 			case "railpack":
-				command = getRailpackCommand(application);
+				command = getRailpackCommand(application, {
+					buildEnvironmentMode: options.buildEnvironmentMode,
+				});
 				break;
 		}
 	}

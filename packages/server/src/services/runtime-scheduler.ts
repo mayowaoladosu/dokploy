@@ -37,7 +37,7 @@ export interface RuntimeScheduler {
 	getCurrentImage(application: RuntimeApplication): Promise<string | null>;
 	schedule(input: {
 		application: RuntimeApplication;
-		artifact: Pick<BuildExecutionArtifact, "imageRef">;
+		artifact: BuildExecutionArtifact;
 		timeoutMs?: number;
 	}): Promise<RuntimeStatus>;
 	verifyHealth(input: {

@@ -6,8 +6,10 @@ import type {
 	PlatformPlacement,
 } from "@dokploy/server/db/schema";
 import {
+	assertSupplyChainPolicy,
 	buildKubernetesBuildNamespace,
 	createKubernetesBuildExecutor,
+	partitionBuildManifests,
 } from "@dokploy/server/services/kubernetes/build-executor";
 import type { KubernetesControlPlane } from "@dokploy/server/services/kubernetes/client";
 import type { ApplicationNested } from "@dokploy/server/utils/builders";
@@ -22,22 +24,85 @@ afterEach(async () => {
 });
 
 describe("Kubernetes build executor", () => {
+	it("applies namespace isolation before build workloads", () => {
+		const partition = partitionBuildManifests([
+			{ kind: "Secret" },
+			{ kind: "NetworkPolicy" },
+			{ kind: "Job" },
+			{ kind: "Namespace" },
+			{ kind: "PersistentVolumeClaim" },
+		]);
+
+		expect(partition.prerequisites.map((manifest) => manifest.kind)).toEqual([
+			"NetworkPolicy",
+			"Namespace",
+			"PersistentVolumeClaim",
+		]);
+		expect(partition.workloads.map((manifest) => manifest.kind)).toEqual([
+			"Secret",
+			"Job",
+		]);
+	});
+
+	it("rejects verifier counts above the configured policy", () => {
+		expect(() =>
+			assertSupplyChainPolicy(
+				{
+					sbomDigest: `sha256:${"a".repeat(64)}`,
+					vulnerabilityReportDigest: `sha256:${"b".repeat(64)}`,
+					criticalVulnerabilities: 1,
+					highVulnerabilities: 0,
+					signed: true,
+					signatureVerified: true,
+				},
+				{ maxCriticalVulnerabilities: 0, maxHighVulnerabilities: 0 },
+			),
+		).toThrow("critical vulnerability policy");
+	});
+
 	it("captures a registry digest from ephemeral job termination metadata", async () => {
-		const apply = vi.fn(async () => undefined);
+		const apply = vi.fn<KubernetesControlPlane["apply"]>(async () => undefined);
 		const client: KubernetesControlPlane = {
 			apply,
 			delete: vi.fn(async () => undefined),
 			readDeployment: vi.fn(async () => null),
 			readJob: vi.fn(async () => ({ status: { succeeded: 1 } }) as never),
-			listPods: vi.fn(
-				async () =>
-					[
+			listPods: vi.fn(async (_namespace, selector) => {
+				if (selector.includes("verify-")) {
+					return [
 						{
-							metadata: { name: "builder-pod" },
+							metadata: { name: "verifier-pod" },
 							status: {
 								containerStatuses: [
 									{
-										name: "builder",
+										name: "verifier",
+										state: {
+											terminated: {
+												exitCode: 0,
+												message: JSON.stringify({
+													sbomDigest: `sha256:${"d".repeat(64)}`,
+													vulnerabilityReportDigest: `sha256:${"e".repeat(64)}`,
+													criticalVulnerabilities: 0,
+													highVulnerabilities: 0,
+													signed: true,
+													signatureVerified: true,
+												}),
+											},
+										},
+									},
+								],
+							},
+						},
+					] as never;
+				}
+				if (selector.includes("publish-")) {
+					return [
+						{
+							metadata: { name: "publisher-pod" },
+							status: {
+								containerStatuses: [
+									{
+										name: "publisher",
 										state: {
 											terminated: {
 												exitCode: 0,
@@ -54,9 +119,33 @@ describe("Kubernetes build executor", () => {
 								],
 							},
 						},
-					] as never,
+					] as never;
+				}
+				return [
+					{
+						metadata: { name: "builder-pod" },
+						status: {
+							containerStatuses: [
+								{
+									name: "builder",
+									state: {
+										terminated: {
+											exitCode: 0,
+											message: JSON.stringify({
+												imageId: `sha256:${"a".repeat(64)}`,
+												imageSizeBytes: 4096,
+											}),
+										},
+									},
+								},
+							],
+						},
+					},
+				] as never;
+			}),
+			readPodLogs: vi.fn(
+				async (_namespace, _pod, container) => `${container} output`,
 			),
-			readPodLogs: vi.fn(async () => "build output"),
 			setDeploymentReplicas: vi.fn(async () => undefined),
 			restartDeployment: vi.fn(async () => undefined),
 			deleteNamespace: vi.fn(async () => undefined),
@@ -68,11 +157,25 @@ describe("Kubernetes build executor", () => {
 		const buildPool = {
 			buildPoolId: "build-pool-1",
 			clusterId: "cluster-1",
+			runtime: "kubernetes",
+			status: "active",
 			builderImage: `registry.example.com/platform/builder@sha256:${"c".repeat(64)}`,
 			runtimeClassName: "gvisor",
 			registryHost: "registry.example.com",
 			registryRepositoryPrefix: "apps",
 			registryAuthMode: "workload_identity",
+			metadata: {
+				registryCredentialHelperConfigured: true,
+				runtimeImagePullIdentityConfigured: true,
+				supplyChain: {
+					verifierImage: `registry.example.com/platform/verifier@sha256:${"f".repeat(64)}`,
+					signingKeyRef: "awskms:///alias/vlyv-image-signing",
+					maxCriticalVulnerabilities: 0,
+					maxHighVulnerabilities: 0,
+					ignoreUnfixed: false,
+					artifactStorageClassName: "encrypted-ephemeral",
+				},
+			},
 		} as PlatformBuildPool;
 		const executor = createKubernetesBuildExecutor({
 			client,
@@ -104,7 +207,8 @@ describe("Kubernetes build executor", () => {
 		const artifact = await executor.execute({
 			application,
 			deploymentId: "deployment-1",
-			command: "set -e; echo build",
+			sourceCommand: "set -e; echo clone",
+			buildCommand: "set -e; echo build",
 			logPath,
 			buildServerId: null,
 		});
@@ -115,12 +219,33 @@ describe("Kubernetes build executor", () => {
 			imageRef: `registry.example.com/apps/application-1@sha256:${"b".repeat(64)}`,
 			imageSizeBytes: 4096,
 			executor: "kubernetes-job",
+			metadata: {
+				supplyChain: {
+					sbomDigest: `sha256:${"d".repeat(64)}`,
+					vulnerabilityReportDigest: `sha256:${"e".repeat(64)}`,
+					criticalVulnerabilities: 0,
+					highVulnerabilities: 0,
+					signed: true,
+					signatureVerified: true,
+				},
+			},
 		});
-		expect(apply).toHaveBeenCalledTimes(1);
+		expect(apply).toHaveBeenCalledTimes(4);
+		const builderWorkloads = apply.mock.calls.find(([manifests]) =>
+			manifests.some(
+				(manifest: { kind?: string; metadata?: { name?: string } }) =>
+					manifest.kind === "Job" &&
+					manifest.metadata?.name?.startsWith("build-"),
+			),
+		)?.[0];
+		expect(builderWorkloads).toBeDefined();
 		expect(client.delete).toHaveBeenCalledWith(
 			expect.objectContaining({ kind: "Secret" }),
 		);
-		expect(await fs.readFile(logPath, "utf8")).toContain("build output");
+		const logs = await fs.readFile(logPath, "utf8");
+		expect(logs).toContain("builder output");
+		expect(logs).toContain("publisher output");
+		expect(logs).toContain("verifier output");
 
 		const previewApplication = {
 			...application,
@@ -131,16 +256,12 @@ describe("Kubernetes build executor", () => {
 			buildServerId: null,
 			application: previewApplication,
 		});
-		expect(client.delete).toHaveBeenCalledWith(
-			expect.objectContaining({
-				kind: "Job",
-				metadata: expect.objectContaining({
-					namespace: buildKubernetesBuildNamespace(
-						"organization-1",
-						"preview-42",
-					),
-				}),
-			}),
+		expect(client.deleteNamespace).toHaveBeenLastCalledWith(
+			buildKubernetesBuildNamespace(
+				"organization-1",
+				"preview-42",
+				"deployment-42",
+			),
 		);
 	});
 });

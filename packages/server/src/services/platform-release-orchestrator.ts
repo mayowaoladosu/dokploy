@@ -56,6 +56,7 @@ export const createPlatformReleasePlan = async (
 			sourcePreparer: createApplicationSourcePreparer({
 				registryCredentialMode: "environment",
 				uploadApplicationRegistries: false,
+				buildEnvironmentMode: "environment",
 			}),
 			buildExecutor: createKubernetesBuildExecutor({
 				client,

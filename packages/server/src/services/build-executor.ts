@@ -22,7 +22,8 @@ export type BuildExecutionArtifact = {
 export type BuildExecutionInput = {
 	application: ReleaseApplication;
 	deploymentId: string;
-	command: string;
+	sourceCommand: string;
+	buildCommand: string;
 	logPath: string;
 	buildServerId: string | null;
 };
@@ -115,7 +116,7 @@ export const createShellBuildExecutor = (): BuildExecutor => ({
 	isolation: "host",
 	execute: async (input) => {
 		const startedAt = Date.now();
-		const command = `(${input.command}) >> ${quote([input.logPath])} 2>&1`;
+		const command = `(set -e;${input.sourceCommand}${input.buildCommand}) >> ${quote([input.logPath])} 2>&1`;
 		if (input.buildServerId) {
 			await execAsyncRemote(input.buildServerId, command);
 		} else {

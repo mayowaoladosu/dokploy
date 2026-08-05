@@ -10,6 +10,25 @@ import { describe, expect, it, vi } from "vitest";
 
 describe("Kubernetes runtime scheduler", () => {
 	it("applies an immutable release and waits for ready replicas", async () => {
+		const releaseImage = `registry.example.com/app@sha256:${"a".repeat(64)}`;
+		const previewImage = `registry.example.com/app@sha256:${"b".repeat(64)}`;
+		const artifact = (imageRef: string) => ({
+			imageId: `sha256:${"c".repeat(64)}`,
+			imageDigest: imageRef.split("@")[1] || null,
+			imageRef,
+			imageSizeBytes: 4_096,
+			builder: "railpack",
+			executor: "kubernetes-job",
+			durationMs: 1_000,
+			metadata: {
+				supplyChain: {
+					sbomDigest: `sha256:${"d".repeat(64)}`,
+					vulnerabilityReportDigest: `sha256:${"e".repeat(64)}`,
+					signed: true,
+					signatureVerified: true,
+				},
+			},
+		});
 		const appliedManifests: Array<{ kind?: string }> = [];
 		const apply = vi.fn<KubernetesControlPlane["apply"]>(async (manifests) => {
 			appliedManifests.push(...manifests);
@@ -26,7 +45,7 @@ describe("Kubernetes runtime scheduler", () => {
 								spec: {
 									containers: [
 										{
-											image: "registry.example.com/app@sha256:release",
+											image: releaseImage,
 										},
 									],
 								},
@@ -90,9 +109,7 @@ describe("Kubernetes runtime scheduler", () => {
 
 		const status = await scheduler.schedule({
 			application,
-			artifact: {
-				imageRef: "registry.example.com/app@sha256:release",
-			},
+			artifact: artifact(releaseImage),
 		});
 
 		expect(status).toMatchObject({
@@ -105,7 +122,7 @@ describe("Kubernetes runtime scheduler", () => {
 			(manifest) => manifest.kind === "Deployment",
 		) as any;
 		expect(deployment.spec.template.spec.containers[0].image).toBe(
-			"registry.example.com/app@sha256:release",
+			releaseImage,
 		);
 		expect(
 			appliedManifests.some((manifest) => manifest.kind === "HTTPRoute"),
@@ -118,9 +135,7 @@ describe("Kubernetes runtime scheduler", () => {
 		};
 		await scheduler.schedule({
 			application: previewApplication,
-			artifact: {
-				imageRef: "registry.example.com/app@sha256:preview",
-			},
+			artifact: artifact(previewImage),
 		});
 		const previewNamespace = kubernetesReleaseNamespace({
 			applicationId: "application-1",
@@ -137,5 +152,15 @@ describe("Kubernetes runtime scheduler", () => {
 		await scheduler.remove({ application: previewApplication });
 		expect(client.deleteNamespace).toHaveBeenCalledWith(previewNamespace);
 		expect(client.delete).not.toHaveBeenCalled();
+
+		await expect(
+			scheduler.schedule({
+				application,
+				artifact: {
+					...artifact(releaseImage),
+					metadata: {},
+				},
+			}),
+		).rejects.toThrow("signed and verified");
 	});
 });

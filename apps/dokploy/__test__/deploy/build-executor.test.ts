@@ -59,13 +59,14 @@ describe("shell build executor", () => {
 		const result = await executor.execute({
 			application,
 			deploymentId: "deployment-1",
-			command: "set -e; echo build",
+			sourceCommand: "echo clone;",
+			buildCommand: "echo build;",
 			logPath: "/tmp/test deployment.log",
 			buildServerId: null,
 		});
 
 		expect(execAsyncMock).toHaveBeenCalledWith(
-			"(set -e; echo build) >> '/tmp/test deployment.log' 2>&1",
+			"(set -e;echo clone;echo build;) >> '/tmp/test deployment.log' 2>&1",
 		);
 		expect(execAsyncRemoteMock).not.toHaveBeenCalled();
 		expect(result).toMatchObject({

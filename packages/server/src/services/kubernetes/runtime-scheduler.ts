@@ -85,6 +85,34 @@ const runtimeState = (
 		: "pending";
 };
 
+export const assertVerifiedKubernetesArtifact = (
+	artifact: Parameters<RuntimeScheduler["schedule"]>[0]["artifact"],
+) => {
+	if (!/^[^\s@]+@sha256:[a-f0-9]{64}$/.test(artifact.imageRef)) {
+		throw new Error("Kubernetes runtime requires an immutable image digest");
+	}
+	const supplyChain = artifact.metadata.supplyChain as
+		| {
+				sbomDigest?: unknown;
+				vulnerabilityReportDigest?: unknown;
+				signed?: unknown;
+				signatureVerified?: unknown;
+		  }
+		| undefined;
+	if (
+		supplyChain?.signed !== true ||
+		supplyChain.signatureVerified !== true ||
+		typeof supplyChain.sbomDigest !== "string" ||
+		!/^sha256:[a-f0-9]{64}$/.test(supplyChain.sbomDigest) ||
+		typeof supplyChain.vulnerabilityReportDigest !== "string" ||
+		!/^sha256:[a-f0-9]{64}$/.test(supplyChain.vulnerabilityReportDigest)
+	) {
+		throw new Error(
+			"Kubernetes runtime requires a signed and verified supply-chain artifact",
+		);
+	}
+};
+
 export const createKubernetesRuntimeScheduler = ({
 	client,
 	placement,
@@ -166,6 +194,13 @@ export const createKubernetesRuntimeScheduler = ({
 			process.env.PLATFORM_KUBERNETES_MAX_REPLICAS,
 			Math.max(application.replicas ?? 1, 3),
 		);
+		const networkGateway =
+			clusterMetadata.gatewayNamespace && clusterMetadata.gatewayName
+				? {
+						namespace: clusterMetadata.gatewayNamespace,
+						name: clusterMetadata.gatewayName,
+					}
+				: undefined;
 		try {
 			await client.apply(
 				buildKubernetesRuntimeManifests({
@@ -195,7 +230,7 @@ export const createKubernetesRuntimeScheduler = ({
 					nodeSelector: nodePool?.labels,
 					tolerations: nodePool?.taints,
 					registrySecretName: clusterMetadata.registrySecretName,
-					gateway: undefined,
+					gateway: networkGateway,
 					domains: [],
 					allowedEgressCidrs: clusterMetadata.allowedEgressCidrs,
 				}),
@@ -218,8 +253,10 @@ export const createKubernetesRuntimeScheduler = ({
 		provider: "kubernetes",
 		getCurrentImage: async (application) =>
 			(await getStatus(application)).imageRef,
-		schedule: async ({ application, artifact, timeoutMs = 180_000 }) =>
-			scheduleImage(application, artifact.imageRef, timeoutMs),
+		schedule: async ({ application, artifact, timeoutMs = 180_000 }) => {
+			assertVerifiedKubernetesArtifact(artifact);
+			return scheduleImage(application, artifact.imageRef, timeoutMs);
+		},
 		verifyHealth: async ({ application, timeoutMs = 120_000 }) => {
 			const startedAt = Date.now();
 			await waitUntilReady(application, timeoutMs);

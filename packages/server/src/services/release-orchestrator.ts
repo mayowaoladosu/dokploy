@@ -165,7 +165,8 @@ export const createReleaseOrchestrator = (
 				const artifact = await dependencies.buildExecutor.execute({
 					application,
 					deploymentId: deployment.deploymentId,
-					command: prepared.command,
+					sourceCommand: prepared.sourceCommand,
+					buildCommand: prepared.buildCommand,
 					logPath: deployment.logPath,
 					buildServerId:
 						application.buildServerId || application.serverId || null,

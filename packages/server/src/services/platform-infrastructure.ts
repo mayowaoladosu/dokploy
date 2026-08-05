@@ -410,6 +410,9 @@ export const assertBuildPoolReadiness = (
 		/^[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?(?::\d{1,5})?$/;
 	const repositoryPrefixPattern =
 		/^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
+	const signingKeyPattern =
+		/^(?:awskms|gcpkms|azurekms|hashivault):\/\/[^\s]+$/;
+	const supplyChain = pool.metadata.supplyChain;
 	const missing = [
 		!pool.builderImage || !immutableImagePattern.test(pool.builderImage)
 			? "immutable builderImage"
@@ -440,6 +443,26 @@ export const assertBuildPoolReadiness = (
 		pool.registryAuthMode === "workload_identity" &&
 		!pool.metadata.runtimeImagePullIdentityConfigured
 			? "runtimeImagePullIdentityConfigured attestation"
+			: null,
+		!supplyChain ? "supplyChain policy" : null,
+		supplyChain && !immutableImagePattern.test(supplyChain.verifierImage)
+			? "immutable supplyChain verifierImage"
+			: null,
+		supplyChain && !signingKeyPattern.test(supplyChain.signingKeyRef)
+			? "KMS-backed supplyChain signingKeyRef"
+			: null,
+		supplyChain && !supplyChain.artifactStorageClassName?.trim()
+			? "supplyChain artifactStorageClassName"
+			: null,
+		supplyChain &&
+		(!Number.isSafeInteger(supplyChain.maxCriticalVulnerabilities) ||
+			supplyChain.maxCriticalVulnerabilities < 0)
+			? "valid maxCriticalVulnerabilities"
+			: null,
+		supplyChain &&
+		(!Number.isSafeInteger(supplyChain.maxHighVulnerabilities) ||
+			supplyChain.maxHighVulnerabilities < 0)
+			? "valid maxHighVulnerabilities"
 			: null,
 	].filter((value): value is string => Boolean(value));
 	if (missing.length > 0) {
@@ -598,11 +621,22 @@ export const updatePlatformBuildPool = async (
 		input.nodePoolId === undefined ? current.nodePoolId : input.nodePoolId,
 		"build",
 	);
-	const merged = { ...current, ...input, nodePool };
+	const merged = {
+		...current,
+		...input,
+		metadata: input.metadata
+			? { ...current.metadata, ...input.metadata }
+			: current.metadata,
+		nodePool,
+	};
 	assertBuildPoolReadiness(merged);
 	const [pool] = await db
 		.update(platformBuildPools)
-		.set({ ...input, updatedAt: new Date() })
+		.set({
+			...input,
+			...(input.metadata ? { metadata: merged.metadata } : {}),
+			updatedAt: new Date(),
+		})
 		.where(eq(platformBuildPools.buildPoolId, buildPoolId))
 		.returning();
 	if (!pool) throw new Error("Failed to update platform build pool");

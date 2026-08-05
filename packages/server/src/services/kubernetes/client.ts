@@ -218,11 +218,15 @@ export const createKubernetesControlPlane = (
 			);
 		},
 		deleteNamespace: async (namespace) => {
-			await objects.delete({
-				apiVersion: "v1",
-				kind: "Namespace",
-				metadata: { name: namespace },
-			});
+			try {
+				await objects.delete({
+					apiVersion: "v1",
+					kind: "Namespace",
+					metadata: { name: namespace },
+				});
+			} catch (error) {
+				if (!isNotFound(error)) throw error;
+			}
 		},
 	};
 };

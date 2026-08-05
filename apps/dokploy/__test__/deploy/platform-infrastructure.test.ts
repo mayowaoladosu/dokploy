@@ -135,7 +135,7 @@ describe("Kubernetes cluster readiness", () => {
 		).toThrow("build pool cannot become active");
 	});
 
-	it("accepts an isolated digest-pinned build pool", () => {
+	it("rejects a build pool without a trusted supply-chain gate", () => {
 		expect(() =>
 			assertBuildPoolReadiness({
 				runtime: "kubernetes",
@@ -151,6 +151,35 @@ describe("Kubernetes cluster readiness", () => {
 				metadata: {
 					registryCredentialHelperConfigured: true,
 					runtimeImagePullIdentityConfigured: true,
+				},
+			}),
+		).toThrow("supplyChain policy");
+	});
+
+	it("accepts an isolated, scanned, signed build pool", () => {
+		expect(() =>
+			assertBuildPoolReadiness({
+				runtime: "kubernetes",
+				status: "active",
+				builderImage: `registry.example.com/builder@sha256:${"b".repeat(64)}`,
+				runtimeClassName: "gvisor",
+				registryHost: "registry.example.com",
+				registryRepositoryPrefix: "vlyv/apps",
+				registryAuthMode: "workload_identity",
+				registryUsername: null,
+				registryPassword: null,
+				runtimeRegistrySecretName: null,
+				metadata: {
+					registryCredentialHelperConfigured: true,
+					runtimeImagePullIdentityConfigured: true,
+					supplyChain: {
+						verifierImage: `registry.example.com/verifier@sha256:${"c".repeat(64)}`,
+						signingKeyRef: "awskms:///alias/vlyv-image-signing",
+						maxCriticalVulnerabilities: 0,
+						maxHighVulnerabilities: 0,
+						ignoreUnfixed: false,
+						artifactStorageClassName: "encrypted-ephemeral",
+					},
 				},
 			}),
 		).not.toThrow();

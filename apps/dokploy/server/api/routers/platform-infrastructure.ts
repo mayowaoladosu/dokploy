@@ -60,6 +60,33 @@ const registryRepositoryPrefixSchema = z
 		/^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/,
 		"Registry repository prefix must be a lowercase OCI path",
 	);
+const kubernetesMetadataMapSchema = z
+	.record(z.string().min(1).max(253), z.string().max(1_024))
+	.refine(
+		(value) => Object.keys(value).length <= 25,
+		"Too many metadata entries",
+	);
+const supplyChainPolicySchema = z.object({
+	verifierImage: z
+		.string()
+		.regex(/^[^\s@]+@sha256:[a-f0-9]{64}$/, "Verifier image must use a digest"),
+	signingKeyRef: z
+		.string()
+		.regex(
+			/^(?:awskms|gcpkms|azurekms|hashivault):\/\/.+/,
+			"Signing key must be a supported KMS reference",
+		),
+	maxCriticalVulnerabilities: z.number().int().min(0).max(1_000_000).default(0),
+	maxHighVulnerabilities: z.number().int().min(0).max(1_000_000).default(0),
+	ignoreUnfixed: z.boolean().default(false),
+	artifactStorageClassName: z.string().min(1).max(253),
+	publisherServiceAccountAnnotations: kubernetesMetadataMapSchema.optional(),
+	publisherPodLabels: kubernetesMetadataMapSchema.optional(),
+	publisherPodAnnotations: kubernetesMetadataMapSchema.optional(),
+	serviceAccountAnnotations: kubernetesMetadataMapSchema.optional(),
+	podLabels: kubernetesMetadataMapSchema.optional(),
+	podAnnotations: kubernetesMetadataMapSchema.optional(),
+});
 const runtimeTargetChangesSchema = z.object({
 	name: z.string().min(1).optional(),
 	nodePoolId: z.string().min(1).nullable().optional(),
@@ -87,6 +114,7 @@ const buildPoolChangesSchema = z.object({
 		.object({
 			registryCredentialHelperConfigured: z.boolean().optional(),
 			runtimeImagePullIdentityConfigured: z.boolean().optional(),
+			supplyChain: supplyChainPolicySchema.optional(),
 		})
 		.optional(),
 });

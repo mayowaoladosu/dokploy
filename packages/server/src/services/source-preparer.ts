@@ -14,6 +14,8 @@ import type {
 
 export type PreparedSource = {
 	command: string;
+	sourceCommand: string;
+	buildCommand: string;
 	metadata: {
 		sourceType: ReleaseApplication["sourceType"];
 		buildType: ReleaseApplication["buildType"];
@@ -33,6 +35,7 @@ export interface SourcePreparer {
 type SourcePreparerOptions = {
 	registryCredentialMode: RegistryCredentialMode;
 	uploadApplicationRegistries: boolean;
+	buildEnvironmentMode?: "inline" | "environment";
 };
 
 const clonesSource = (intent: ApplicationReleaseIntent) =>
@@ -46,6 +49,7 @@ const clonesSource = (intent: ApplicationReleaseIntent) =>
 export const createApplicationSourcePreparer = ({
 	registryCredentialMode,
 	uploadApplicationRegistries,
+	buildEnvironmentMode = "inline",
 }: SourcePreparerOptions): SourcePreparer => ({
 	prepare: async ({ application, intent, workspace }) => {
 		const shouldClone = workspace === "fresh" || clonesSource(intent);
@@ -55,28 +59,31 @@ export const createApplicationSourcePreparer = ({
 			serverId: buildServerId,
 			credentialMode: registryCredentialMode,
 		};
-		let command = "set -e;";
+		let sourceCommand = "";
 
 		if (shouldClone) {
 			if (application.sourceType === "github") {
-				command += await cloneGithubRepository(buildApplication);
+				sourceCommand += await cloneGithubRepository(buildApplication);
 			} else if (application.sourceType === "gitlab") {
-				command += await cloneGitlabRepository(buildApplication);
+				sourceCommand += await cloneGitlabRepository(buildApplication);
 			} else if (application.sourceType === "gitea") {
-				command += await cloneGiteaRepository(buildApplication);
+				sourceCommand += await cloneGiteaRepository(buildApplication);
 			} else if (application.sourceType === "bitbucket") {
-				command += await cloneBitbucketRepository(buildApplication);
+				sourceCommand += await cloneBitbucketRepository(buildApplication);
 			} else if (application.sourceType === "git") {
-				command += await cloneGitRepository(buildApplication);
+				sourceCommand += await cloneGitRepository(buildApplication);
 			} else if (application.sourceType === "docker") {
-				command += await buildRemoteDocker(application, registryCredentialMode);
+				sourceCommand += await buildRemoteDocker(
+					application,
+					registryCredentialMode,
+				);
 			}
 		}
 
 		const shouldApplyPatches =
 			shouldClone && application.sourceType !== "docker";
 		if (shouldApplyPatches) {
-			command += await generateApplyPatchesCommand({
+			sourceCommand += await generateApplyPatchesCommand({
 				id: intent.sourceApplicationId || application.applicationId,
 				type: "application",
 				serverId: buildServerId,
@@ -84,13 +91,16 @@ export const createApplicationSourcePreparer = ({
 			});
 		}
 
-		command += await getBuildCommand(application, {
+		const buildCommand = await getBuildCommand(application, {
 			registryCredentialMode,
 			uploadApplicationRegistries,
+			buildEnvironmentMode,
 		});
 
 		return {
-			command,
+			command: `${sourceCommand}${buildCommand}`,
+			sourceCommand,
+			buildCommand,
 			metadata: {
 				sourceType: application.sourceType,
 				buildType: application.buildType,

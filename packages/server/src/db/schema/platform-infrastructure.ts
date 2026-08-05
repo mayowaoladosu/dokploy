@@ -149,6 +149,20 @@ export type PlatformNodeTaint = {
 export type PlatformBuildPoolMetadata = {
 	registryCredentialHelperConfigured?: boolean;
 	runtimeImagePullIdentityConfigured?: boolean;
+	supplyChain?: {
+		verifierImage: string;
+		signingKeyRef: string;
+		maxCriticalVulnerabilities: number;
+		maxHighVulnerabilities: number;
+		ignoreUnfixed: boolean;
+		artifactStorageClassName: string;
+		publisherServiceAccountAnnotations?: Record<string, string>;
+		publisherPodLabels?: Record<string, string>;
+		publisherPodAnnotations?: Record<string, string>;
+		serviceAccountAnnotations?: Record<string, string>;
+		podLabels?: Record<string, string>;
+		podAnnotations?: Record<string, string>;
+	};
 };
 
 export const platformNodePools = pgTable(

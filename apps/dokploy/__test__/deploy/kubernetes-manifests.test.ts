@@ -1,7 +1,9 @@
 import {
 	buildKubernetesBuildManifests,
+	buildKubernetesPublisherManifests,
 	buildKubernetesRoutingManifests,
 	buildKubernetesRuntimeManifests,
+	buildKubernetesSupplyChainManifests,
 } from "@dokploy/server/services/kubernetes/manifests";
 import { describe, expect, it } from "vitest";
 
@@ -58,6 +60,19 @@ describe("Kubernetes runtime manifests", () => {
 		expect(findManifest(manifests, "PodDisruptionBudget").spec).toMatchObject({
 			minAvailable: 1,
 		});
+		const deploymentIndex = manifests.findIndex(
+			(manifest) => manifest.kind === "Deployment",
+		);
+		expect(
+			manifests
+				.map((manifest, index) => ({ manifest, index }))
+				.filter(({ manifest }) => manifest.kind === "NetworkPolicy")
+				.every(({ index }) => index < deploymentIndex),
+		).toBe(true);
+		const ingress = manifests.find(
+			(manifest: any) => manifest.metadata?.name === "allow-runtime-ingress",
+		) as any;
+		expect(JSON.stringify(ingress)).toContain("gateway-system");
 	});
 
 	it("uses immutable images, secret-backed env, and restricted pod security", () => {
@@ -99,14 +114,18 @@ describe("Kubernetes build manifests", () => {
 		namespace: "vlyv-build-abc",
 		appName: "example-app",
 		builderImage: "registry.example.com/platform/builder@sha256:def",
-		command: "set -e; echo build",
+		sourceCommand: "set -e; echo clone",
+		buildCommand: "set -e; echo build",
+		sourceRunsInBuilder: false,
 		localImageRef: "example-app:latest",
-		runtimeImageRef: "registry.example.com/apps/example:latest",
 		runtimeClassName: "gvisor",
 		activeDeadlineSeconds: 900,
-		secrets: {
-			VLYV_REGISTRY_TEST_USERNAME: "robot",
-			VLYV_REGISTRY_TEST_PASSWORD: "super-secret",
+		artifactStorageClassName: "encrypted-ephemeral",
+		sourceSecrets: {
+			VLYV_GITHUB_TOKEN: "source-secret",
+		},
+		buildSecrets: {
+			NODE_ENV: "production",
 		},
 		resources: {
 			memoryLimitBytes: 4_294_967_296,
@@ -119,7 +138,10 @@ describe("Kubernetes build manifests", () => {
 	it("creates a one-shot restricted job with artifact termination metadata", () => {
 		const job = findManifest(manifests, "Job");
 		const podSpec = job.spec.template.spec;
-		const builder = podSpec.containers[0];
+		const sourceFetcher = podSpec.initContainers[0];
+		const builder = podSpec.containers.find(
+			(container: any) => container.name === "builder",
+		);
 		expect(job.spec).toMatchObject({
 			backoffLimit: 0,
 			activeDeadlineSeconds: 900,
@@ -130,19 +152,205 @@ describe("Kubernetes build manifests", () => {
 			runtimeClassName: "gvisor",
 		});
 		expect(builder.image).toContain("@sha256:def");
-		expect(builder.args[0]).toContain("/dev/termination-log");
 		expect(builder.args[0]).toContain("dockerd-rootless.sh");
-		expect(builder.args[0]).not.toContain("super-secret");
-		expect(builder.envFrom[0].secretRef.name).toContain("credentials");
-		expect(findManifest(manifests, "Secret").data).toMatchObject({
-			VLYV_REGISTRY_TEST_PASSWORD:
-				Buffer.from("super-secret").toString("base64"),
+		expect(builder.args[0]).toContain("docker save");
+		expect(builder.args[0]).not.toContain("source-secret");
+		expect(builder.args[0]).not.toContain("registry-secret");
+		expect(sourceFetcher.envFrom[0].secretRef.name).toContain("source");
+		expect(builder.envFrom[0].secretRef.name).toContain("environment");
+		expect(podSpec.containers.map((container: any) => container.name)).toEqual([
+			"builder",
+		]);
+		expect(
+			podSpec.volumes.find((volume: any) => volume.name === "artifacts"),
+		).toHaveProperty("persistentVolumeClaim.claimName");
+		expect(findManifest(manifests, "PersistentVolumeClaim").spec).toMatchObject(
+			{
+				storageClassName: "encrypted-ephemeral",
+				accessModes: ["ReadWriteOnce"],
+			},
+		);
+		const secrets = manifests.filter((manifest) => manifest.kind === "Secret");
+		const buildSecret = secrets.find((manifest) =>
+			manifest.metadata?.name?.includes("environment"),
+		) as any;
+		expect(buildSecret.data).toEqual({
+			NODE_ENV: Buffer.from("production").toString("base64"),
 		});
 		expect(builder.securityContext.capabilities.drop).toEqual(["ALL"]);
 		expect(findManifest(manifests, "ResourceQuota").spec.hard).toHaveProperty(
 			"count/jobs.batch",
-			"1",
+			"2",
 		);
+		const jobIndex = manifests.findIndex((manifest) => manifest.kind === "Job");
+		expect(
+			manifests
+				.map((manifest, index) => ({ manifest, index }))
+				.filter(({ manifest }) => manifest.kind === "NetworkPolicy")
+				.every(({ index }) => index < jobIndex),
+		).toBe(true);
+	});
+});
+
+describe("Kubernetes publisher manifests", () => {
+	const manifests = buildKubernetesPublisherManifests({
+		applicationId: "application-1",
+		organizationId: "organization-1",
+		deploymentId: "deployment-1",
+		namespace: "vlyv-build-abc",
+		publisherImage: `registry.example.com/platform/publisher@sha256:${"a".repeat(64)}`,
+		runtimeImageRef: "registry.example.com/apps/example:deployment-1",
+		runtimeClassName: "gvisor",
+		activeDeadlineSeconds: 900,
+		registrySecrets: {
+			VLYV_PLATFORM_REGISTRY_HOST: "registry.example.com",
+			VLYV_PLATFORM_REGISTRY_USERNAME: "robot",
+			VLYV_PLATFORM_REGISTRY_PASSWORD: "registry-secret",
+		},
+		resources: {
+			memoryLimitBytes: 2_147_483_648,
+			memoryRequestBytes: 536_870_912,
+			cpuLimitNano: 2_000_000_000,
+			cpuRequestNano: 500_000_000,
+		},
+	});
+
+	it("pushes the archive in a trusted Job without source or build secrets", () => {
+		const job = findManifest(manifests, "Job");
+		const publisher = job.spec.template.spec.containers[0];
+		expect(publisher.args[0]).toContain("skopeo copy");
+		expect(publisher.args[0]).toContain("/dev/termination-log");
+		expect(publisher.args[0]).not.toContain("registry-secret");
+		expect(publisher.envFrom[0].secretRef.name).toContain("registry");
+		expect(job.spec.template.spec.volumes[0]).toHaveProperty(
+			"persistentVolumeClaim.claimName",
+		);
+		expect(
+			manifests.some((manifest) => manifest.kind === "ServiceAccount"),
+		).toBe(true);
+		expect(() =>
+			buildKubernetesPublisherManifests({
+				...({} as any),
+				publisherImage: "registry.example.com/publisher:latest",
+			}),
+		).toThrow("immutable digest");
+	});
+});
+
+describe("Kubernetes supply-chain manifests", () => {
+	const manifests = buildKubernetesSupplyChainManifests({
+		applicationId: "application-1",
+		organizationId: "organization-1",
+		deploymentId: "deployment-1",
+		namespace: "vlyv-build-abc",
+		verifierImage: `registry.example.com/platform/verifier@sha256:${"a".repeat(64)}`,
+		imageRef: `registry.example.com/apps/example@sha256:${"b".repeat(64)}`,
+		signingKeyRef: "awskms:///alias/vlyv-image-signing",
+		maxCriticalVulnerabilities: 0,
+		maxHighVulnerabilities: 3,
+		ignoreUnfixed: true,
+		runtimeClassName: "gvisor",
+		serviceAccountAnnotations: {
+			"eks.amazonaws.com/role-arn": "arn:aws:iam::123456789012:role/signer",
+		},
+		activeDeadlineSeconds: 600,
+		registrySecrets: {
+			VLYV_PLATFORM_REGISTRY_HOST: "registry.example.com",
+			VLYV_PLATFORM_REGISTRY_USERNAME: "robot",
+			VLYV_PLATFORM_REGISTRY_PASSWORD: "super-secret",
+		},
+		resources: {
+			memoryLimitBytes: 2_147_483_648,
+			memoryRequestBytes: 536_870_912,
+			cpuLimitNano: 2_000_000_000,
+			cpuRequestNano: 500_000_000,
+		},
+	});
+
+	it("separates trusted verification from the untrusted source workspace", () => {
+		const job = findManifest(manifests, "Job");
+		const podSpec = job.spec.template.spec;
+		const verifier = podSpec.containers[0];
+		expect(verifier.image).toContain("@sha256:");
+		expect(verifier.args[0]).toContain("syft");
+		expect(verifier.args[0]).toContain("trivy sbom");
+		expect(verifier.args[0]).toContain("cosign sign");
+		expect(verifier.args[0]).toContain("cosign attest");
+		expect(verifier.args[0]).toContain("cosign verify");
+		expect(verifier.args[0]).not.toContain("super-secret");
+		expect(verifier.volumeMounts.map((entry: any) => entry.name)).not.toContain(
+			"workspace",
+		);
+		expect(podSpec).toMatchObject({
+			automountServiceAccountToken: false,
+			runtimeClassName: "gvisor",
+		});
+		expect(verifier.securityContext).toMatchObject({
+			allowPrivilegeEscalation: false,
+			readOnlyRootFilesystem: true,
+			capabilities: { drop: ["ALL"] },
+		});
+	});
+
+	it("injects policy as values and registry credentials through a Secret", () => {
+		const job = findManifest(manifests, "Job");
+		const verifier = job.spec.template.spec.containers[0];
+		expect(verifier.env).toEqual(
+			expect.arrayContaining([
+				{ name: "VLYV_MAX_CRITICAL", value: "0" },
+				{ name: "VLYV_MAX_HIGH", value: "3" },
+				{ name: "VLYV_IGNORE_UNFIXED", value: "true" },
+			]),
+		);
+		expect(findManifest(manifests, "Secret").data).toMatchObject({
+			VLYV_PLATFORM_REGISTRY_PASSWORD:
+				Buffer.from("super-secret").toString("base64"),
+		});
+		expect(
+			findManifest(manifests, "ServiceAccount").metadata.annotations,
+		).toHaveProperty("eks.amazonaws.com/role-arn");
+		expect(findManifest(manifests, "Secret").data).toMatchObject({
+			VLYV_COSIGN_KEY_REF: Buffer.from(
+				"awskms:///alias/vlyv-image-signing",
+			).toString("base64"),
+		});
+		expect(
+			verifier.env.some((entry: any) => entry.name === "VLYV_COSIGN_KEY_REF"),
+		).toBe(false);
+	});
+	it("rejects mutable verifier images and image tags", () => {
+		const base = {
+			applicationId: "application-1",
+			organizationId: "organization-1",
+			deploymentId: "deployment-1",
+			namespace: "vlyv-build-abc",
+			verifierImage: `registry.example.com/verifier@sha256:${"a".repeat(64)}`,
+			imageRef: `registry.example.com/app@sha256:${"b".repeat(64)}`,
+			signingKeyRef: "awskms:///alias/key",
+			maxCriticalVulnerabilities: 0,
+			maxHighVulnerabilities: 0,
+			ignoreUnfixed: false,
+			activeDeadlineSeconds: 600,
+			registrySecrets: {},
+			resources: {
+				memoryLimitBytes: 1,
+				memoryRequestBytes: 1,
+				cpuLimitNano: 1,
+				cpuRequestNano: 1,
+			},
+		};
+		expect(() =>
+			buildKubernetesSupplyChainManifests({
+				...base,
+				verifierImage: "registry.example.com/verifier:latest",
+			}),
+		).toThrow("immutable digest");
+		expect(() =>
+			buildKubernetesSupplyChainManifests({
+				...base,
+				imageRef: "registry.example.com/app:latest",
+			}),
+		).toThrow("immutable digest");
 	});
 });
 

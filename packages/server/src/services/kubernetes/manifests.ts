@@ -63,16 +63,59 @@ export type KubernetesBuildJobSpec = {
 	namespace: string;
 	appName: string;
 	builderImage: string;
-	command: string;
+	sourceCommand: string;
+	buildCommand: string;
+	sourceRunsInBuilder: boolean;
 	localImageRef: string;
-	runtimeImageRef: string;
 	runtimeClassName?: string | null;
 	nodeSelector?: Record<string, string>;
 	tolerations?: KubernetesPlacementSpec["tolerations"];
 	activeDeadlineSeconds: number;
 	resources: KubernetesResourceSpec;
-	secrets: Record<string, string>;
+	artifactStorageClassName: string;
+	sourceSecrets: Record<string, string>;
+	buildSecrets: Record<string, string>;
 	allowedEgressCidrs?: string[];
+};
+
+export type KubernetesPublisherJobSpec = {
+	applicationId: string;
+	organizationId: string;
+	deploymentId: string;
+	namespace: string;
+	publisherImage: string;
+	runtimeImageRef: string;
+	runtimeClassName?: string | null;
+	nodeSelector?: Record<string, string>;
+	tolerations?: KubernetesPlacementSpec["tolerations"];
+	serviceAccountAnnotations?: Record<string, string>;
+	podLabels?: Record<string, string>;
+	podAnnotations?: Record<string, string>;
+	activeDeadlineSeconds: number;
+	resources: KubernetesResourceSpec;
+	registrySecrets: Record<string, string>;
+};
+
+export type KubernetesSupplyChainJobSpec = {
+	applicationId: string;
+	organizationId: string;
+	deploymentId: string;
+	namespace: string;
+	verifierImage: string;
+	imageRef: string;
+	signingKeyRef: string;
+	maxCriticalVulnerabilities: number;
+	maxHighVulnerabilities: number;
+	ignoreUnfixed: boolean;
+	runtimeClassName?: string | null;
+	nodeSelector?: Record<string, string>;
+	tolerations?: KubernetesPlacementSpec["tolerations"];
+	serviceAccountAnnotations?: Record<string, string>;
+	podLabels?: Record<string, string>;
+	podAnnotations?: Record<string, string>;
+	activeDeadlineSeconds: number;
+	resources: KubernetesResourceSpec;
+	registrySecrets: Record<string, string>;
 };
 
 const k8sName = (value: string, maxLength = 63) => {
@@ -552,6 +595,40 @@ export const buildKubernetesRuntimeManifests = (
 			automountServiceAccountToken: false,
 		},
 		{
+			apiVersion: "networking.k8s.io/v1",
+			kind: "NetworkPolicy",
+			metadata: { name: "default-deny-ingress", namespace: spec.namespace },
+			spec: { podSelector: {}, policyTypes: ["Ingress"], ingress: [] },
+		},
+		{
+			apiVersion: "networking.k8s.io/v1",
+			kind: "NetworkPolicy",
+			metadata: { name: "allow-runtime-ingress", namespace: spec.namespace },
+			spec: {
+				podSelector: { matchLabels: labels },
+				policyTypes: ["Ingress"],
+				ingress: [
+					{ from: [{ podSelector: { matchLabels: labels } }] },
+					...(spec.gateway
+						? [
+								{
+									from: [
+										{
+											namespaceSelector: {
+												matchLabels: {
+													"kubernetes.io/metadata.name": spec.gateway.namespace,
+												},
+											},
+										},
+									],
+								},
+							]
+						: []),
+				],
+			},
+		},
+		...buildEgressPolicyManifests(spec.namespace, spec.allowedEgressCidrs),
+		{
 			apiVersion: "apps/v1",
 			kind: "Deployment",
 			metadata: { name, namespace: spec.namespace, labels },
@@ -654,40 +731,6 @@ export const buildKubernetesRuntimeManifests = (
 			maxReplicas,
 			targetCpuUtilization: spec.targetCpuUtilization,
 		}),
-		{
-			apiVersion: "networking.k8s.io/v1",
-			kind: "NetworkPolicy",
-			metadata: { name: "default-deny-ingress", namespace: spec.namespace },
-			spec: { podSelector: {}, policyTypes: ["Ingress"], ingress: [] },
-		},
-		{
-			apiVersion: "networking.k8s.io/v1",
-			kind: "NetworkPolicy",
-			metadata: { name: "allow-runtime-ingress", namespace: spec.namespace },
-			spec: {
-				podSelector: { matchLabels: labels },
-				policyTypes: ["Ingress"],
-				ingress: [
-					{ from: [{ podSelector: { matchLabels: labels } }] },
-					...(spec.gateway
-						? [
-								{
-									from: [
-										{
-											namespaceSelector: {
-												matchLabels: {
-													"kubernetes.io/metadata.name": spec.gateway.namespace,
-												},
-											},
-										},
-									],
-								},
-							]
-						: []),
-				],
-			},
-		},
-		...buildEgressPolicyManifests(spec.namespace, spec.allowedEgressCidrs),
 	];
 
 	if (spec.gateway && spec.domains.length > 0) {
@@ -712,9 +755,11 @@ export const buildKubernetesBuildManifests = (
 ): KubernetesManifest[] => {
 	const name = k8sName(`build-${spec.deploymentId}`);
 	const labels = labelsFor(spec.applicationId, spec.organizationId, "build");
-	const secretName = `${name}-credentials`;
+	const artifactClaimName = `${name}-artifacts`;
+	const sourceSecretName = `${name}-source`;
+	const buildSecretName = `${name}-environment`;
 	const localImage = quote([spec.localImageRef]);
-	const artifactScript = `
+	const builderScript = `
 set -e
 export HOME=/home/builder
 export XDG_RUNTIME_DIR=/tmp/docker-runtime
@@ -727,13 +772,13 @@ for attempt in $(seq 1 60); do
 	if [ "$attempt" -eq 60 ]; then cat /tmp/dockerd.log; exit 1; fi
 	sleep 1
 done
-${spec.command}
+${spec.sourceRunsInBuilder ? spec.sourceCommand : ""}
+${spec.buildCommand}
 image_id=$(docker image inspect --format '{{.Id}}' ${localImage})
-repo_digests=$(docker image inspect --format '{{json .RepoDigests}}' ${localImage})
 image_size=$(docker image inspect --format '{{.Size}}' ${localImage})
-artifact_file=$(mktemp /tmp/vlyv-artifact.XXXXXX)
-printf '{"imageId":"%s","repoDigests":%s,"imageSizeBytes":%s}' "$image_id" "$repo_digests" "$image_size" > "$artifact_file"
-cat "$artifact_file" > /dev/termination-log
+docker save --output /artifacts/image.tar ${localImage}
+printf '{"imageId":"%s","imageSizeBytes":%s}' "$image_id" "$image_size" >/artifacts/image.json
+cat /artifacts/image.json >/dev/termination-log
 `;
 	return [
 		{
@@ -744,6 +789,8 @@ cat "$artifact_file" > /dev/termination-log
 				labels: {
 					"app.kubernetes.io/managed-by": "vlyv",
 					"pod-security.kubernetes.io/enforce": "restricted",
+					"pod-security.kubernetes.io/audit": "restricted",
+					"pod-security.kubernetes.io/warn": "restricted",
 				},
 			},
 		},
@@ -772,7 +819,11 @@ cat "$artifact_file" > /dev/termination-log
 							}
 						: {}),
 					pods: "2",
-					"count/jobs.batch": "1",
+					"count/jobs.batch": "2",
+					persistentvolumeclaims: "1",
+					"requests.storage": bytesToMi(
+						spec.resources.ephemeralStorageLimitBytes || 20 * 1024 ** 3,
+					),
 				},
 			},
 		},
@@ -782,12 +833,36 @@ cat "$artifact_file" > /dev/termination-log
 			metadata: { name: "default-deny-ingress", namespace: spec.namespace },
 			spec: { podSelector: {}, policyTypes: ["Ingress"], ingress: [] },
 		},
+		...buildEgressPolicyManifests(spec.namespace, spec.allowedEgressCidrs),
+		{
+			apiVersion: "v1",
+			kind: "PersistentVolumeClaim",
+			metadata: { name: artifactClaimName, namespace: spec.namespace, labels },
+			spec: {
+				accessModes: ["ReadWriteOnce"],
+				storageClassName: spec.artifactStorageClassName,
+				resources: {
+					requests: {
+						storage: bytesToMi(
+							spec.resources.ephemeralStorageLimitBytes || 20 * 1024 ** 3,
+						),
+					},
+				},
+			},
+		},
 		{
 			apiVersion: "v1",
 			kind: "Secret",
-			metadata: { name: secretName, namespace: spec.namespace, labels },
+			metadata: { name: sourceSecretName, namespace: spec.namespace, labels },
 			type: "Opaque",
-			data: secretData(spec.secrets),
+			data: secretData(spec.sourceSecrets),
+		},
+		{
+			apiVersion: "v1",
+			kind: "Secret",
+			metadata: { name: buildSecretName, namespace: spec.namespace, labels },
+			type: "Opaque",
+			data: secretData(spec.buildSecrets),
 		},
 		{
 			apiVersion: "batch/v1",
@@ -809,18 +884,52 @@ cat "$artifact_file" > /dev/termination-log
 							runAsNonRoot: true,
 							seccompProfile: { type: "RuntimeDefault" },
 						},
+						initContainers:
+							spec.sourceCommand && !spec.sourceRunsInBuilder
+								? [
+										{
+											name: "source-fetcher",
+											image: spec.builderImage,
+											command: ["/bin/sh", "-lc"],
+											args: [spec.sourceCommand],
+											envFrom:
+												Object.keys(spec.sourceSecrets).length > 0
+													? [{ secretRef: { name: sourceSecretName } }]
+													: undefined,
+											resources: workloadResources(spec.resources),
+											securityContext: {
+												allowPrivilegeEscalation: false,
+												capabilities: { drop: ["ALL"] },
+												readOnlyRootFilesystem: true,
+											},
+											volumeMounts: [
+												{ name: "workspace", mountPath: "/etc/dokploy" },
+												{ name: "tmp", mountPath: "/tmp" },
+												{ name: "source-home", mountPath: "/home/source" },
+											],
+											env: [{ name: "HOME", value: "/home/source" }],
+										},
+									]
+								: undefined,
 						containers: [
 							{
 								name: "builder",
 								image: spec.builderImage,
 								command: ["/bin/sh", "-lc"],
-								args: [artifactScript],
+								args: [builderScript],
 								env: [
 									{ name: "DOCKER_BUILDKIT", value: "1" },
 									{ name: "VLYV_PREINSTALLED_RAILPACK", value: "true" },
-									{ name: "VLYV_RUNTIME_IMAGE", value: spec.runtimeImageRef },
 								],
-								envFrom: [{ secretRef: { name: secretName } }],
+								envFrom: [
+									...(Object.keys(spec.buildSecrets).length > 0
+										? [{ secretRef: { name: buildSecretName } }]
+										: []),
+									...(spec.sourceRunsInBuilder &&
+									Object.keys(spec.sourceSecrets).length > 0
+										? [{ secretRef: { name: sourceSecretName } }]
+										: []),
+								],
 								resources: workloadResources(spec.resources),
 								securityContext: {
 									allowPrivilegeEscalation: false,
@@ -833,6 +942,7 @@ cat "$artifact_file" > /dev/termination-log
 									{ name: "workspace", mountPath: "/etc/dokploy" },
 									{ name: "tmp", mountPath: "/tmp" },
 									{ name: "home", mountPath: "/home/builder" },
+									{ name: "artifacts", mountPath: "/artifacts" },
 								],
 							},
 						],
@@ -847,12 +957,288 @@ cat "$artifact_file" > /dev/termination-log
 							},
 							{ name: "tmp", emptyDir: { sizeLimit: "2Gi" } },
 							{ name: "home", emptyDir: { sizeLimit: "2Gi" } },
+							{ name: "source-home", emptyDir: { sizeLimit: "512Mi" } },
+							{
+								name: "artifacts",
+								persistentVolumeClaim: {
+									claimName: artifactClaimName,
+								},
+							},
 						],
 					},
 				},
 			},
 		},
-		...buildEgressPolicyManifests(spec.namespace, spec.allowedEgressCidrs),
+	];
+};
+
+export const buildKubernetesPublisherManifests = (
+	spec: KubernetesPublisherJobSpec,
+): KubernetesManifest[] => {
+	if (!/^[^\s@]+@sha256:[a-f0-9]{64}$/.test(spec.publisherImage)) {
+		throw new Error("Publisher image must use an immutable digest");
+	}
+	const buildName = k8sName(`build-${spec.deploymentId}`);
+	const name = k8sName(`publish-${spec.deploymentId}`);
+	const artifactClaimName = `${buildName}-artifacts`;
+	const serviceAccountName = `${name}-identity`;
+	const secretName = `${name}-registry`;
+	const labels = labelsFor(
+		spec.applicationId,
+		spec.organizationId,
+		"publisher",
+	);
+	const publisherScript = `
+set -eu
+export HOME=/home/publisher
+mkdir -p "$HOME"
+for tool in skopeo jq; do
+	if ! command -v "$tool" >/dev/null 2>&1; then
+		echo "Required publisher tool is unavailable: $tool"
+		exit 1
+	fi
+	if ! "$tool" --version >/dev/null 2>&1; then
+		echo "Publisher tool failed its integrity check: $tool"
+		exit 1
+	fi
+done
+if [ -n "\${VLYV_PLATFORM_REGISTRY_USERNAME:-}" ] && [ -n "\${VLYV_PLATFORM_REGISTRY_PASSWORD:-}" ]; then
+	printf %s "$VLYV_PLATFORM_REGISTRY_PASSWORD" | skopeo login "$VLYV_PLATFORM_REGISTRY_HOST" -u "$VLYV_PLATFORM_REGISTRY_USERNAME" --password-stdin
+fi
+skopeo copy --digestfile /artifacts/digest docker-archive:/artifacts/image.tar "docker://$VLYV_RUNTIME_IMAGE"
+digest=$(cat /artifacts/digest)
+image_id=$(jq -r '.imageId' /artifacts/image.json)
+image_size=$(jq -r '.imageSizeBytes' /artifacts/image.json)
+repository="\${VLYV_RUNTIME_IMAGE%:*}"
+printf '{"imageId":"%s","repoDigests":["%s@%s"],"imageSizeBytes":%s}' "$image_id" "$repository" "$digest" "$image_size" >/dev/termination-log
+`;
+	return [
+		{
+			apiVersion: "v1",
+			kind: "Secret",
+			metadata: { name: secretName, namespace: spec.namespace, labels },
+			type: "Opaque",
+			data: secretData(spec.registrySecrets),
+		},
+		{
+			apiVersion: "v1",
+			kind: "ServiceAccount",
+			metadata: {
+				name: serviceAccountName,
+				namespace: spec.namespace,
+				labels,
+				annotations: spec.serviceAccountAnnotations,
+			},
+			automountServiceAccountToken: false,
+		},
+		{
+			apiVersion: "batch/v1",
+			kind: "Job",
+			metadata: { name, namespace: spec.namespace, labels },
+			spec: {
+				backoffLimit: 0,
+				activeDeadlineSeconds: spec.activeDeadlineSeconds,
+				ttlSecondsAfterFinished: 900,
+				template: {
+					metadata: {
+						labels: { ...spec.podLabels, ...labels },
+						annotations: spec.podAnnotations,
+					},
+					spec: {
+						restartPolicy: "Never",
+						serviceAccountName,
+						automountServiceAccountToken: false,
+						runtimeClassName: spec.runtimeClassName || undefined,
+						nodeSelector: spec.nodeSelector,
+						tolerations: spec.tolerations,
+						securityContext: {
+							runAsNonRoot: true,
+							seccompProfile: { type: "RuntimeDefault" },
+						},
+						containers: [
+							{
+								name: "publisher",
+								image: spec.publisherImage,
+								command: ["/bin/sh", "-lc"],
+								args: [publisherScript],
+								env: [
+									{ name: "VLYV_RUNTIME_IMAGE", value: spec.runtimeImageRef },
+								],
+								envFrom: [{ secretRef: { name: secretName } }],
+								resources: workloadResources(spec.resources),
+								securityContext: {
+									allowPrivilegeEscalation: false,
+									capabilities: { drop: ["ALL"] },
+									readOnlyRootFilesystem: true,
+								},
+								terminationMessagePath: "/dev/termination-log",
+								terminationMessagePolicy: "File",
+								volumeMounts: [
+									{ name: "artifacts", mountPath: "/artifacts" },
+									{ name: "home", mountPath: "/home/publisher" },
+								],
+							},
+						],
+						volumes: [
+							{
+								name: "artifacts",
+								persistentVolumeClaim: { claimName: artifactClaimName },
+							},
+							{ name: "home", emptyDir: { sizeLimit: "512Mi" } },
+						],
+					},
+				},
+			},
+		},
+	];
+};
+
+export const buildKubernetesSupplyChainManifests = (
+	spec: KubernetesSupplyChainJobSpec,
+): KubernetesManifest[] => {
+	if (!/^[^\s@]+@sha256:[a-f0-9]{64}$/.test(spec.verifierImage)) {
+		throw new Error("Verifier image must use an immutable digest");
+	}
+	if (!/^[^\s@]+@sha256:[a-f0-9]{64}$/.test(spec.imageRef)) {
+		throw new Error("Supply-chain image must use an immutable digest");
+	}
+	const name = k8sName(`verify-${spec.deploymentId}`);
+	const serviceAccountName = `${name}-identity`;
+	const secretName = `${name}-registry`;
+	const labels = labelsFor(
+		spec.applicationId,
+		spec.organizationId,
+		"supply-chain",
+	);
+	const verifierScript = `
+set -eu
+export HOME=/home/verifier
+mkdir -p "$HOME"
+for tool in docker syft trivy cosign jq sha256sum cut; do
+	if ! command -v "$tool" >/dev/null 2>&1; then
+		echo "Required supply-chain tool is unavailable: $tool"
+		exit 1
+	fi
+	if ! "$tool" --version >/dev/null 2>&1; then
+		echo "Supply-chain tool failed its integrity check: $tool"
+		exit 1
+	fi
+done
+if [ -n "\${VLYV_PLATFORM_REGISTRY_USERNAME:-}" ] && [ -n "\${VLYV_PLATFORM_REGISTRY_PASSWORD:-}" ]; then
+	printf %s "$VLYV_PLATFORM_REGISTRY_PASSWORD" | docker login "$VLYV_PLATFORM_REGISTRY_HOST" -u "$VLYV_PLATFORM_REGISTRY_USERNAME" --password-stdin
+fi
+syft "$VLYV_IMAGE_REF" --output cyclonedx-json=/tmp/vlyv-sbom.json
+trivy_args=""
+if [ "$VLYV_IGNORE_UNFIXED" = "true" ]; then trivy_args="--ignore-unfixed"; fi
+trivy sbom $trivy_args --format json --output /tmp/vlyv-vulnerabilities.json /tmp/vlyv-sbom.json
+critical_count=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' /tmp/vlyv-vulnerabilities.json)
+high_count=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' /tmp/vlyv-vulnerabilities.json)
+if [ "$critical_count" -gt "$VLYV_MAX_CRITICAL" ]; then
+	echo "Image rejected by critical vulnerability policy"
+	exit 42
+fi
+if [ "$high_count" -gt "$VLYV_MAX_HIGH" ]; then
+	echo "Image rejected by high vulnerability policy"
+	exit 42
+fi
+cosign sign --yes --tlog-upload=false --key "$VLYV_COSIGN_KEY_REF" "$VLYV_IMAGE_REF"
+cosign attest --yes --tlog-upload=false --key "$VLYV_COSIGN_KEY_REF" --type cyclonedx --predicate /tmp/vlyv-sbom.json "$VLYV_IMAGE_REF"
+cosign attest --yes --tlog-upload=false --key "$VLYV_COSIGN_KEY_REF" --type vuln --predicate /tmp/vlyv-vulnerabilities.json "$VLYV_IMAGE_REF"
+cosign verify --insecure-ignore-tlog --key "$VLYV_COSIGN_KEY_REF" "$VLYV_IMAGE_REF" >/tmp/vlyv-signature-verification.json
+sbom_digest=$(sha256sum /tmp/vlyv-sbom.json | cut -d ' ' -f 1)
+vulnerability_digest=$(sha256sum /tmp/vlyv-vulnerabilities.json | cut -d ' ' -f 1)
+printf '{"sbomDigest":"sha256:%s","vulnerabilityReportDigest":"sha256:%s","criticalVulnerabilities":%s,"highVulnerabilities":%s,"signed":true,"signatureVerified":true}' "$sbom_digest" "$vulnerability_digest" "$critical_count" "$high_count" >/dev/termination-log
+`;
+	return [
+		{
+			apiVersion: "v1",
+			kind: "Secret",
+			metadata: { name: secretName, namespace: spec.namespace, labels },
+			type: "Opaque",
+			data: secretData({
+				...spec.registrySecrets,
+				VLYV_COSIGN_KEY_REF: spec.signingKeyRef,
+			}),
+		},
+		{
+			apiVersion: "v1",
+			kind: "ServiceAccount",
+			metadata: {
+				name: serviceAccountName,
+				namespace: spec.namespace,
+				labels,
+				annotations: spec.serviceAccountAnnotations,
+			},
+			automountServiceAccountToken: false,
+		},
+		{
+			apiVersion: "batch/v1",
+			kind: "Job",
+			metadata: { name, namespace: spec.namespace, labels },
+			spec: {
+				backoffLimit: 0,
+				activeDeadlineSeconds: spec.activeDeadlineSeconds,
+				ttlSecondsAfterFinished: 900,
+				template: {
+					metadata: {
+						labels: { ...spec.podLabels, ...labels },
+						annotations: spec.podAnnotations,
+					},
+					spec: {
+						restartPolicy: "Never",
+						serviceAccountName,
+						automountServiceAccountToken: false,
+						runtimeClassName: spec.runtimeClassName || undefined,
+						nodeSelector: spec.nodeSelector,
+						tolerations: spec.tolerations,
+						securityContext: {
+							runAsNonRoot: true,
+							seccompProfile: { type: "RuntimeDefault" },
+						},
+						containers: [
+							{
+								name: "verifier",
+								image: spec.verifierImage,
+								command: ["/bin/sh", "-lc"],
+								args: [verifierScript],
+								env: [
+									{ name: "VLYV_IMAGE_REF", value: spec.imageRef },
+									{
+										name: "VLYV_MAX_CRITICAL",
+										value: String(spec.maxCriticalVulnerabilities),
+									},
+									{
+										name: "VLYV_MAX_HIGH",
+										value: String(spec.maxHighVulnerabilities),
+									},
+									{
+										name: "VLYV_IGNORE_UNFIXED",
+										value: String(spec.ignoreUnfixed),
+									},
+								],
+								envFrom: [{ secretRef: { name: secretName } }],
+								resources: workloadResources(spec.resources),
+								securityContext: {
+									allowPrivilegeEscalation: false,
+									capabilities: { drop: ["ALL"] },
+									readOnlyRootFilesystem: true,
+								},
+								terminationMessagePath: "/dev/termination-log",
+								terminationMessagePolicy: "File",
+								volumeMounts: [
+									{ name: "tmp", mountPath: "/tmp" },
+									{ name: "home", mountPath: "/home/verifier" },
+								],
+							},
+						],
+						volumes: [
+							{ name: "tmp", emptyDir: { sizeLimit: "2Gi" } },
+							{ name: "home", emptyDir: { sizeLimit: "512Mi" } },
+						],
+					},
+				},
+			},
+		},
 	];
 };
 

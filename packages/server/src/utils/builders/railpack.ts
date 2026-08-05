@@ -17,14 +17,29 @@ const calculateSecretsHash = (envVariables: string[]): string => {
 	return hash.digest("hex");
 };
 
-export const getRailpackCommand = (application: ApplicationNested) => {
+export const getRailpackCommand = (
+	application: ApplicationNested,
+	options: { buildEnvironmentMode?: "inline" | "environment" } = {},
+) => {
 	const { env, appName, cleanCache } = application;
 	const buildAppDirectory = getBuildAppDirectory(application);
+	const rawEnvVariables = prepareEnvironmentVariables(
+		env,
+		application.environment.project.env,
+		application.environment.env,
+	);
 	const envVariables = prepareEnvironmentVariablesForShell(
 		env,
 		application.environment.project.env,
 		application.environment.env,
 	);
+	const environmentKeys = rawEnvVariables.map((entry) => {
+		const [key] = parseEnvironmentKeyValuePair(entry);
+		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+			throw new Error(`Invalid build environment variable name: ${key}`);
+		}
+		return key;
+	});
 
 	// Prepare command
 	const prepareArgs = [
@@ -36,12 +51,21 @@ export const getRailpackCommand = (application: ApplicationNested) => {
 		`${buildAppDirectory}/railpack-info.json`,
 	];
 
-	for (const env of envVariables) {
-		prepareArgs.push("--env", env);
+	for (const [index, environmentEntry] of envVariables.entries()) {
+		if (options.buildEnvironmentMode === "environment") {
+			const key = environmentKeys[index];
+			if (!key) continue;
+			prepareArgs.push("--env", `"${key}=\$${key}"`);
+		} else {
+			prepareArgs.push("--env", environmentEntry);
+		}
 	}
 
 	// Calculate secrets hash for layer invalidation
-	const secretsHash = calculateSecretsHash(envVariables);
+	const secretsHash =
+		options.buildEnvironmentMode === "environment"
+			? "$secret_hash"
+			: calculateSecretsHash(envVariables);
 
 	const cacheKey = cleanCache ? nanoid(10) : undefined;
 	// Build command.
@@ -64,19 +88,14 @@ export const getRailpackCommand = (application: ApplicationNested) => {
 		`type=docker,name=${appName}`,
 	];
 
-	// Add secrets properly formatted
-	// Use prepareEnvironmentVariables (without ForShell) to get raw values for parsing
-	const rawEnvVariables = prepareEnvironmentVariables(
-		env,
-		application.environment.project.env,
-		application.environment.env,
-	);
 	const exportEnvs = [];
 	for (const pair of rawEnvVariables) {
 		const [key, value] = parseEnvironmentKeyValuePair(pair);
 		if (key && value) {
 			buildArgs.push("--secret", `id=${key},env=${key}`);
-			exportEnvs.push(`export ${key}=${quote([value])}`);
+			if (options.buildEnvironmentMode !== "environment") {
+				exportEnvs.push(`export ${key}=${quote([value])}`);
+			}
 		}
 	}
 
@@ -103,6 +122,11 @@ echo "✅ Railpack prepare completed." ;
 echo "Building with Railpack frontend..." ;
 # Export environment variables for secrets
 ${exportEnvs.join("\n")}
+${
+	options.buildEnvironmentMode === "environment"
+		? `secret_hash=$(printf '%s\\0' ${environmentKeys.map((key) => `"$${key}"`).join(" ")} | sha256sum | cut -d ' ' -f 1)`
+		: ""
+}
 docker ${buildArgs.join(" ")} || {
 	echo "❌ Railpack build failed" ;
 	docker buildx rm ${builderName} || true

@@ -124,6 +124,8 @@ const createHarness = (health: RuntimeHealthResult = readyHealth) => {
 	const sourcePreparer: SourcePreparer = {
 		prepare: vi.fn(async () => ({
 			command: "railpack build",
+			sourceCommand: "git clone;",
+			buildCommand: "railpack build",
 			metadata: {
 				sourceType: "git" as const,
 				buildType: "railpack" as const,
@@ -206,7 +208,10 @@ describe("release orchestrator", () => {
 			workspace: "fresh",
 		});
 		expect(harness.buildExecutor.execute).toHaveBeenCalledWith(
-			expect.objectContaining({ command: "railpack build" }),
+			expect.objectContaining({
+				sourceCommand: "git clone;",
+				buildCommand: "railpack build",
+			}),
 		);
 		expect(harness.telemetrySink.record).toHaveBeenCalledWith(
 			expect.objectContaining({

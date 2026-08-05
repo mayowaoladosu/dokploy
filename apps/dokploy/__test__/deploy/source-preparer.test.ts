@@ -110,7 +110,7 @@ describe("application source preparer", () => {
 
 		expect(mocks.cloneGithubRepository).not.toHaveBeenCalled();
 		expect(mocks.generateApplyPatchesCommand).not.toHaveBeenCalled();
-		expect(result.command).toBe("set -e;build;");
+		expect(result.command).toBe("build;");
 	});
 
 	it("pulls Docker sources and passes platform registry policy to the builder", async () => {
@@ -134,6 +134,7 @@ describe("application source preparer", () => {
 			{
 				registryCredentialMode: "environment",
 				uploadApplicationRegistries: false,
+				buildEnvironmentMode: "inline",
 			},
 		);
 	});

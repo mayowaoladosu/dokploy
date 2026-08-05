@@ -32,6 +32,18 @@ const getSecretsHash = (command: string) => {
 };
 
 describe("getRailpackCommand", () => {
+	it("keeps managed build environment values out of the command", () => {
+		const command = getRailpackCommand(
+			createApplication({ env: "SECRET_VALUE=super-secret-value" }),
+			{ buildEnvironmentMode: "environment" },
+		);
+
+		expect(command).not.toContain("super-secret-value");
+		expect(command).toContain('--env "SECRET_VALUE=$SECRET_VALUE"');
+		expect(command).toContain("secrets-hash=$secret_hash");
+		expect(command).toContain('"$SECRET_VALUE"');
+	});
+
 	it("includes secrets-hash without clean cache", () => {
 		const command = getRailpackCommand(createApplication());
 
