@@ -1,0 +1,1 @@
+ALTER TABLE "deployment_metric" ADD COLUMN "health_check_checked_at" timestamp;

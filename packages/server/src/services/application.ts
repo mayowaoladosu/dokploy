@@ -56,6 +56,7 @@ import {
 	updatePreviewDeployment,
 } from "./preview-deployment";
 import { validUniqueServerAppName } from "./project";
+import { createReleaseOrchestrator } from "./release-orchestrator";
 export type Application = typeof applications.$inferSelect;
 
 export const createApplication = async (
@@ -236,15 +237,11 @@ export const deployApplication = async ({
 		}
 
 		command += await getBuildCommand(application);
-
-		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		if (serverId) {
-			await execAsyncRemote(serverId, commandWithLog);
-		} else {
-			await execAsync(commandWithLog);
-		}
-
-		await mechanizeDockerContainer(application);
+		await createReleaseOrchestrator().execute({
+			application,
+			deployment,
+			command,
+		});
 		await updateDeploymentStatus(deployment.deploymentId, "done");
 		await updateApplicationStatus(applicationId, "done");
 
@@ -329,13 +326,11 @@ export const rebuildApplication = async ({
 		let command = "set -e;";
 		// Check case for docker only
 		command += await getBuildCommand(application);
-		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		if (serverId) {
-			await execAsyncRemote(serverId, commandWithLog);
-		} else {
-			await execAsync(commandWithLog);
-		}
-		await mechanizeDockerContainer(application);
+		await createReleaseOrchestrator().execute({
+			application,
+			deployment,
+			command,
+		});
 		await updateDeploymentStatus(deployment.deploymentId, "done");
 		await updateApplicationStatus(applicationId, "done");
 

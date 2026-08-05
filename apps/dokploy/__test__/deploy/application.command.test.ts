@@ -8,6 +8,10 @@ import * as execProcess from "@dokploy/server/utils/process/execAsync";
 import * as gitProvider from "@dokploy/server/utils/providers/git";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const { releaseExecuteMock } = vi.hoisted(() => ({
+	releaseExecuteMock: vi.fn(),
+}));
+
 vi.mock("@dokploy/server/db", () => {
 	const createChainableMock = (): any => {
 		const chain = {
@@ -16,6 +20,7 @@ vi.mock("@dokploy/server/db", () => {
 			returning: vi.fn().mockResolvedValue([{}] as any),
 			from: vi.fn(() => chain),
 			innerJoin: vi.fn(() => chain),
+			// biome-ignore lint/suspicious/noThenProperty: Drizzle query builders are intentionally thenable.
 			then: (resolve: (v: any) => void) => {
 				resolve([]);
 			},
@@ -103,6 +108,10 @@ vi.mock("@dokploy/server/services/rollbacks", () => ({
 	createRollback: vi.fn(),
 }));
 
+vi.mock("@dokploy/server/services/release-orchestrator", () => ({
+	createReleaseOrchestrator: () => ({ execute: releaseExecuteMock }),
+}));
+
 import { db } from "@dokploy/server/db";
 import { cloneGitRepository } from "@dokploy/server/utils/providers/git";
 
@@ -176,6 +185,11 @@ describe("deployApplication - Command Generation Tests", () => {
 			hash: "abc123",
 		});
 		vi.mocked(deploymentService.updateDeployment).mockResolvedValue({} as any);
+		releaseExecuteMock.mockResolvedValue({
+			releaseId: "release-id",
+			artifact: {},
+			health: { passed: true },
+		});
 	});
 
 	it("should generate correct git clone command for astro example", async () => {
@@ -216,8 +230,10 @@ describe("deployApplication - Command Generation Tests", () => {
 			}),
 		);
 
-		expect(execProcess.execAsync).toHaveBeenCalledWith(
-			expect.stringContaining("nixpacks build"),
+		expect(releaseExecuteMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				command: expect.stringContaining("nixpacks build"),
+			}),
 		);
 	});
 
@@ -245,8 +261,10 @@ describe("deployApplication - Command Generation Tests", () => {
 			}),
 		);
 
-		expect(execProcess.execAsync).toHaveBeenCalledWith(
-			expect.stringContaining("railpack prepare"),
+		expect(releaseExecuteMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				command: expect.stringContaining("railpack prepare"),
+			}),
 		);
 	});
 
@@ -260,16 +278,16 @@ describe("deployApplication - Command Generation Tests", () => {
 			descriptionLog: "",
 		});
 
-		const execCalls = vi.mocked(execProcess.execAsync).mock.calls;
-		expect(execCalls.length).toBeGreaterThan(0);
+		const orchestratorInput = releaseExecuteMock.mock.calls[0]?.[0];
+		expect(orchestratorInput).toBeDefined();
 
-		const fullCommand = execCalls[0]?.[0];
+		const fullCommand = orchestratorInput.command;
 		expect(fullCommand).toContain("set -e");
 		expect(fullCommand).toContain("git clone");
 		expect(fullCommand).toContain("nixpacks build");
 	});
 
-	it("should include log redirection in command", async () => {
+	it("should pass the deployment log path to the release orchestrator", async () => {
 		const mockCommand = "nixpacks build";
 		vi.mocked(builders.getBuildCommand).mockResolvedValue(mockCommand);
 
@@ -279,9 +297,9 @@ describe("deployApplication - Command Generation Tests", () => {
 			descriptionLog: "",
 		});
 
-		const execCalls = vi.mocked(execProcess.execAsync).mock.calls;
-		const fullCommand = execCalls[0]?.[0];
-
-		expect(fullCommand).toContain(">> /tmp/test-deployment.log 2>&1");
+		const orchestratorInput = releaseExecuteMock.mock.calls[0]?.[0];
+		expect(orchestratorInput.deployment.logPath).toBe(
+			"/tmp/test-deployment.log",
+		);
 	});
 });

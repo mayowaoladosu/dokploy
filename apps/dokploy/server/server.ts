@@ -4,6 +4,7 @@ import {
 	createDefaultMiddlewares,
 	createDefaultServerTraefikConfig,
 	createDefaultTraefikConfig,
+	createReleaseStateMachine,
 	IS_CLOUD,
 	IS_HOSTED,
 	initCancelDeployments,
@@ -70,6 +71,31 @@ void app.prepare().then(async () => {
 			await initVolumeBackupsCronJobs();
 			await sendDokployRestartNotifications();
 		}
+		const configuredStaleReleaseTimeoutMs = Number.parseInt(
+			process.env.RELEASE_STALE_TIMEOUT_MS || "600000",
+			10,
+		);
+		const staleReleaseTimeoutMs =
+			Number.isFinite(configuredStaleReleaseTimeoutMs) &&
+			configuredStaleReleaseTimeoutMs > 0
+				? configuredStaleReleaseTimeoutMs
+				: 600_000;
+		const releaseStateMachine = createReleaseStateMachine();
+		const reconcileStaleReleases = async () => {
+			const reconciledReleaseCount = await releaseStateMachine.reconcileStale(
+				new Date(Date.now() - staleReleaseTimeoutMs),
+			);
+			if (reconciledReleaseCount > 0) {
+				console.log(`Reconciled ${reconciledReleaseCount} stale release(s)`);
+			}
+		};
+		await reconcileStaleReleases();
+		const releaseReconciliationTimer = setInterval(() => {
+			void reconcileStaleReleases().catch((error) =>
+				console.error("Failed to reconcile stale releases", error),
+			);
+		}, 60_000);
+		releaseReconciliationTimer.unref();
 		await initEnterpriseBackupCronJobs();
 
 		if (!IS_CLOUD) {

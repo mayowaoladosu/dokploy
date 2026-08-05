@@ -78,6 +78,7 @@ export const getBuildCommand = async (application: ApplicationNested) => {
 
 export const mechanizeDockerContainer = async (
 	application: ApplicationNested,
+	imageOverride?: string,
 ) => {
 	const {
 		appName,
@@ -124,7 +125,7 @@ export const mechanizeDockerContainer = async (
 		application.environment.env,
 	);
 
-	const image = await getImageName(application);
+	const image = imageOverride || (await getImageName(application));
 	const authConfig = await getAuthConfig(application);
 	const docker = await getRemoteDocker(application.serverId);
 
@@ -193,7 +194,7 @@ export const mechanizeDockerContainer = async (
 	}
 };
 
-const getImageName = async (application: ApplicationNested) => {
+export const getImageName = async (application: ApplicationNested) => {
 	const { appName, sourceType, dockerImage, registry, buildRegistry } =
 		application;
 	const imageName = `${appName}:latest`;
