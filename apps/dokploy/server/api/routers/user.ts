@@ -29,6 +29,10 @@ import {
 	user,
 } from "@dokploy/server/db/schema";
 import {
+	apiCredentialScopeInput,
+	createApiCredentialScope,
+} from "@dokploy/server/services/api-credential-scope";
+import {
 	hasPermission,
 	resolvePermissions,
 } from "@dokploy/server/services/permission";
@@ -54,6 +58,14 @@ const apiCreateApiKey = z.object({
 	metadata: z.object({
 		organizationId: z.string(),
 	}),
+	scope: apiCredentialScopeInput
+		.refine(
+			(scope) =>
+				scope.permissions.includes("api:*") ||
+				scope.permissions.includes("api:read"),
+			"Scoped API credentials require api:read permission",
+		)
+		.optional(),
 	// Rate limiting
 	rateLimitEnabled: z.boolean().optional(),
 	rateLimitTimeWindow: z.number().optional(),
@@ -513,6 +525,12 @@ export const userRouter = createTRPCRouter({
 		)
 		.mutation(async ({ input, ctx }) => {
 			try {
+				if (ctx.session.apiKeyId) {
+					throw new TRPCError({
+						code: "FORBIDDEN",
+						message: "API credentials cannot manage other API credentials",
+					});
+				}
 				const apiKeyToDelete = await db.query.apikey.findFirst({
 					where: eq(apikey.id, input.apiKeyId),
 				});
@@ -547,6 +565,12 @@ export const userRouter = createTRPCRouter({
 	createApiKey: protectedProcedure
 		.input(apiCreateApiKey)
 		.mutation(async ({ input, ctx }) => {
+			if (ctx.session.apiKeyId) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "API credentials cannot manage other API credentials",
+				});
+			}
 			// Verify user is a member of the organization specified in metadata
 			if (input.metadata?.organizationId) {
 				const userMember = await db.query.member.findFirst({
@@ -564,7 +588,20 @@ export const userRouter = createTRPCRouter({
 				}
 			}
 
-			const apiKey = await createApiKey(ctx.user.id, input);
+			const { scope, ...apiKeyInput } = input;
+			const apiKey = await createApiKey(ctx.user.id, apiKeyInput);
+			if (scope) {
+				try {
+					await createApiCredentialScope({
+						apiKeyId: apiKey.id,
+						organizationId: input.metadata.organizationId,
+						scope,
+					});
+				} catch (error) {
+					await db.delete(apikey).where(eq(apikey.id, apiKey.id));
+					throw error;
+				}
+			}
 			await audit(ctx, {
 				action: "create",
 				resourceType: "user",

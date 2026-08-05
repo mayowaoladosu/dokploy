@@ -16,7 +16,33 @@ interface CloneGitRepository {
 	serverId: string | null;
 	type?: "application" | "compose";
 	outputPathOverride?: string;
+	credentialMode?: "inline" | "environment";
 }
+
+export const getCustomGitCredentialEnvironmentNames = (
+	sshKeyId?: string | null,
+) => {
+	const suffix = (sshKeyId || "HTTP")
+		.replace(/[^a-zA-Z0-9]/g, "_")
+		.toUpperCase();
+	return {
+		username: `VLYV_CUSTOM_GIT_${suffix}_USERNAME`,
+		password: `VLYV_CUSTOM_GIT_${suffix}_PASSWORD`,
+		privateKey: `VLYV_CUSTOM_GIT_${suffix}_PRIVATE_KEY`,
+	};
+};
+
+const redactGitUrlCredentials = (repositoryUrl: string) => {
+	if (!isHttpOrHttps(repositoryUrl)) return repositoryUrl;
+	try {
+		const parsed = new URL(repositoryUrl);
+		parsed.username = "";
+		parsed.password = "";
+		return parsed.toString();
+	} catch {
+		return "configured repository";
+	}
+};
 
 export const cloneGitRepository = async ({
 	type = "application",
@@ -31,6 +57,7 @@ export const cloneGitRepository = async ({
 		enableSubmodules,
 		serverId,
 		outputPathOverride,
+		credentialMode = "inline",
 	} = entity;
 	const { SSH_PATH, COMPOSE_PATH, APPLICATIONS_PATH } = paths(!!serverId);
 
@@ -43,9 +70,14 @@ export const cloneGitRepository = async ({
 
 	if (customGitSSHKeyId) {
 		const sshKey = await findSSHKeyById(customGitSSHKeyId);
+		const names = getCustomGitCredentialEnvironmentNames(customGitSSHKeyId);
+		const keyValue =
+			credentialMode === "environment"
+				? `"$${names.privateKey}"`
+				: `"${sshKey.privateKey}"`;
 
 		command += `
-			echo "${sshKey.privateKey}" > ${temporalKeyPath}
+			printf %s ${keyValue} > ${temporalKeyPath}
 			chmod 600 ${temporalKeyPath};
 			`;
 	}
@@ -62,7 +94,8 @@ export const cloneGitRepository = async ({
 	}
 	command += `rm -rf ${outputPath};`;
 	command += `mkdir -p ${outputPath};`;
-	command += `echo ${quote([`Cloning Repo Custom ${customGitUrl} to ${outputPath}: ✅`])};`;
+	const redactedGitUrl = redactGitUrlCredentials(customGitUrl);
+	command += `echo ${quote([`Cloning Repo Custom ${redactedGitUrl} to ${outputPath}: ✅`])};`;
 
 	if (customGitSSHKeyId) {
 		await updateSSHKeyById({
@@ -73,14 +106,28 @@ export const cloneGitRepository = async ({
 
 	if (customGitSSHKeyId) {
 		const sshKey = await findSSHKeyById(customGitSSHKeyId);
+		const names = getCustomGitCredentialEnvironmentNames(customGitSSHKeyId);
 		const { port } = sanitizeRepoPathSSH(customGitUrl);
 		const gitSshCommand = `ssh -i /tmp/id_rsa${port ? ` -p ${port}` : ""} -o UserKnownHostsFile=${knownHostsPath} -o StrictHostKeyChecking=accept-new`;
-		command += `echo "${sshKey.privateKey}" > /tmp/id_rsa;`;
+		command +=
+			credentialMode === "environment"
+				? `printf %s "$${names.privateKey}" > /tmp/id_rsa;`
+				: `echo "${sshKey.privateKey}" > /tmp/id_rsa;`;
 		command += "chmod 600 /tmp/id_rsa;";
 		command += `export GIT_SSH_COMMAND="${gitSshCommand}";`;
 	}
-	command += `if ! git clone --branch ${quote([String(customGitBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} --progress ${quote([String(customGitUrl ?? "")])} ${quote([String(outputPath ?? "")])}; then
-				echo ${quote([`❌ [ERROR] Fail to clone the repository ${customGitUrl}`])};
+	let cloneUrl = customGitUrl;
+	let cloneUrlArgument = quote([String(customGitUrl ?? "")]);
+	if (credentialMode === "environment" && isHttpOrHttps(customGitUrl)) {
+		const parsed = new URL(customGitUrl);
+		if (parsed.username || parsed.password) {
+			const names = getCustomGitCredentialEnvironmentNames();
+			cloneUrl = `${parsed.protocol}//$${names.username}:$${names.password}@${parsed.host}${parsed.pathname}${parsed.search}${parsed.hash}`;
+			cloneUrlArgument = `"${cloneUrl}"`;
+		}
+	}
+	command += `if ! git clone --branch ${quote([String(customGitBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} --progress ${cloneUrlArgument} ${quote([String(outputPath ?? "")])}; then
+				echo ${quote([`❌ [ERROR] Fail to clone the repository ${redactedGitUrl}`])};
 				exit 1;
 			fi
 			`;

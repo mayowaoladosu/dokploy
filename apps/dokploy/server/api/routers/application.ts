@@ -24,6 +24,7 @@ import {
 	removePreviewDeployment,
 	removeService,
 	removeTraefikConfig,
+	resolvePlatformRuntimeController,
 	startService,
 	startServiceRemote,
 	stopService,
@@ -243,7 +244,12 @@ export const applicationRouter = createTRPCRouter({
 
 			try {
 				await updateApplicationStatus(input.applicationId, "idle");
-				await mechanizeDockerContainer(application);
+				const runtime = await resolvePlatformRuntimeController(
+					application.applicationId,
+					application.appName,
+				);
+				if (runtime) await runtime.restart();
+				else await mechanizeDockerContainer(application);
 				await updateApplicationStatus(input.applicationId, "done");
 				await audit(ctx, {
 					action: "reload",
@@ -277,6 +283,10 @@ export const applicationRouter = createTRPCRouter({
 					message: "You are not authorized to delete this application",
 				});
 			}
+			const platformRuntime = await resolvePlatformRuntimeController(
+				application.applicationId,
+				application.appName,
+			);
 
 			const previewDeploymentsList =
 				await findPreviewDeploymentsByApplicationId(input.applicationId);
@@ -285,6 +295,9 @@ export const applicationRouter = createTRPCRouter({
 				try {
 					await removePreviewDeployment(previewDeployment.previewDeploymentId);
 				} catch (_) {}
+			}
+			if (platformRuntime) {
+				await platformRuntime.delete();
 			}
 
 			const result = await db
@@ -306,10 +319,19 @@ export const applicationRouter = createTRPCRouter({
 						application.appName,
 						application.serverId,
 					),
-				async () =>
-					await removeTraefikConfig(application.appName, application.serverId),
-				async () =>
-					await removeService(application?.appName, application.serverId),
+				async () => {
+					if (!platformRuntime) {
+						await removeTraefikConfig(
+							application.appName,
+							application.serverId,
+						);
+					}
+				},
+				async () => {
+					if (!platformRuntime) {
+						await removeService(application?.appName, application.serverId);
+					}
+				},
 			];
 
 			for (const operation of cleanupOperations) {
@@ -334,7 +356,13 @@ export const applicationRouter = createTRPCRouter({
 				deployment: ["create"],
 			});
 			const service = await findApplicationById(input.applicationId);
-			if (service.serverId) {
+			const runtime = await resolvePlatformRuntimeController(
+				service.applicationId,
+				service.appName,
+			);
+			if (runtime) {
+				await runtime.stop();
+			} else if (service.serverId) {
 				await stopServiceRemote(service.serverId, service.appName);
 			} else {
 				await stopService(service.appName);
@@ -356,7 +384,13 @@ export const applicationRouter = createTRPCRouter({
 				deployment: ["create"],
 			});
 			const service = await findApplicationById(input.applicationId);
-			if (service.serverId) {
+			const runtime = await resolvePlatformRuntimeController(
+				service.applicationId,
+				service.appName,
+			);
+			if (runtime) {
+				await runtime.start();
+			} else if (service.serverId) {
 				await startServiceRemote(service.serverId, service.appName);
 			} else {
 				await startService(service.appName);

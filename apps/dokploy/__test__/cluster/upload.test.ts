@@ -1,5 +1,9 @@
 import type { Registry } from "@dokploy/server";
-import { getRegistryTag } from "@dokploy/server";
+import {
+	getRegistryCredentialEnvironment,
+	getRegistryCredentialEnvironmentNames,
+	getRegistryTag,
+} from "@dokploy/server";
 import { describe, expect, it } from "vitest";
 
 describe("getRegistryTag", () => {
@@ -238,6 +242,30 @@ describe("getRegistryTag", () => {
 			});
 			const result = getRegistryTag(registry, "nginx:latest");
 			expect(result).toBe("docker.io/robot+test-user/nginx:latest");
+		});
+	});
+});
+
+describe("registry credential environment", () => {
+	it("uses deterministic Secret keys without exposing values in names", () => {
+		const registry = {
+			registryId: "registry-id.1",
+			registryName: "Registry",
+			username: "robot",
+			password: "super-secret",
+			registryUrl: "registry.example.com",
+			registryType: "cloud" as const,
+			imagePrefix: null,
+			createdAt: new Date().toISOString(),
+			organizationId: "organization-1",
+		};
+		const names = getRegistryCredentialEnvironmentNames(registry.registryId);
+
+		expect(names.password).toBe("VLYV_REGISTRY_REGISTRY_ID_1_PASSWORD");
+		expect(getRegistryCredentialEnvironment(registry)).toEqual({
+			VLYV_REGISTRY_REGISTRY_ID_1_URL: "registry.example.com",
+			VLYV_REGISTRY_REGISTRY_ID_1_USERNAME: "robot",
+			VLYV_REGISTRY_REGISTRY_ID_1_PASSWORD: "super-secret",
 		});
 	});
 });

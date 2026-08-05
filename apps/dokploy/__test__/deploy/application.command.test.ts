@@ -108,8 +108,11 @@ vi.mock("@dokploy/server/services/rollbacks", () => ({
 	createRollback: vi.fn(),
 }));
 
-vi.mock("@dokploy/server/services/release-orchestrator", () => ({
-	createReleaseOrchestrator: () => ({ execute: releaseExecuteMock }),
+vi.mock("@dokploy/server/services/platform-release-orchestrator", () => ({
+	createPlatformReleasePlan: () => ({
+		orchestrator: { execute: releaseExecuteMock },
+		registryCredentialMode: "inline",
+	}),
 }));
 
 import { db } from "@dokploy/server/db";
@@ -228,6 +231,7 @@ describe("deployApplication - Command Generation Tests", () => {
 				customGitUrl: "https://github.com/Dokploy/examples.git",
 				buildPath: "/astro",
 			}),
+			{ registryCredentialMode: "inline" },
 		);
 
 		expect(releaseExecuteMock).toHaveBeenCalledWith(
@@ -259,6 +263,7 @@ describe("deployApplication - Command Generation Tests", () => {
 			expect.objectContaining({
 				buildType: "railpack",
 			}),
+			{ registryCredentialMode: "inline" },
 		);
 
 		expect(releaseExecuteMock).toHaveBeenCalledWith(

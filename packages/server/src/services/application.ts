@@ -4,6 +4,7 @@ import {
 	type apiCreateApplication,
 	applications,
 	buildAppName,
+	environments,
 } from "@dokploy/server/db/schema";
 import { getAdvancedStats } from "@dokploy/server/monitoring/utils";
 import {
@@ -52,11 +53,15 @@ import {
 	resolveManagedCompute,
 } from "./platform";
 import {
+	ensureApplicationPlatformPlacement,
+	updatePlatformPlacementReplicas,
+} from "./platform-infrastructure";
+import { createPlatformReleasePlan } from "./platform-release-orchestrator";
+import {
 	findPreviewDeploymentById,
 	updatePreviewDeployment,
 } from "./preview-deployment";
 import { validUniqueServerAppName } from "./project";
-import { createReleaseOrchestrator } from "./release-orchestrator";
 export type Application = typeof applications.$inferSelect;
 
 export const createApplication = async (
@@ -76,7 +81,7 @@ export const createApplication = async (
 		});
 	}
 
-	return await db.transaction(async (tx) => {
+	const newApplication = await db.transaction(async (tx) => {
 		const newApplication = await tx
 			.insert(applications)
 			.values({
@@ -102,6 +107,33 @@ export const createApplication = async (
 
 		return newApplication;
 	});
+
+	if (IS_MANAGED_PAAS) {
+		try {
+			const environment = await db.query.environments.findFirst({
+				where: eq(environments.environmentId, newApplication.environmentId),
+				with: { project: { columns: { organizationId: true } } },
+			});
+			if (!environment) {
+				throw new Error("Application environment was not found");
+			}
+			const placement = await ensureApplicationPlatformPlacement({
+				applicationId: newApplication.applicationId,
+				organizationId: environment.project.organizationId,
+				desiredReplicas: newApplication.replicas,
+			});
+			if (!newApplication.serverId && !placement) {
+				throw new Error("Managed Kubernetes capacity changed during placement");
+			}
+		} catch (error) {
+			await db
+				.delete(applications)
+				.where(eq(applications.applicationId, newApplication.applicationId));
+			throw error;
+		}
+	}
+
+	return newApplication;
 };
 
 export const findApplicationById = async (applicationId: string) => {
@@ -170,6 +202,12 @@ export const updateApplication = async (
 		})
 		.where(eq(applications.applicationId, applicationId))
 		.returning();
+	if (applicationData.replicas !== undefined) {
+		await updatePlatformPlacementReplicas(
+			applicationId,
+			applicationData.replicas,
+		);
+	}
 
 	return application[0];
 };
@@ -200,9 +238,11 @@ export const deployApplication = async ({
 }) => {
 	const application = await findApplicationById(applicationId);
 	const serverId = application.buildServerId || application.serverId;
+	const releasePlan = await createPlatformReleasePlan(application);
 	const applicationEntity = {
 		...application,
 		serverId: serverId,
+		credentialMode: releasePlan.registryCredentialMode,
 	};
 
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${application.environment.projectId}/environment/${application.environmentId}/services/application/${application.applicationId}?tab=deployments`;
@@ -225,7 +265,10 @@ export const deployApplication = async ({
 		} else if (application.sourceType === "git") {
 			command += await cloneGitRepository(applicationEntity);
 		} else if (application.sourceType === "docker") {
-			command += await buildRemoteDocker(application);
+			command += await buildRemoteDocker(
+				application,
+				releasePlan.registryCredentialMode,
+			);
 		}
 
 		if (application.sourceType !== "docker") {
@@ -236,8 +279,10 @@ export const deployApplication = async ({
 			});
 		}
 
-		command += await getBuildCommand(application);
-		await createReleaseOrchestrator().execute({
+		command += await getBuildCommand(application, {
+			registryCredentialMode: releasePlan.registryCredentialMode,
+		});
+		await releasePlan.orchestrator.execute({
 			application,
 			deployment,
 			command,
@@ -325,8 +370,11 @@ export const rebuildApplication = async ({
 	try {
 		let command = "set -e;";
 		// Check case for docker only
-		command += await getBuildCommand(application);
-		await createReleaseOrchestrator().execute({
+		const releasePlan = await createPlatformReleasePlan(application);
+		command += await getBuildCommand(application, {
+			registryCredentialMode: releasePlan.registryCredentialMode,
+		});
+		await releasePlan.orchestrator.execute({
 			application,
 			deployment,
 			command,

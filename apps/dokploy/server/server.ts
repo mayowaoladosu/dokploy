@@ -1,6 +1,7 @@
 import http from "node:http";
 import {
 	assertManagedPlatformConfiguration,
+	configureManagedDataProviderFromEnvironment,
 	createDefaultMiddlewares,
 	createDefaultServerTraefikConfig,
 	createDefaultTraefikConfig,
@@ -13,6 +14,8 @@ import {
 	initializeNetwork,
 	initSchedules,
 	initVolumeBackupsCronJobs,
+	reconcileDomainVerifications,
+	reconcileKubernetesPlacements,
 	sendDokployRestartNotifications,
 	setupDirectories,
 } from "@dokploy/server";
@@ -28,6 +31,7 @@ import { setupTerminalWebSocketServer } from "./wss/terminal";
 
 config({ path: ".env" });
 assertManagedPlatformConfiguration();
+configureManagedDataProviderFromEnvironment();
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 const HOST = process.env.HOST || "0.0.0.0";
 const dev = process.env.NODE_ENV !== "production";
@@ -62,6 +66,25 @@ void app.prepare().then(async () => {
 
 		server.listen(PORT, HOST);
 		console.log(`Server Started on: http://${HOST}:${PORT}`);
+		const reconciledDomains = await reconcileDomainVerifications();
+		if (reconciledDomains > 0) {
+			console.log(`Initialized ${reconciledDomains} domain verification(s)`);
+		}
+		const reconcilePlacements = async () => {
+			const result = await reconcileKubernetesPlacements();
+			if (result.active + result.pending + result.failed > 0) {
+				console.log(
+					`Reconciled Kubernetes placements: ${result.active} active, ${result.pending} pending, ${result.failed} failed`,
+				);
+			}
+		};
+		await reconcilePlacements();
+		const placementReconciliationTimer = setInterval(() => {
+			void reconcilePlacements().catch((error) =>
+				console.error("Failed to reconcile Kubernetes placements", error),
+			);
+		}, 60_000);
+		placementReconciliationTimer.unref();
 		if (process.env.NODE_ENV === "production" && !IS_CLOUD) {
 			createDefaultMiddlewares();
 			await initializeNetwork();

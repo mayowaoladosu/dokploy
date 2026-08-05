@@ -1,5 +1,10 @@
 import { db } from "@dokploy/server/db";
-import { member, organizationRole } from "@dokploy/server/db/schema";
+import {
+	type ApiCredentialScope,
+	member,
+	organizationRole,
+} from "@dokploy/server/db/schema";
+import { assertApiCredentialScope } from "@dokploy/server/services/api-credential-scope";
 import { hasValidLicense } from "@dokploy/server/services/proprietary/license-key";
 import { TRPCError } from "@trpc/server";
 import { and, eq } from "drizzle-orm";
@@ -21,7 +26,10 @@ type Permissions = {
 
 export type PermissionCtx = {
 	user: { id: string };
-	session: { activeOrganizationId: string };
+	session: {
+		activeOrganizationId: string;
+		apiCredentialScope?: ApiCredentialScope | null;
+	};
 };
 
 export type ResolvedPermissions = {
@@ -77,6 +85,16 @@ export const checkPermission = async (
 	ctx: PermissionCtx,
 	permissions: Permissions,
 ) => {
+	for (const [resource, actions] of Object.entries(permissions)) {
+		for (const action of actions as string[]) {
+			assertApiCredentialScope(
+				ctx.session.apiCredentialScope,
+				resource,
+				action,
+				{},
+			);
+		}
+	}
 	const { id: userId } = ctx.user;
 	const { activeOrganizationId: organizationId } = ctx.session;
 	const memberRecord = await findMemberByUserId(userId, organizationId);
@@ -220,6 +238,9 @@ export const checkProjectAccess = async (
 	action: "create" | "delete",
 	projectId?: string,
 ) => {
+	assertApiCredentialScope(ctx.session.apiCredentialScope, "project", action, {
+		projectId,
+	});
 	const userId = ctx.user.id;
 	const organizationId = ctx.session.activeOrganizationId;
 	const memberRecord = await findMemberByUserId(userId, organizationId);
@@ -249,6 +270,16 @@ export const checkServicePermissionAndAccess = async (
 	const userId = ctx.user.id;
 	const organizationId = ctx.session.activeOrganizationId;
 	const memberRecord = await findMemberByUserId(userId, organizationId);
+	for (const [resource, actions] of Object.entries(permissions)) {
+		for (const action of actions as string[]) {
+			assertApiCredentialScope(
+				ctx.session.apiCredentialScope,
+				resource,
+				action,
+				{ serviceId },
+			);
+		}
+	}
 	await checkPermission(ctx, permissions);
 	if (memberRecord.role !== "owner" && memberRecord.role !== "admin") {
 		if (!memberRecord.accessedServices.includes(serviceId)) {
@@ -265,6 +296,12 @@ export const checkServiceAccess = async (
 	serviceId: string,
 	action: "create" | "read" | "delete" = "read",
 ) => {
+	assertApiCredentialScope(
+		ctx.session.apiCredentialScope,
+		"service",
+		action,
+		action === "create" ? { projectId: serviceId } : { serviceId },
+	);
 	const userId = ctx.user.id;
 	const organizationId = ctx.session.activeOrganizationId;
 	const memberRecord = await findMemberByUserId(userId, organizationId);
@@ -295,6 +332,12 @@ export const checkEnvironmentAccess = async (
 	environmentId: string,
 	action: "read" | "create" | "delete" = "read",
 ) => {
+	assertApiCredentialScope(
+		ctx.session.apiCredentialScope,
+		"environment",
+		action,
+		{ environmentId },
+	);
 	const userId = ctx.user.id;
 	const organizationId = ctx.session.activeOrganizationId;
 	const memberRecord = await findMemberByUserId(userId, organizationId);
@@ -319,6 +362,12 @@ export const checkEnvironmentCreationPermission = async (
 	ctx: PermissionCtx,
 	projectId: string,
 ) => {
+	assertApiCredentialScope(
+		ctx.session.apiCredentialScope,
+		"environment",
+		"create",
+		{ projectId },
+	);
 	const userId = ctx.user.id;
 	const organizationId = ctx.session.activeOrganizationId;
 	const memberRecord = await findMemberByUserId(userId, organizationId);

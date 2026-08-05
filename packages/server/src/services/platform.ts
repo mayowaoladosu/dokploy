@@ -14,6 +14,7 @@ import {
 } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
 import { asc, eq } from "drizzle-orm";
+import { hasActiveKubernetesCapacity } from "./platform-infrastructure";
 
 export type ManagedComputeKind = "application" | "service";
 
@@ -288,6 +289,22 @@ export const resolveManagedCompute = async ({
 }): Promise<ManagedComputeAssignment> => {
 	if (!IS_MANAGED_PAAS) {
 		return { serverId: requestedServerId || undefined };
+	}
+
+	if (kind === "application" && (await hasActiveKubernetesCapacity())) {
+		const managedRegistryId = await getManagedRegistryId();
+		if (!managedRegistryId) {
+			throw new TRPCError({
+				code: "PRECONDITION_FAILED",
+				message:
+					"Managed Kubernetes requires a platform registry for immutable release artifacts.",
+			});
+		}
+		return {
+			registryId: managedRegistryId,
+			buildRegistryId: managedRegistryId,
+			rollbackRegistryId: managedRegistryId,
+		};
 	}
 
 	const candidates = await getManagedComputeCandidates();

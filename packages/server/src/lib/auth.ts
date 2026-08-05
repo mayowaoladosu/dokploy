@@ -17,6 +17,7 @@ import {
 	getTrustedProviders,
 	getUserByToken,
 } from "../services/admin";
+import { findApiCredentialScope } from "../services/api-credential-scope";
 import { ensureBootstrapPlatformAdmin } from "../services/platform";
 import { createAuditLog } from "../services/proprietary/audit-log";
 import {
@@ -540,6 +541,13 @@ export const validateRequest = async (request: IncomingMessage) => {
 					user: null,
 				};
 			}
+			const apiCredentialScope = await findApiCredentialScope(key.id);
+			if (
+				apiCredentialScope &&
+				apiCredentialScope.organizationId !== organizationId
+			) {
+				return { session: null, user: null };
+			}
 
 			const member = await db.query.member.findFirst({
 				where: and(
@@ -561,6 +569,8 @@ export const validateRequest = async (request: IncomingMessage) => {
 				session: {
 					userId: apiKeyRecord.user.id,
 					activeOrganizationId: organizationId || "",
+					apiKeyId: key.id,
+					apiCredentialScope,
 				},
 				user: {
 					id: userFromDb.id,

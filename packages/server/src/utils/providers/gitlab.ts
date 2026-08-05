@@ -96,10 +96,14 @@ const getGitlabRepoClone = (
 	return repoClone;
 };
 
-const getGitlabCloneUrl = (gitlab: GitlabInfo, repoClone: string) => {
+const getGitlabCloneUrl = (
+	gitlab: GitlabInfo,
+	repoClone: string,
+	accessToken = gitlab?.accessToken,
+) => {
 	const url = gitlab?.gitlabInternalUrl || gitlab?.gitlabUrl;
 	const isSecure = url?.startsWith("https://");
-	const cloneUrl = `http${isSecure ? "s" : ""}://oauth2:${gitlab?.accessToken}@${repoClone}`;
+	const cloneUrl = `http${isSecure ? "s" : ""}://oauth2:${accessToken}@${repoClone}`;
 	return cloneUrl;
 };
 
@@ -112,7 +116,11 @@ interface CloneGitlabRepository {
 	serverId: string | null;
 	type?: "application" | "compose";
 	outputPathOverride?: string;
+	credentialMode?: "inline" | "environment";
 }
+
+export const getGitlabTokenEnvironmentName = (gitlabId: string) =>
+	`VLYV_GITLAB_${gitlabId.replace(/[^a-zA-Z0-9]/g, "_").toUpperCase()}_TOKEN`;
 
 export const cloneGitlabRepository = async ({
 	type = "application",
@@ -127,6 +135,7 @@ export const cloneGitlabRepository = async ({
 		enableSubmodules,
 		serverId,
 		outputPathOverride,
+		credentialMode = "inline",
 	} = entity;
 	const { COMPOSE_PATH, APPLICATIONS_PATH } = paths(!!serverId);
 
@@ -151,9 +160,19 @@ export const cloneGitlabRepository = async ({
 	command += `rm -rf ${outputPath};`;
 	command += `mkdir -p ${outputPath};`;
 	const repoClone = getGitlabRepoClone(gitlab, gitlabPathNamespace);
-	const cloneUrl = getGitlabCloneUrl(gitlab, repoClone);
+	const cloneUrl = getGitlabCloneUrl(
+		gitlab,
+		repoClone,
+		credentialMode === "environment"
+			? `$${getGitlabTokenEnvironmentName(gitlabId)}`
+			: gitlab?.accessToken,
+	);
 	command += `echo ${quote([`Cloning Repo ${repoClone} to ${outputPath}: ✅`])};`;
-	command += `git clone --branch ${quote([String(gitlabBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
+	const cloneUrlArgument =
+		credentialMode === "environment"
+			? `"${cloneUrl}"`
+			: quote([String(cloneUrl ?? "")]);
+	command += `git clone --branch ${quote([String(gitlabBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${cloneUrlArgument} ${quote([String(outputPath ?? "")])} --progress;`;
 	return command;
 };
 

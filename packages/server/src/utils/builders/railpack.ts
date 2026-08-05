@@ -87,7 +87,9 @@ export const getRailpackCommand = (application: ApplicationNested) => {
 # Ensure we have a builder with containerd (isolated per build)
 
 export RAILPACK_VERSION=${application.railpackVersion}
-bash -c "$(curl -fsSL https://railpack.com/install.sh)"
+if [ "\${VLYV_PREINSTALLED_RAILPACK:-false}" != "true" ]; then
+	bash -c "$(curl -fsSL https://railpack.com/install.sh)"
+fi
 docker buildx create --name ${builderName} --driver docker-container || true
 
 echo "Preparing Railpack build plan..." ;

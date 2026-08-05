@@ -2,7 +2,11 @@ import { resolveServiceNetworks } from "@dokploy/server/services/network";
 import { findRegistryByIdWithCredentials } from "@dokploy/server/services/registry";
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
-import { getRegistryTag, uploadImageRemoteCommand } from "../cluster/upload";
+import {
+	getRegistryTag,
+	type RegistryCredentialMode,
+	uploadImageRemoteCommand,
+} from "../cluster/upload";
 import {
 	calculateResources,
 	generateBindMounts,
@@ -38,7 +42,10 @@ export type ApplicationNested = InferResultType<
 	}
 >;
 
-export const getBuildCommand = async (application: ApplicationNested) => {
+export const getBuildCommand = async (
+	application: ApplicationNested,
+	options: { registryCredentialMode?: RegistryCredentialMode } = {},
+) => {
 	let command = "";
 
 	if (application.sourceType !== "docker") {
@@ -70,7 +77,10 @@ export const getBuildCommand = async (application: ApplicationNested) => {
 		application.buildRegistry ||
 		application.rollbackRegistry
 	) {
-		command += await uploadImageRemoteCommand(application);
+		command += await uploadImageRemoteCommand(
+			application,
+			options.registryCredentialMode,
+		);
 	}
 
 	return command;

@@ -5,19 +5,24 @@ import {
 	findDomainById,
 	findDomainsByApplicationId,
 	findDomainsByComposeId,
+	findDomainVerification,
 	findPreviewDeploymentById,
 	findServerById,
 	generateTraefikMeDomain,
 	getManagedApplicationDomain,
 	getWebServerSettings,
 	IS_MANAGED_PAAS,
+	isDomainVerified,
 	manageDomain,
 	removeDomain,
 	removeDomainById,
 	updateDomainById,
 	validateDomain,
+	verifyDomainOwnership,
 } from "@dokploy/server";
 import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
+import { findApplicationPlatformPlacement } from "@dokploy/server/services/platform-infrastructure";
+import { reconcilePlatformDomainRoutes } from "@dokploy/server/services/platform-runtime";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import {
@@ -60,6 +65,14 @@ export const domainRouter = createTRPCRouter({
 							}
 						: input,
 				);
+				if (domain.applicationId && (await isDomainVerified(domain.domainId))) {
+					const application = await findApplicationById(domain.applicationId);
+					await reconcilePlatformDomainRoutes({
+						applicationId: domain.applicationId,
+						appName: application.appName,
+						port: domain.port || 3000,
+					});
+				}
 				await audit(ctx, {
 					action: "create",
 					resourceType: "domain",
@@ -165,8 +178,22 @@ export const domainRouter = createTRPCRouter({
 				resourceName: domain.host,
 			});
 			if (domain.applicationId) {
-				const application = await findApplicationById(domain.applicationId);
-				await manageDomain(application, domain);
+				const placement = await findApplicationPlatformPlacement(
+					domain.applicationId,
+				);
+				if (placement?.runtime === "kubernetes") {
+					await reconcilePlatformDomainRoutes({
+						applicationId: domain.applicationId,
+						appName: domain.application?.appName || "application",
+						port: domain.port || 3000,
+					});
+				} else if (
+					!IS_MANAGED_PAAS ||
+					(await isDomainVerified(domain.domainId))
+				) {
+					const application = await findApplicationById(domain.applicationId);
+					await manageDomain(application, domain);
+				}
 			} else if (domain.previewDeploymentId) {
 				const previewDeployment = await findPreviewDeploymentById(
 					domain.previewDeploymentId,
@@ -196,6 +223,46 @@ export const domainRouter = createTRPCRouter({
 		}
 		return domain;
 	}),
+	verification: protectedProcedure
+		.input(apiFindDomain)
+		.query(async ({ input, ctx }) => {
+			const domain = await findDomainById(input.domainId);
+			const serviceId = domain.applicationId || domain.composeId;
+			if (serviceId) {
+				await checkServicePermissionAndAccess(ctx, serviceId, {
+					domain: ["read"],
+				});
+			}
+			return findDomainVerification(input.domainId);
+		}),
+	verifyOwnership: protectedProcedure
+		.input(apiFindDomain)
+		.mutation(async ({ input, ctx }) => {
+			const domain = await findDomainById(input.domainId);
+			const serviceId = domain.applicationId || domain.composeId;
+			if (serviceId) {
+				await checkServicePermissionAndAccess(ctx, serviceId, {
+					domain: ["create"],
+				});
+			}
+			const verification = await verifyDomainOwnership(input.domainId);
+			if (verification.status === "verified" && domain.applicationId) {
+				const placement = await findApplicationPlatformPlacement(
+					domain.applicationId,
+				);
+				if (placement?.runtime === "kubernetes") {
+					await reconcilePlatformDomainRoutes({
+						applicationId: domain.applicationId,
+						appName: domain.application?.appName || "application",
+						port: domain.port || 3000,
+					});
+				} else {
+					const application = await findApplicationById(domain.applicationId);
+					await manageDomain(application, domain);
+				}
+			}
+			return verification;
+		}),
 	delete: protectedProcedure
 		.input(apiFindDomain)
 		.mutation(async ({ input, ctx }) => {
@@ -223,8 +290,19 @@ export const domainRouter = createTRPCRouter({
 			});
 
 			if (domain.applicationId) {
-				const application = await findApplicationById(domain.applicationId);
-				await removeDomain(application, domain.uniqueConfigKey);
+				const placement = await findApplicationPlatformPlacement(
+					domain.applicationId,
+				);
+				if (placement?.runtime === "kubernetes") {
+					await reconcilePlatformDomainRoutes({
+						applicationId: domain.applicationId,
+						appName: domain.application?.appName || "application",
+						port: domain.port || 3000,
+					});
+				} else {
+					const application = await findApplicationById(domain.applicationId);
+					await removeDomain(application, domain.uniqueConfigKey);
+				}
 			}
 
 			return result;

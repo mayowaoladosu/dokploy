@@ -132,7 +132,11 @@ interface CloneGiteaRepository {
 	serverId: string | null;
 	type?: "application" | "compose";
 	outputPathOverride?: string;
+	credentialMode?: "inline" | "environment";
 }
+
+export const getGiteaTokenEnvironmentName = (giteaId: string) =>
+	`VLYV_GITEA_${giteaId.replace(/[^a-zA-Z0-9]/g, "_").toUpperCase()}_TOKEN`;
 
 export const cloneGiteaRepository = async ({
 	type = "application",
@@ -148,6 +152,7 @@ export const cloneGiteaRepository = async ({
 		enableSubmodules,
 		serverId,
 		outputPathOverride,
+		credentialMode = "inline",
 	} = entity;
 	const { APPLICATIONS_PATH, COMPOSE_PATH } = paths(!!serverId);
 
@@ -172,13 +177,19 @@ export const cloneGiteaRepository = async ({
 	const repoClone = `${giteaOwner}/${giteaRepository}.git`;
 	const cloneUrl = buildGiteaCloneUrl(
 		giteaProvider.giteaInternalUrl || giteaProvider.giteaUrl,
-		giteaProvider.accessToken!,
+		credentialMode === "environment"
+			? `$${getGiteaTokenEnvironmentName(giteaId)}`
+			: giteaProvider.accessToken!,
 		giteaOwner!,
 		giteaRepository!,
 	);
 
 	command += `echo ${quote([`Cloning Repo ${repoClone} to ${outputPath}: ✅`])};`;
-	command += `git clone --branch ${quote([String(giteaBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
+	const cloneUrlArgument =
+		credentialMode === "environment"
+			? `"${cloneUrl}"`
+			: quote([String(cloneUrl ?? "")]);
+	command += `git clone --branch ${quote([String(giteaBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${cloneUrlArgument} ${quote([String(outputPath ?? "")])} --progress;`;
 	return command;
 };
 

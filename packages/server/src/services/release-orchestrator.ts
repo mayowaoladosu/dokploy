@@ -19,6 +19,7 @@ import {
 	type RuntimeHealthResult,
 	type RuntimeScheduler,
 } from "./runtime-scheduler";
+import { createUsageMeter, type UsageMeter } from "./usage-metering";
 
 export type ReleaseExecutionResult = {
 	releaseId: string;
@@ -39,10 +40,11 @@ export type ReleaseOrchestratorDependencies = {
 	runtimeScheduler: RuntimeScheduler;
 	stateMachine: ReleaseStateMachine;
 	telemetry: DeploymentTelemetry;
+	usageMeter: UsageMeter;
 	heartbeatIntervalMs: number;
 };
 
-const persistArtifactWithRetry = async (
+const persistWithRetry = async (
 	operation: () => Promise<unknown>,
 	maxAttempts = 3,
 ) => {
@@ -71,12 +73,15 @@ export const createReleaseOrchestrator = (
 		runtimeScheduler: createSwarmRuntimeScheduler(),
 		stateMachine: createReleaseStateMachine(),
 		telemetry: createDeploymentTelemetry(),
+		usageMeter: createUsageMeter(),
 		heartbeatIntervalMs: 30_000,
 		...overrides,
 	};
 
 	return {
 		execute: async ({ application, deployment, command }) => {
+			const organizationId = application.environment.project.organizationId;
+			await dependencies.usageMeter.assertBuildAllowed(organizationId);
 			const release = await dependencies.stateMachine.create({
 				deploymentId: deployment.deploymentId,
 				applicationId: application.applicationId,
@@ -135,7 +140,18 @@ export const createReleaseOrchestrator = (
 						artifact.imageSizeBytes,
 					),
 				);
-				await persistArtifactWithRetry(() =>
+				await persistWithRetry(() =>
+					dependencies.usageMeter.recordBuild({
+						organizationId,
+						projectId: application.environment.project.projectId,
+						environmentId: application.environmentId,
+						applicationId: application.applicationId,
+						deploymentId: deployment.deploymentId,
+						durationMs: artifact.durationMs,
+						imageSizeBytes: artifact.imageSizeBytes,
+					}),
+				);
+				await persistWithRetry(() =>
 					dependencies.stateMachine.attachArtifact(release.releaseId, artifact),
 				);
 				await dependencies.stateMachine.transition(

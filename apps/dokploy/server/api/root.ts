@@ -17,6 +17,7 @@ import { giteaRouter } from "./routers/gitea";
 import { githubRouter } from "./routers/github";
 import { gitlabRouter } from "./routers/gitlab";
 import { libsqlRouter } from "./routers/libsql";
+import { managedDataRouter } from "./routers/managed-data";
 import { mariadbRouter } from "./routers/mariadb";
 import { mongoRouter } from "./routers/mongo";
 import { mountRouter } from "./routers/mount";
@@ -25,6 +26,7 @@ import { networkRouter } from "./routers/network";
 import { notificationRouter } from "./routers/notification";
 import { organizationRouter } from "./routers/organization";
 import { patchRouter } from "./routers/patch";
+import { platformInfrastructureRouter } from "./routers/platform-infrastructure";
 import { portRouter } from "./routers/port";
 import { postgresRouter } from "./routers/postgres";
 import { previewDeploymentRouter } from "./routers/preview-deployment";
@@ -48,6 +50,7 @@ import { sshRouter } from "./routers/ssh-key";
 import { stripeRouter } from "./routers/stripe";
 import { swarmRouter } from "./routers/swarm";
 import { tagRouter } from "./routers/tag";
+import { usageRouter } from "./routers/usage";
 import { userRouter } from "./routers/user";
 import { volumeBackupsRouter } from "./routers/volume-backups";
 /**
@@ -75,6 +78,7 @@ export const appRouter = createTRPCRouter({
 	gitlab: gitlabRouter,
 	libsql: libsqlRouter,
 	mariadb: mariadbRouter,
+	managedData: managedDataRouter,
 	mongo: mongoRouter,
 	mounts: mountRouter,
 	mysql: mysqlRouter,
@@ -83,6 +87,7 @@ export const appRouter = createTRPCRouter({
 	postgres: postgresRouter,
 	previewDeployment: previewDeploymentRouter,
 	project: projectRouter,
+	platformInfrastructure: platformInfrastructureRouter,
 	redirects: redirectsRouter,
 	redis: redisRouter,
 	registry: registryRouter,
@@ -93,6 +98,7 @@ export const appRouter = createTRPCRouter({
 	stripe: stripeRouter,
 	swarm: swarmRouter,
 	user: userRouter,
+	usage: usageRouter,
 	ai: aiRouter,
 	organization: organizationRouter,
 	licenseKey: licenseKeyRouter,

@@ -8,8 +8,29 @@ import { createRollback } from "@dokploy/server/services/rollbacks";
 import { quote } from "shell-quote";
 import type { ApplicationNested } from "../builders";
 
+export type RegistryCredentialMode = "inline" | "environment";
+
+export const getRegistryCredentialEnvironmentNames = (registryId: string) => {
+	const suffix = registryId.replace(/[^a-zA-Z0-9]/g, "_").toUpperCase();
+	return {
+		url: `VLYV_REGISTRY_${suffix}_URL`,
+		username: `VLYV_REGISTRY_${suffix}_USERNAME`,
+		password: `VLYV_REGISTRY_${suffix}_PASSWORD`,
+	};
+};
+
+export const getRegistryCredentialEnvironment = (registry: Registry) => {
+	const names = getRegistryCredentialEnvironmentNames(registry.registryId);
+	return {
+		[names.url]: registry.registryUrl,
+		[names.username]: registry.username,
+		[names.password]: registry.password,
+	};
+};
+
 export const uploadImageRemoteCommand = async (
 	application: ApplicationNested,
+	credentialMode: RegistryCredentialMode = "inline",
 ) => {
 	const registry = application.registry;
 	const buildRegistry = application.buildRegistry;
@@ -31,7 +52,9 @@ export const uploadImageRemoteCommand = async (
 		const registryTag = getRegistryTag(r, imageName);
 		if (registryTag) {
 			commands.push(`echo "📦 [Enabled Registry Swarm]"`);
-			commands.push(getRegistryCommands(r, imageName, registryTag));
+			commands.push(
+				getRegistryCommands(r, imageName, registryTag, credentialMode),
+			);
 		}
 	}
 	if (buildRegistry) {
@@ -39,7 +62,9 @@ export const uploadImageRemoteCommand = async (
 		const buildRegistryTag = getRegistryTag(r, imageName);
 		if (buildRegistryTag) {
 			commands.push(`echo "🔑 [Enabled Build Registry]"`);
-			commands.push(getRegistryCommands(r, imageName, buildRegistryTag));
+			commands.push(
+				getRegistryCommands(r, imageName, buildRegistryTag, credentialMode),
+			);
 			commands.push(
 				`echo "⚠️ INFO: After the build is finished, you need to wait a few seconds for the server to download the image and run the container."`,
 			);
@@ -68,7 +93,9 @@ export const uploadImageRemoteCommand = async (
 		const rollbackRegistryTag = getRegistryTag(r, rollback?.image || "");
 		if (rollbackRegistryTag) {
 			commands.push(`echo "🔄 [Enabled Rollback Registry]"`);
-			commands.push(getRegistryCommands(r, imageName, rollbackRegistryTag));
+			commands.push(
+				getRegistryCommands(r, imageName, rollbackRegistryTag, credentialMode),
+			);
 		}
 	}
 	try {
@@ -118,12 +145,17 @@ const getRegistryCommands = (
 	registry: Registry,
 	imageName: string,
 	registryTag: string,
+	credentialMode: RegistryCredentialMode,
 ): string => {
-	const loginCmd = safeDockerLoginCommand(
-		registry.registryUrl,
-		registry.username,
-		registry.password,
-	);
+	const names = getRegistryCredentialEnvironmentNames(registry.registryId);
+	const loginCmd =
+		credentialMode === "environment"
+			? `if [ -n "$${names.url}" ]; then printf %s "$${names.password}" | docker login "$${names.url}" -u "$${names.username}" --password-stdin; else printf %s "$${names.password}" | docker login -u "$${names.username}" --password-stdin; fi`
+			: safeDockerLoginCommand(
+					registry.registryUrl,
+					registry.username,
+					registry.password,
+				);
 	return `
 echo ${quote([`📦 [Enabled Registry] Uploading image to '${registry.registryType}' | '${registryTag}'`])} ;
 ${loginCmd} || {

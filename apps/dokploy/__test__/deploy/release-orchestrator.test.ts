@@ -12,6 +12,7 @@ import type {
 	RuntimeScheduler,
 	RuntimeStatus,
 } from "@dokploy/server/services/runtime-scheduler";
+import type { UsageMeter } from "@dokploy/server/services/usage-metering";
 import type { ApplicationNested } from "@dokploy/server/utils/builders";
 import { describe, expect, it, vi } from "vitest";
 
@@ -31,6 +32,13 @@ const application = {
 	appName: "app-1",
 	buildServerId: "builder-1",
 	serverId: "runtime-1",
+	environmentId: "environment-1",
+	environment: {
+		project: {
+			projectId: "project-1",
+			organizationId: "organization-1",
+		},
+	},
 } as unknown as ApplicationNested;
 
 const deployment = {
@@ -116,11 +124,16 @@ const createHarness = (health: RuntimeHealthResult = readyHealth) => {
 		recordRuntime: vi.fn(async () => undefined),
 		recordHealth: vi.fn(async () => undefined),
 	};
+	const usageMeter: UsageMeter = {
+		assertBuildAllowed: vi.fn(async () => undefined),
+		recordBuild: vi.fn(async () => undefined),
+	};
 	const orchestrator = createReleaseOrchestrator({
 		buildExecutor,
 		runtimeScheduler,
 		stateMachine,
 		telemetry,
+		usageMeter,
 		heartbeatIntervalMs: 60_000,
 	});
 
@@ -130,6 +143,7 @@ const createHarness = (health: RuntimeHealthResult = readyHealth) => {
 		runtimeScheduler,
 		stateMachine,
 		telemetry,
+		usageMeter,
 		transition,
 	};
 };
@@ -174,6 +188,16 @@ describe("release orchestrator", () => {
 		expect(harness.telemetry.recordHealth).toHaveBeenCalledWith(
 			deployment.deploymentId,
 			readyHealth,
+		);
+		expect(harness.usageMeter.assertBuildAllowed).toHaveBeenCalledWith(
+			application.environment.project.organizationId,
+		);
+		expect(harness.usageMeter.recordBuild).toHaveBeenCalledWith(
+			expect.objectContaining({
+				deploymentId: deployment.deploymentId,
+				durationMs: artifact.durationMs,
+				imageSizeBytes: artifact.imageSizeBytes,
+			}),
 		);
 		expect(harness.runtimeScheduler.rollback).not.toHaveBeenCalled();
 	});

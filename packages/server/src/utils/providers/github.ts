@@ -187,7 +187,11 @@ interface CloneGithubRepository {
 	enableSubmodules: boolean;
 	serverId: string | null;
 	outputPathOverride?: string;
+	credentialMode?: "inline" | "environment";
 }
+
+export const getGithubTokenEnvironmentName = (githubId: string) =>
+	`VLYV_GITHUB_${githubId.replace(/[^a-zA-Z0-9]/g, "_").toUpperCase()}_TOKEN`;
 export const cloneGithubRepository = async ({
 	type = "application",
 	...entity
@@ -203,6 +207,7 @@ export const cloneGithubRepository = async ({
 		enableSubmodules,
 		serverId,
 		outputPathOverride,
+		credentialMode = "inline",
 	} = entity;
 	const { APPLICATIONS_PATH, COMPOSE_PATH } = paths(!!serverId);
 
@@ -224,7 +229,10 @@ export const cloneGithubRepository = async ({
 	const basePath = isCompose ? COMPOSE_PATH : APPLICATIONS_PATH;
 	const outputPath = outputPathOverride ?? join(basePath, appName, "code");
 	const octokit = authGithub(githubProvider);
-	const token = await getGithubToken(octokit);
+	const token =
+		credentialMode === "environment"
+			? `$${getGithubTokenEnvironmentName(githubId)}`
+			: await getGithubToken(octokit);
 	const cloneBase = new URL(normalizeGithubUrl(githubProvider.githubUrl));
 	const repoclone = `${cloneBase.host}/${owner}/${repository}.git`;
 	command += `rm -rf ${outputPath};`;
@@ -232,7 +240,11 @@ export const cloneGithubRepository = async ({
 	const cloneUrl = `${cloneBase.protocol}//oauth2:${token}@${repoclone}`;
 
 	command += `echo ${quote([`Cloning Repo ${repoclone} to ${outputPath}: ✅`])};`;
-	command += `git clone --branch ${quote([String(branch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
+	const cloneUrlArgument =
+		credentialMode === "environment"
+			? `"${cloneUrl}"`
+			: quote([String(cloneUrl ?? "")]);
+	command += `git clone --branch ${quote([String(branch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${cloneUrlArgument} ${quote([String(outputPath ?? "")])} --progress;`;
 
 	return command;
 };

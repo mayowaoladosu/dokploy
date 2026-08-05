@@ -60,7 +60,7 @@ type SchedulerOptions = {
 
 const isPrivateIpv4 = (address: string) => {
 	const octets = address.split(".").map(Number);
-	const [first, second] = octets;
+	const [first, second, third] = octets;
 	return (
 		first === 0 ||
 		first === 10 ||
@@ -68,6 +68,10 @@ const isPrivateIpv4 = (address: string) => {
 		(first === 169 && second === 254) ||
 		(first === 172 && second !== undefined && second >= 16 && second <= 31) ||
 		(first === 192 && second === 168) ||
+		(first === 192 && second === 0 && (third === 0 || third === 2)) ||
+		(first === 198 && second !== undefined && second >= 18 && second <= 19) ||
+		(first === 198 && second === 51 && third === 100) ||
+		(first === 203 && second === 0 && third === 113) ||
 		(first === 100 && second !== undefined && second >= 64 && second <= 127) ||
 		(first !== undefined && first >= 224)
 	);

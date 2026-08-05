@@ -7,6 +7,7 @@ import {
 	pgTable,
 	serial,
 	text,
+	uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
@@ -23,40 +24,46 @@ export const domainType = pgEnum("domainType", [
 	"preview",
 ]);
 
-export const domains = pgTable("domain", {
-	domainId: text("domainId")
-		.notNull()
-		.primaryKey()
-		.$defaultFn(() => nanoid()),
-	host: text("host").notNull(),
-	https: boolean("https").notNull().default(false),
-	port: integer("port").default(3000),
-	customEntrypoint: text("customEntrypoint"),
-	path: text("path").default("/"),
-	serviceName: text("serviceName"),
-	domainType: domainType("domainType").default("application"),
-	uniqueConfigKey: serial("uniqueConfigKey"),
-	createdAt: text("createdAt")
-		.notNull()
-		.$defaultFn(() => new Date().toISOString()),
-	composeId: text("composeId").references(() => compose.composeId, {
-		onDelete: "cascade",
-	}),
-	customCertResolver: text("customCertResolver"),
-	applicationId: text("applicationId").references(
-		() => applications.applicationId,
-		{ onDelete: "cascade" },
-	),
-	previewDeploymentId: text("previewDeploymentId").references(
-		(): AnyPgColumn => previewDeployments.previewDeploymentId,
-		{ onDelete: "cascade" },
-	),
-	certificateType: certificateType("certificateType").notNull().default("none"),
-	internalPath: text("internalPath").default("/"),
-	stripPath: boolean("stripPath").notNull().default(false),
-	middlewares: text("middlewares").array().default(sql`ARRAY[]::text[]`),
-	forwardAuthEnabled: boolean("forwardAuthEnabled").notNull().default(false),
-});
+export const domains = pgTable(
+	"domain",
+	{
+		domainId: text("domainId")
+			.notNull()
+			.primaryKey()
+			.$defaultFn(() => nanoid()),
+		host: text("host").notNull(),
+		https: boolean("https").notNull().default(false),
+		port: integer("port").default(3000),
+		customEntrypoint: text("customEntrypoint"),
+		path: text("path").default("/"),
+		serviceName: text("serviceName"),
+		domainType: domainType("domainType").default("application"),
+		uniqueConfigKey: serial("uniqueConfigKey"),
+		createdAt: text("createdAt")
+			.notNull()
+			.$defaultFn(() => new Date().toISOString()),
+		composeId: text("composeId").references(() => compose.composeId, {
+			onDelete: "cascade",
+		}),
+		customCertResolver: text("customCertResolver"),
+		applicationId: text("applicationId").references(
+			() => applications.applicationId,
+			{ onDelete: "cascade" },
+		),
+		previewDeploymentId: text("previewDeploymentId").references(
+			(): AnyPgColumn => previewDeployments.previewDeploymentId,
+			{ onDelete: "cascade" },
+		),
+		certificateType: certificateType("certificateType")
+			.notNull()
+			.default("none"),
+		internalPath: text("internalPath").default("/"),
+		stripPath: boolean("stripPath").notNull().default(false),
+		middlewares: text("middlewares").array().default(sql`ARRAY[]::text[]`),
+		forwardAuthEnabled: boolean("forwardAuthEnabled").notNull().default(false),
+	},
+	(table) => [uniqueIndex("domain_host_unique").on(sql`lower(${table.host})`)],
+);
 
 export const domainsRelations = relations(domains, ({ one }) => ({
 	application: one(applications, {

@@ -89,7 +89,16 @@ interface CloneBitbucketRepository {
 	serverId: string | null;
 	type?: "application" | "compose";
 	outputPathOverride?: string;
+	credentialMode?: "inline" | "environment";
 }
+
+export const getBitbucketCredentialEnvironmentNames = (bitbucketId: string) => {
+	const suffix = bitbucketId.replace(/[^a-zA-Z0-9]/g, "_").toUpperCase();
+	return {
+		username: `VLYV_BITBUCKET_${suffix}_USERNAME`,
+		password: `VLYV_BITBUCKET_${suffix}_PASSWORD`,
+	};
+};
 
 export const cloneBitbucketRepository = async ({
 	type = "application",
@@ -105,6 +114,7 @@ export const cloneBitbucketRepository = async ({
 		enableSubmodules,
 		serverId,
 		outputPathOverride,
+		credentialMode = "inline",
 	} = entity;
 	const { COMPOSE_PATH, APPLICATIONS_PATH } = paths(!!serverId);
 
@@ -124,9 +134,17 @@ export const cloneBitbucketRepository = async ({
 	command += `mkdir -p ${outputPath};`;
 	const repoToUse = entity.bitbucketRepositorySlug || bitbucketRepository;
 	const repoclone = `bitbucket.org/${bitbucketOwner}/${repoToUse}.git`;
-	const cloneUrl = getBitbucketCloneUrl(bitbucket, repoclone);
+	const credentialNames = getBitbucketCredentialEnvironmentNames(bitbucketId);
+	const cloneUrl =
+		credentialMode === "environment"
+			? `https://${bitbucket.apiToken ? "x-bitbucket-api-token-auth" : `$${credentialNames.username}`}:$${credentialNames.password}@${repoclone}`
+			: getBitbucketCloneUrl(bitbucket, repoclone);
 	command += `echo ${quote([`Cloning Repo ${repoclone} to ${outputPath}: ✅`])};`;
-	command += `git clone --branch ${quote([String(bitbucketBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
+	const cloneUrlArgument =
+		credentialMode === "environment"
+			? `"${cloneUrl}"`
+			: quote([String(cloneUrl ?? "")]);
+	command += `git clone --branch ${quote([String(bitbucketBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${cloneUrlArgument} ${quote([String(outputPath ?? "")])} --progress;`;
 	return command;
 };
 

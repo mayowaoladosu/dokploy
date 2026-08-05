@@ -9,9 +9,11 @@
 
 // import { getServerAuthSession } from "@/server/auth";
 import { db } from "@dokploy/server/db";
+import type { ApiCredentialScope } from "@dokploy/server/db/schema";
 import { hasValidLicense } from "@dokploy/server/index";
 import type { statements } from "@dokploy/server/lib/access-control";
 import { validateRequest } from "@dokploy/server/lib/auth";
+import { assertApiCredentialScope } from "@dokploy/server/services/api-credential-scope";
 import { checkPermission } from "@dokploy/server/services/permission";
 import { isPlatformAdmin } from "@dokploy/server/services/platform";
 import type { OpenApiMeta } from "@dokploy/trpc-openapi";
@@ -42,7 +44,12 @@ interface CreateContextOptions {
 		  })
 		| null;
 	session:
-		| (Session & { activeOrganizationId: string; impersonatedBy?: string })
+		| (Session & {
+				activeOrganizationId: string;
+				impersonatedBy?: string;
+				apiKeyId?: string;
+				apiCredentialScope?: ApiCredentialScope | null;
+		  })
 		| null;
 	req: CreateNextContextOptions["req"];
 	res: CreateNextContextOptions["res"];
@@ -159,10 +166,16 @@ export const publicProcedure = t.procedure;
  *
  * @see https://trpc.io/docs/procedures
  */
-export const protectedProcedure = t.procedure.use(({ ctx, next }) => {
+export const protectedProcedure = t.procedure.use(({ ctx, next, type }) => {
 	if (!ctx.session || !ctx.user) {
 		throw new TRPCError({ code: "UNAUTHORIZED" });
 	}
+	assertApiCredentialScope(
+		ctx.session.apiCredentialScope,
+		"api",
+		type === "mutation" ? "write" : "read",
+		{},
+	);
 	return next({
 		ctx: {
 			// infers the `session` as non-nullable
@@ -181,6 +194,7 @@ export const cliProcedure = t.procedure.use(({ ctx, next }) => {
 	) {
 		throw new TRPCError({ code: "UNAUTHORIZED" });
 	}
+	assertApiCredentialScope(ctx.session.apiCredentialScope, "api", "admin", {});
 	return next({
 		ctx: {
 			// infers the `session` as non-nullable
@@ -199,6 +213,7 @@ export const adminProcedure = t.procedure.use(({ ctx, next }) => {
 	) {
 		throw new TRPCError({ code: "UNAUTHORIZED" });
 	}
+	assertApiCredentialScope(ctx.session.apiCredentialScope, "api", "admin", {});
 	return next({
 		ctx: {
 			// infers the `session` as non-nullable
@@ -232,33 +247,41 @@ export const platformAdminProcedure = protectedProcedure.use(
  * Does NOT call the license server on every request; full validation (haveValidLicenseKey)
  * is used in the UI gate and when activating/validating keys.
  */
-export const enterpriseProcedure = t.procedure.use(async ({ ctx, next }) => {
-	if (
-		!ctx.session ||
-		!ctx.user ||
-		(ctx.user.role !== "owner" && ctx.user.role !== "admin")
-	) {
-		throw new TRPCError({ code: "UNAUTHORIZED" });
-	}
+export const enterpriseProcedure = t.procedure.use(
+	async ({ ctx, next, type }) => {
+		if (
+			!ctx.session ||
+			!ctx.user ||
+			(ctx.user.role !== "owner" && ctx.user.role !== "admin")
+		) {
+			throw new TRPCError({ code: "UNAUTHORIZED" });
+		}
+		assertApiCredentialScope(
+			ctx.session.apiCredentialScope,
+			"api",
+			type === "mutation" ? "write" : "read",
+			{},
+		);
 
-	const hasValidLicenseResult = await hasValidLicense(
-		ctx.session.activeOrganizationId,
-	);
+		const hasValidLicenseResult = await hasValidLicense(
+			ctx.session.activeOrganizationId,
+		);
 
-	if (!hasValidLicenseResult) {
-		throw new TRPCError({
-			code: "FORBIDDEN",
-			message: "Valid enterprise license required",
+		if (!hasValidLicenseResult) {
+			throw new TRPCError({
+				code: "FORBIDDEN",
+				message: "Valid enterprise license required",
+			});
+		}
+
+		return next({
+			ctx: {
+				session: ctx.session,
+				user: ctx.user,
+			},
 		});
-	}
-
-	return next({
-		ctx: {
-			session: ctx.session,
-			user: ctx.user,
-		},
-	});
-});
+	},
+);
 
 /**
  * Permission-checked procedure factory.
@@ -278,7 +301,13 @@ export const withPermission = <R extends Resource>(
 	resource: R,
 	action: ActionOf<R>,
 ) =>
-	protectedProcedure.use(async ({ ctx, next }) => {
+	protectedProcedure.use(async ({ ctx, next, getRawInput }) => {
+		assertApiCredentialScope(
+			ctx.session.apiCredentialScope,
+			resource,
+			action,
+			await getRawInput(),
+		);
 		await checkPermission(ctx, { [resource]: [action] } as any);
 		return next();
 	});

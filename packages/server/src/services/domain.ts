@@ -1,5 +1,6 @@
 import dns from "node:dns";
 import { promisify } from "node:util";
+import { IS_MANAGED_PAAS } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
 import { getWebServerSettings } from "@dokploy/server/services/web-server-settings";
 import { generateRandomDomain } from "@dokploy/server/templates";
@@ -10,9 +11,17 @@ import type { z } from "zod";
 import { type apiCreateDomain, domains } from "../db/schema";
 import { findApplicationById } from "./application";
 import { detectCDNProvider } from "./cdn";
+import {
+	initializeDomainVerification,
+	isDomainVerified,
+} from "./domain-verification";
+import { findApplicationPlatformPlacement } from "./platform-infrastructure";
 import { findServerById } from "./server";
 
 export type Domain = typeof domains.$inferSelect;
+
+export const normalizeDomainHost = (host: string) =>
+	host.trim().toLowerCase().replace(/\.+$/, "");
 
 export const createDomain = async (input: z.infer<typeof apiCreateDomain>) => {
 	const result = await db.transaction(async (tx) => {
@@ -20,7 +29,7 @@ export const createDomain = async (input: z.infer<typeof apiCreateDomain>) => {
 			.insert(domains)
 			.values({
 				...input,
-				host: input.host?.trim(),
+				host: input.host ? normalizeDomainHost(input.host) : input.host,
 			} as typeof domains.$inferInsert)
 			.returning()
 			.then((response) => response[0]);
@@ -32,13 +41,28 @@ export const createDomain = async (input: z.infer<typeof apiCreateDomain>) => {
 			});
 		}
 
-		if (domain.applicationId) {
-			const application = await findApplicationById(domain.applicationId);
-			await manageDomain(application, domain);
-		}
-
 		return domain;
 	});
+	if (IS_MANAGED_PAAS) {
+		try {
+			await initializeDomainVerification(result);
+		} catch (error) {
+			await db.delete(domains).where(eq(domains.domainId, result.domainId));
+			throw error;
+		}
+	}
+	if (result.applicationId) {
+		const placement = await findApplicationPlatformPlacement(
+			result.applicationId,
+		);
+		if (
+			placement?.runtime !== "kubernetes" &&
+			(!IS_MANAGED_PAAS || (await isDomainVerified(result.domainId)))
+		) {
+			const application = await findApplicationById(result.applicationId);
+			await manageDomain(application, result);
+		}
+	}
 
 	return result;
 };
@@ -124,16 +148,39 @@ export const updateDomainById = async (
 	domainId: string,
 	domainData: Partial<Domain>,
 ) => {
+	const previous =
+		IS_MANAGED_PAAS && domainData.host
+			? await db.query.domains.findFirst({
+					where: eq(domains.domainId, domainId),
+					columns: { host: true },
+				})
+			: null;
 	const domain = await db
 		.update(domains)
 		.set({
 			...domainData,
-			...(domainData.host && { host: domainData.host.trim() }),
+			...(domainData.host && {
+				host: normalizeDomainHost(domainData.host),
+			}),
 		})
 		.where(eq(domains.domainId, domainId))
 		.returning();
 
-	return domain[0];
+	const updated = domain[0];
+	if (IS_MANAGED_PAAS && updated && domainData.host) {
+		try {
+			await initializeDomainVerification(updated);
+		} catch (error) {
+			if (previous) {
+				await db
+					.update(domains)
+					.set({ host: previous.host })
+					.where(eq(domains.domainId, domainId));
+			}
+			throw error;
+		}
+	}
+	return updated;
 };
 
 export const removeDomainById = async (domainId: string) => {
