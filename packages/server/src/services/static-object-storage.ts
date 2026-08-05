@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
 	DeleteObjectsCommand,
+	GetObjectCommand,
 	HeadBucketCommand,
 	ListObjectsV2Command,
 	PutObjectCommand,
@@ -179,6 +180,22 @@ export const createS3ObjectStorageClient = ({
 				}),
 			);
 		},
+		get: async (key: string, maxBytes = 1024 * 1024) => {
+			const objectKey = normalizeStaticAssetPath(key);
+			const response = await s3.send(
+				new GetObjectCommand({ Bucket: storage.bucket, Key: objectKey }),
+			);
+			if (!response.Body)
+				throw new Error("Object-storage response had no body");
+			if (response.ContentLength && response.ContentLength > maxBytes) {
+				throw new Error("Object-storage response exceeded the size limit");
+			}
+			const bytes = await response.Body.transformToByteArray();
+			if (bytes.byteLength > maxBytes) {
+				throw new Error("Object-storage response exceeded the size limit");
+			}
+			return bytes;
+		},
 		deletePrefix: async (prefix: string) => {
 			const normalized = `${normalizeStaticAssetPath(prefix).replace(/\/+$/, "")}/`;
 			let continuationToken: string | undefined;
@@ -208,6 +225,85 @@ export const createS3ObjectStorageClient = ({
 			} while (continuationToken);
 		},
 	};
+};
+
+export const recordStaticAssetPublication = async ({
+	storage,
+	organizationId,
+	applicationId,
+	deploymentId,
+	objectPrefix,
+	publicBaseUrl,
+	manifestDigest,
+	fileCount,
+	totalBytes,
+	metadata = {},
+}: {
+	storage: PlatformObjectStorage;
+	organizationId: string;
+	applicationId: string;
+	deploymentId: string;
+	objectPrefix: string;
+	publicBaseUrl: string;
+	manifestDigest: string;
+	fileCount: number;
+	totalBytes: number;
+	metadata?: Record<string, unknown>;
+}) => {
+	const [publication] = await db
+		.insert(platformStaticAssetPublications)
+		.values({
+			objectStorageId: storage.objectStorageId,
+			applicationId,
+			deploymentId,
+			status: "active",
+			objectPrefix,
+			publicBaseUrl,
+			manifestDigest,
+			fileCount,
+			totalBytes,
+			metadata,
+		})
+		.onConflictDoUpdate({
+			target: platformStaticAssetPublications.deploymentId,
+			set: {
+				objectStorageId: storage.objectStorageId,
+				status: "active",
+				objectPrefix,
+				publicBaseUrl,
+				manifestDigest,
+				fileCount,
+				totalBytes,
+				errorMessage: null,
+				metadata,
+				updatedAt: new Date(),
+			},
+		})
+		.returning();
+	if (!publication) throw new Error("Failed to persist static publication");
+	const observedAt = new Date();
+	await recordUsageEvent({
+		idempotencyKey: `${deploymentId}:static-storage-bytes`,
+		organizationId,
+		applicationId,
+		deploymentId,
+		metric: "storage_byte_hours",
+		source: "storage",
+		quantity: BigInt(totalBytes),
+		unit: "byte_hours",
+		periodStart: observedAt,
+		periodEnd: new Date(observedAt.getTime() + 60 * 60 * 1_000),
+		metadata: { objectStorageId: storage.objectStorageId, objectPrefix },
+	});
+	return publication;
+};
+
+export const removeStaticAssetPublicationRecord = async (
+	deploymentId: string,
+) => {
+	await db
+		.delete(platformStaticAssetPublications)
+		.where(eq(platformStaticAssetPublications.deploymentId, deploymentId));
 };
 
 export const createS3StaticAssetPublisher = ({
@@ -289,53 +385,26 @@ export const createS3StaticAssetPublisher = ({
 				throw error;
 			}
 			const baseUrl = publicUrl(storage.publicBaseUrl, objectPrefix);
-			const [publication] = await db
-				.insert(platformStaticAssetPublications)
-				.values({
-					objectStorageId: storage.objectStorageId,
+			try {
+				await recordStaticAssetPublication({
+					storage,
+					organizationId: input.organizationId,
 					applicationId: input.applicationId,
 					deploymentId: input.deploymentId,
-					status: "active",
 					objectPrefix,
 					publicBaseUrl: baseUrl,
 					manifestDigest,
 					fileCount: normalized.length,
 					totalBytes,
 					metadata: { manifestObject: `${objectPrefix}/manifest.json` },
-				})
-				.onConflictDoUpdate({
-					target: platformStaticAssetPublications.deploymentId,
-					set: {
-						objectStorageId: storage.objectStorageId,
-						status: "active",
-						objectPrefix,
-						publicBaseUrl: baseUrl,
-						manifestDigest,
-						fileCount: normalized.length,
-						totalBytes,
-						errorMessage: null,
-						updatedAt: new Date(),
-					},
-				})
-				.returning();
-			if (!publication) throw new Error("Failed to persist static publication");
-			const observedAt = new Date();
-			await recordUsageEvent({
-				idempotencyKey: `${input.deploymentId}:static-storage-bytes`,
-				organizationId: input.organizationId,
-				applicationId: input.applicationId,
-				deploymentId: input.deploymentId,
-				metric: "storage_byte_hours",
-				source: "storage",
-				quantity: BigInt(totalBytes),
-				unit: "byte_hours",
-				periodStart: observedAt,
-				periodEnd: new Date(observedAt.getTime() + 60 * 60 * 1_000),
-				metadata: {
-					objectStorageId: storage.objectStorageId,
-					objectPrefix,
-				},
-			});
+				});
+			} catch (error) {
+				await Promise.allSettled([
+					objects.deletePrefix(objectPrefix),
+					removeStaticAssetPublicationRecord(input.deploymentId),
+				]);
+				throw error;
+			}
 			return {
 				objectPrefix,
 				publicBaseUrl: baseUrl,

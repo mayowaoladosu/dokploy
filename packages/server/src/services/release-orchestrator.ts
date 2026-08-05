@@ -174,6 +174,10 @@ export const createReleaseOrchestrator = (
 									"Cancelled release rollback did not become ready",
 							);
 						}
+						await dependencies.edgeRouter.rollback?.({
+							application,
+							deploymentId,
+						});
 					});
 				} else {
 					cleanupOperations.push(
@@ -373,19 +377,6 @@ export const createReleaseOrchestrator = (
 					await transition("verifying");
 				}
 				if (release.state === "verifying") {
-					edgePublicationStarted = true;
-					const publication = await dependencies.edgeRouter.publish({
-						releaseId: release.releaseId,
-						deploymentId: deployment.deploymentId,
-						application,
-					});
-					await recordReleaseTelemetryBestEffort(() =>
-						dependencies.telemetrySink.record({
-							type: "edge.published",
-							deploymentId: deployment.deploymentId,
-							publication,
-						}),
-					);
 					const health = await dependencies.runtimeScheduler.verifyHealth({
 						application,
 					});
@@ -406,6 +397,20 @@ export const createReleaseOrchestrator = (
 							health.error || "Runtime health verification failed",
 						);
 					}
+					edgePublicationStarted = true;
+					const publication = await dependencies.edgeRouter.publish({
+						releaseId: release.releaseId,
+						deploymentId: deployment.deploymentId,
+						application,
+						artifact,
+					});
+					await recordReleaseTelemetryBestEffort(() =>
+						dependencies.telemetrySink.record({
+							type: "edge.published",
+							deploymentId: deployment.deploymentId,
+							publication,
+						}),
+					);
 					await transition("ready", { imageRef: artifact.imageRef });
 					return { releaseId: release.releaseId, artifact, health };
 				}
@@ -436,6 +441,16 @@ export const createReleaseOrchestrator = (
 							),
 						);
 				}
+				if (runtimeMutationStarted && !previousImageRef) {
+					await dependencies.runtimeScheduler
+						.remove({ application })
+						.catch((removeError) =>
+							console.error(
+								"Failed to remove rejected first release",
+								removeError,
+							),
+						);
+				}
 				if (
 					(runtimeMutationStarted || release.state === "rolling_back") &&
 					previousImageRef
@@ -459,6 +474,10 @@ export const createReleaseOrchestrator = (
 								rollbackStatus.message || "Rollback did not become ready",
 							);
 						}
+						await dependencies.edgeRouter.rollback?.({
+							application,
+							deploymentId: deployment.deploymentId,
+						});
 						await transition("rolled_back", { imageRef: rollbackImageRef });
 						await recordReleaseTelemetryBestEffort(() =>
 							dependencies.telemetrySink.record({

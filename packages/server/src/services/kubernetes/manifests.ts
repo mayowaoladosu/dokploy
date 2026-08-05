@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { KubernetesObject } from "@kubernetes/client-node";
 import { quote } from "shell-quote";
+import { buildOutputDiscoveryShell } from "../build-output-manifest";
 
 export type KubernetesManifest = KubernetesObject & Record<string, unknown>;
 
@@ -94,6 +95,8 @@ export type KubernetesBuildJobSpec = {
 	buildCommand: string;
 	sourceRunsInBuilder: boolean;
 	localImageRef: string;
+	workspacePath: string;
+	publishDirectory?: string | null;
 	runtimeClassName?: string | null;
 	nodeSelector?: Record<string, string>;
 	tolerations?: KubernetesPlacementSpec["tolerations"];
@@ -143,6 +146,34 @@ export type KubernetesSupplyChainJobSpec = {
 	activeDeadlineSeconds: number;
 	resources: KubernetesResourceSpec;
 	registrySecrets: Record<string, string>;
+};
+
+export type KubernetesOutputPublisherJobSpec = {
+	applicationId: string;
+	organizationId: string;
+	deploymentId: string;
+	namespace: string;
+	publisherImage: string;
+	manifestDigest: string;
+	objectPrefix: string;
+	publicBaseUrl: string;
+	storageProvider: "r2" | "s3";
+	storageEndpoint: string;
+	storageRegion: string;
+	storageBucket: string;
+	storageAccessKeyId: string;
+	storageSecretAccessKey: string;
+	serverSideEncryption?: "AES256" | "aws:kms";
+	kmsKeyId?: string;
+	cacheControl?: string;
+	runtimeClassName?: string | null;
+	nodeSelector?: Record<string, string>;
+	tolerations?: KubernetesPlacementSpec["tolerations"];
+	serviceAccountAnnotations?: Record<string, string>;
+	podLabels?: Record<string, string>;
+	podAnnotations?: Record<string, string>;
+	activeDeadlineSeconds: number;
+	resources: KubernetesResourceSpec;
 };
 
 const k8sName = (value: string, maxLength = 63) => {
@@ -932,6 +963,10 @@ export const buildKubernetesBuildManifests = (
 	const sourceSecretName = `${name}-source`;
 	const buildSecretName = `${name}-environment`;
 	const localImage = quote([spec.localImageRef]);
+	const outputDiscovery = buildOutputDiscoveryShell({
+		workspace: spec.workspacePath,
+		publishDirectory: spec.publishDirectory,
+	});
 	const builderScript = `
 set -e
 export HOME=/home/builder
@@ -939,6 +974,12 @@ export XDG_RUNTIME_DIR=/tmp/docker-runtime
 export DOCKER_HOST=unix:///tmp/docker-runtime/docker.sock
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR"
 mkdir -p /etc/dokploy/ssh /etc/dokploy/applications /etc/dokploy/patch-repos
+for tool in node base64 jq sha256sum find tar docker; do
+	if ! command -v "$tool" >/dev/null 2>&1; then
+		echo "Required managed builder tool is unavailable: $tool"
+		exit 1
+	fi
+done
 dockerd-rootless.sh --host="$DOCKER_HOST" --storage-driver=fuse-overlayfs > /tmp/dockerd.log 2>&1 &
 for attempt in $(seq 1 60); do
 	if docker info >/dev/null 2>&1; then break; fi
@@ -947,10 +988,14 @@ for attempt in $(seq 1 60); do
 done
 ${spec.sourceRunsInBuilder ? spec.sourceCommand : ""}
 ${spec.buildCommand}
+${outputDiscovery}
 image_id=$(docker image inspect --format '{{.Id}}' ${localImage})
 image_size=$(docker image inspect --format '{{.Size}}' ${localImage})
+output_manifest_digest="sha256:$(sha256sum /artifacts/output-manifest.json | cut -d ' ' -f 1)"
+output_file_count=$(jq -er '.staticOutput.fileCount' /artifacts/output-manifest.json)
+output_total_bytes=$(jq -er '.staticOutput.totalBytes' /artifacts/output-manifest.json)
 docker save --output /artifacts/image.tar ${localImage}
-printf '{"imageId":"%s","imageSizeBytes":%s}' "$image_id" "$image_size" >/artifacts/image.json
+printf '{"imageId":"%s","imageSizeBytes":%s,"outputManifestDigest":"%s","outputFileCount":%s,"outputTotalBytes":%s}' "$image_id" "$image_size" "$output_manifest_digest" "$output_file_count" "$output_total_bytes" >/artifacts/image.json
 cat /artifacts/image.json >/dev/termination-log
 `;
 	return [
@@ -1261,6 +1306,219 @@ printf '{"imageId":"%s","repoDigests":["%s@%s"],"imageSizeBytes":%s}' "$image_id
 								persistentVolumeClaim: { claimName: artifactClaimName },
 							},
 							{ name: "home", emptyDir: { sizeLimit: "512Mi" } },
+						],
+					},
+				},
+			},
+		},
+	];
+};
+
+export const buildKubernetesOutputPublisherManifests = (
+	spec: KubernetesOutputPublisherJobSpec,
+): KubernetesManifest[] => {
+	if (!/^[^\s@]+@sha256:[a-f0-9]{64}$/.test(spec.publisherImage)) {
+		throw new Error("Output publisher image must use an immutable digest");
+	}
+	if (!/^sha256:[a-f0-9]{64}$/.test(spec.manifestDigest)) {
+		throw new Error("Output manifest must use an immutable digest");
+	}
+	if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,1023}$/.test(spec.objectPrefix)) {
+		throw new Error("Output object prefix is invalid");
+	}
+	if (spec.serverSideEncryption === "aws:kms" && !spec.kmsKeyId) {
+		throw new Error("Output publisher KMS encryption requires a key ID");
+	}
+	if (
+		spec.cacheControl &&
+		(spec.cacheControl.length > 1_024 || /[\r\n]/.test(spec.cacheControl))
+	) {
+		throw new Error("Output publisher cache control is invalid");
+	}
+	for (const [value, field] of [
+		[spec.storageEndpoint, "storage endpoint"],
+		[spec.publicBaseUrl, "public base URL"],
+	] as const) {
+		const url = new URL(value);
+		if (url.protocol !== "https:" || url.username || url.password) {
+			throw new Error(`Output ${field} must use clean HTTPS`);
+		}
+	}
+	const buildName = k8sName(`build-${spec.deploymentId}`);
+	const name = k8sName(`output-${spec.deploymentId}`);
+	const artifactClaimName = `${buildName}-artifacts`;
+	const serviceAccountName = `${name}-identity`;
+	const secretName = `${name}-storage`;
+	const labels = {
+		...labelsFor(spec.applicationId, spec.organizationId, "output-publisher"),
+		...spec.podLabels,
+	};
+	const outputScript = `
+set -eu
+for tool in rclone jq sha256sum find awk wc; do
+	if ! command -v "$tool" >/dev/null 2>&1; then
+		echo "Required output publisher tool is unavailable: $tool"
+		exit 1
+	fi
+done
+manifest=/artifacts/output-manifest.json
+static_root=/artifacts/static
+if [ ! -f "$manifest" ] || [ ! -d "$static_root" ]; then
+	echo "Build output artifacts are unavailable"
+	exit 1
+fi
+if [ -n "$(find "$static_root" -type l -print -quit)" ]; then
+	echo "Static output may not contain symbolic links"
+	exit 1
+fi
+actual_digest="sha256:$(sha256sum "$manifest" | cut -d ' ' -f 1)"
+if [ "$actual_digest" != "$VLYV_OUTPUT_MANIFEST_DIGEST" ]; then
+	echo "Build output manifest digest mismatch"
+	exit 1
+fi
+actual_files=$(find "$static_root" -type f -printf '.' | wc -c | tr -d ' ')
+actual_bytes=$(find "$static_root" -type f -printf '%s\n' | awk '{ total += $1 } END { print total + 0 }')
+expected_files=$(jq -er '.staticOutput.fileCount' "$manifest")
+expected_bytes=$(jq -er '.staticOutput.totalBytes' "$manifest")
+if [ "$actual_files" != "$expected_files" ] || [ "$actual_bytes" != "$expected_bytes" ]; then
+	echo "Build output static inventory mismatch"
+	exit 1
+fi
+destination="vlyv:$VLYV_STORAGE_BUCKET/$VLYV_OBJECT_PREFIX"
+cleanup_failed_upload() {
+	status=$?
+	if [ "$status" -ne 0 ]; then rclone purge "$destination" || true; fi
+	exit "$status"
+}
+trap cleanup_failed_upload EXIT
+rclone copy "$static_root" "$destination" --immutable --checkers 8 --transfers 8 --header-upload "Cache-Control: $VLYV_STATIC_CACHE_CONTROL"
+rclone copyto "$manifest" "$destination/output-manifest.json" --immutable --header-upload 'Cache-Control: no-cache'
+jq -cn \
+	--arg manifestDigest "$actual_digest" \
+	--arg objectPrefix "$VLYV_OBJECT_PREFIX" \
+	--arg publicBaseUrl "$VLYV_PUBLIC_BASE_URL" \
+	--argjson fileCount "$actual_files" \
+	--argjson totalBytes "$actual_bytes" \
+	'{manifestDigest:$manifestDigest,objectPrefix:$objectPrefix,publicBaseUrl:$publicBaseUrl,fileCount:$fileCount,totalBytes:$totalBytes}' >/dev/termination-log
+trap - EXIT
+`;
+	return [
+		{
+			apiVersion: "v1",
+			kind: "ServiceAccount",
+			metadata: {
+				name: serviceAccountName,
+				namespace: spec.namespace,
+				labels,
+				annotations: spec.serviceAccountAnnotations,
+			},
+			automountServiceAccountToken: false,
+		},
+		{
+			apiVersion: "v1",
+			kind: "Secret",
+			metadata: { name: secretName, namespace: spec.namespace, labels },
+			type: "Opaque",
+			data: secretData({
+				RCLONE_CONFIG_VLYV_TYPE: "s3",
+				RCLONE_CONFIG_VLYV_PROVIDER:
+					spec.storageProvider === "r2" ? "Cloudflare" : "Other",
+				RCLONE_CONFIG_VLYV_ACCESS_KEY_ID: spec.storageAccessKeyId,
+				RCLONE_CONFIG_VLYV_SECRET_ACCESS_KEY: spec.storageSecretAccessKey,
+				RCLONE_CONFIG_VLYV_ENDPOINT: spec.storageEndpoint,
+				RCLONE_CONFIG_VLYV_REGION: spec.storageRegion,
+				RCLONE_CONFIG_VLYV_ACL: "private",
+				RCLONE_CONFIG_VLYV_NO_CHECK_BUCKET: "true",
+				...(spec.serverSideEncryption
+					? {
+							RCLONE_CONFIG_VLYV_SERVER_SIDE_ENCRYPTION:
+								spec.serverSideEncryption,
+						}
+					: {}),
+				...(spec.kmsKeyId
+					? { RCLONE_CONFIG_VLYV_SSE_KMS_KEY_ID: spec.kmsKeyId }
+					: {}),
+			}),
+		},
+		{
+			apiVersion: "batch/v1",
+			kind: "Job",
+			metadata: { name, namespace: spec.namespace, labels },
+			spec: {
+				backoffLimit: 1,
+				activeDeadlineSeconds: spec.activeDeadlineSeconds,
+				ttlSecondsAfterFinished: 900,
+				template: {
+					metadata: {
+						labels,
+						annotations: spec.podAnnotations,
+					},
+					spec: {
+						restartPolicy: "Never",
+						serviceAccountName,
+						automountServiceAccountToken: false,
+						runtimeClassName: spec.runtimeClassName || undefined,
+						nodeSelector: spec.nodeSelector,
+						tolerations: spec.tolerations,
+						securityContext: {
+							runAsNonRoot: true,
+							seccompProfile: { type: "RuntimeDefault" },
+						},
+						containers: [
+							{
+								name: "output-publisher",
+								image: spec.publisherImage,
+								imagePullPolicy: "IfNotPresent",
+								command: ["/bin/sh", "-lc"],
+								args: [outputScript],
+								envFrom: [{ secretRef: { name: secretName } }],
+								env: [
+									{
+										name: "VLYV_OUTPUT_MANIFEST_DIGEST",
+										value: spec.manifestDigest,
+									},
+									{
+										name: "VLYV_STORAGE_BUCKET",
+										value: spec.storageBucket,
+									},
+									{
+										name: "VLYV_OBJECT_PREFIX",
+										value: spec.objectPrefix,
+									},
+									{
+										name: "VLYV_PUBLIC_BASE_URL",
+										value: spec.publicBaseUrl,
+									},
+									{
+										name: "VLYV_STATIC_CACHE_CONTROL",
+										value:
+											spec.cacheControl || "public, max-age=0, must-revalidate",
+									},
+								],
+								resources: workloadResources(spec.resources),
+								securityContext: {
+									allowPrivilegeEscalation: false,
+									capabilities: { drop: ["ALL"] },
+									readOnlyRootFilesystem: true,
+								},
+								terminationMessagePath: "/dev/termination-log",
+								terminationMessagePolicy: "File",
+								volumeMounts: [
+									{
+										name: "artifacts",
+										mountPath: "/artifacts",
+										readOnly: true,
+									},
+									{ name: "tmp", mountPath: "/tmp" },
+								],
+							},
+						],
+						volumes: [
+							{
+								name: "artifacts",
+								persistentVolumeClaim: { claimName: artifactClaimName },
+							},
+							{ name: "tmp", emptyDir: { sizeLimit: "512Mi" } },
 						],
 					},
 				},

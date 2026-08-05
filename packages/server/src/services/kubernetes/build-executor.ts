@@ -4,6 +4,7 @@ import type {
 	PlatformBuildPool,
 	PlatformClusterMetadata,
 	PlatformNodePool,
+	PlatformObjectStorage,
 	PlatformPlacement,
 } from "@dokploy/server/db/schema";
 import { findBitbucketById } from "@dokploy/server/services/bitbucket";
@@ -13,6 +14,10 @@ import { findGitlabById } from "@dokploy/server/services/gitlab";
 import { assertBuildPoolReadiness } from "@dokploy/server/services/platform-infrastructure";
 import { findSSHKeyById } from "@dokploy/server/services/ssh-key";
 import { getEnvironmentVariablesObject } from "@dokploy/server/utils/docker/utils";
+import {
+	getBuildAppDirectory,
+	getDockerContextPath,
+} from "@dokploy/server/utils/filesystem/directory";
 import { getBitbucketCredentialEnvironmentNames } from "@dokploy/server/utils/providers/bitbucket";
 import { getDockerSourceCredentialEnvironmentNames } from "@dokploy/server/utils/providers/docker";
 import { getCustomGitCredentialEnvironmentNames } from "@dokploy/server/utils/providers/git";
@@ -33,12 +38,25 @@ import type { V1Pod } from "@kubernetes/client-node";
 import { z } from "zod";
 import {
 	type BuildExecutionArtifact,
+	type BuildExecutionInput,
 	type BuildExecutor,
 	selectImmutableImageRef,
 } from "../build-executor";
+import {
+	buildOutputManifestDigest,
+	buildOutputManifestSummary,
+	parseBuildOutputManifestJson,
+} from "../build-output-manifest";
+import {
+	createS3ObjectStorageClient,
+	recordStaticAssetPublication,
+	removeStaticAssetPublicationRecord,
+	staticAssetObjectPrefix,
+} from "../static-object-storage";
 import type { KubernetesControlPlane } from "./client";
 import {
 	buildKubernetesBuildManifests,
+	buildKubernetesOutputPublisherManifests,
 	buildKubernetesPublisherManifests,
 	buildKubernetesSupplyChainManifests,
 	type KubernetesResourceSpec,
@@ -51,6 +69,23 @@ type KubernetesBuildExecutorInput = {
 	clusterMetadata: PlatformClusterMetadata;
 	buildPool: PlatformBuildPool;
 	nodePool: PlatformNodePool | null;
+	objectStorage: PlatformObjectStorage;
+	outputPublicationStore?: {
+		getManifest(objectPrefix: string): Promise<Uint8Array>;
+		record(input: {
+			organizationId: string;
+			applicationId: string;
+			deploymentId: string;
+			objectPrefix: string;
+			publicBaseUrl: string;
+			manifestDigest: string;
+			fileCount: number;
+			totalBytes: number;
+			manifest: ReturnType<typeof parseBuildOutputManifestJson>;
+		}): Promise<void>;
+		deletePrefix(objectPrefix: string): Promise<void>;
+		removeRecord(deploymentId: string): Promise<void>;
+	};
 	pollIntervalMs?: number;
 	sleep?: (durationMs: number) => Promise<void>;
 };
@@ -75,6 +110,25 @@ const buildArchiveTerminationMessage = z.object({
 		.int()
 		.positive()
 		.max(100 * 1024 ** 3),
+	outputManifestDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+	outputFileCount: z.number().int().min(0).max(100_000),
+	outputTotalBytes: z
+		.number()
+		.int()
+		.min(0)
+		.max(10 * 1024 ** 3),
+});
+
+const outputPublicationTerminationMessage = z.object({
+	manifestDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+	objectPrefix: z.string().min(1).max(1_024),
+	publicBaseUrl: z.string().url(),
+	fileCount: z.number().int().min(0).max(100_000),
+	totalBytes: z
+		.number()
+		.int()
+		.min(0)
+		.max(10 * 1024 ** 3),
 });
 
 const supplyChainTerminationMessage = z.object({
@@ -151,6 +205,17 @@ const buildResources = (): KubernetesResourceSpec => ({
 		2 * 1024 ** 3,
 	),
 });
+
+const outputWorkspaceFor = (
+	application: BuildExecutionInput["application"],
+) => {
+	const buildPath = getBuildAppDirectory(application);
+	if (application.buildType !== "dockerfile") return buildPath;
+	const configuredContext = getDockerContextPath(application);
+	if (configuredContext) return configuredContext;
+	const normalized = buildPath.replace(/\\/g, "/");
+	return normalized.slice(0, normalized.lastIndexOf("/")) || ".";
+};
 
 const terminatedContainer = (pods: V1Pod[], containerName: string) => {
 	for (const pod of pods) {
@@ -298,6 +363,20 @@ const parseSupplyChainTerminationMessage = (message: string | undefined) => {
 	}
 };
 
+const parseOutputPublicationTerminationMessage = (
+	message: string | undefined,
+) => {
+	if (!message) throw new Error("Output publisher did not report metadata");
+	if (Buffer.byteLength(message, "utf8") > 16 * 1024) {
+		throw new Error("Output publication metadata exceeded the size limit");
+	}
+	try {
+		return outputPublicationTerminationMessage.parse(JSON.parse(message));
+	} catch {
+		throw new Error("Output publisher returned invalid metadata");
+	}
+};
+
 export const assertSupplyChainPolicy = (
 	result: z.infer<typeof supplyChainTerminationMessage>,
 	policy: {
@@ -319,6 +398,8 @@ export const createKubernetesBuildExecutor = ({
 	clusterMetadata,
 	buildPool,
 	nodePool,
+	objectStorage,
+	outputPublicationStore,
 	pollIntervalMs = 2_000,
 	sleep = defaultSleep,
 }: KubernetesBuildExecutorInput): BuildExecutor => {
@@ -329,6 +410,38 @@ export const createKubernetesBuildExecutor = ({
 			"Kubernetes build pool must configure a rootless builderImage",
 		);
 	}
+	const publicationStore =
+		outputPublicationStore ??
+		(() => {
+			const client = createS3ObjectStorageClient({ storage: objectStorage });
+			return {
+				getManifest: (objectPrefix: string) =>
+					client.get(`${objectPrefix}/output-manifest.json`),
+				record: async (input: {
+					organizationId: string;
+					applicationId: string;
+					deploymentId: string;
+					objectPrefix: string;
+					publicBaseUrl: string;
+					manifestDigest: string;
+					fileCount: number;
+					totalBytes: number;
+					manifest: ReturnType<typeof parseBuildOutputManifestJson>;
+				}) => {
+					await recordStaticAssetPublication({
+						storage: objectStorage,
+						...input,
+						metadata: {
+							manifestObject: `${input.objectPrefix}/output-manifest.json`,
+							outputManifest: input.manifest,
+						},
+					});
+				},
+				deletePrefix: (objectPrefix: string) =>
+					client.deletePrefix(objectPrefix),
+				removeRecord: removeStaticAssetPublicationRecord,
+			};
+		})();
 
 	const waitForJob = async <T>(
 		namespace: string,
@@ -414,6 +527,9 @@ export const createKubernetesBuildExecutor = ({
 			const verifierJobName = kubernetesManifestName(
 				`verify-${input.deploymentId}`,
 			);
+			const outputPublisherJobName = kubernetesManifestName(
+				`output-${input.deploymentId}`,
+			);
 			const runtimeImageRef = buildPoolImageRef(
 				buildPool,
 				releaseIdentity,
@@ -455,6 +571,11 @@ export const createKubernetesBuildExecutor = ({
 				buildCommand: input.buildCommand,
 				sourceRunsInBuilder: input.application.sourceType === "docker",
 				localImageRef,
+				workspacePath: outputWorkspaceFor(input.application),
+				publishDirectory:
+					input.application.buildType === "static"
+						? input.application.publishDirectory
+						: undefined,
 				runtimeClassName:
 					nodePool?.runtimeClassName || clusterMetadata.buildRuntimeClassName,
 				nodeSelector: nodePool?.labels,
@@ -641,28 +762,176 @@ export const createKubernetesBuildExecutor = ({
 				}
 				assertSupplyChainPolicy(verification.message, supplyChain);
 
-				return {
-					imageId: publication.message.imageId,
-					imageDigest: immutable.imageDigest,
-					imageRef: immutable.imageRef,
-					imageSizeBytes: publication.message.imageSizeBytes,
-					builder: input.application.buildType,
-					executor: "kubernetes-job",
-					durationMs: Date.now() - startedAt,
-					metadata: {
-						clusterId: buildPool.clusterId,
-						buildPoolId: buildPool.buildPoolId,
+				const objectPrefix = staticAssetObjectPrefix({
+					basePrefix: objectStorage.prefix,
+					organizationId: input.application.environment.project.organizationId,
+					applicationId: releaseIdentity,
+					deploymentId: input.deploymentId,
+				});
+				const publicBaseUrl = `${objectStorage.publicBaseUrl.replace(/\/+$/, "")}/${objectPrefix}`;
+				const outputPublisherManifests =
+					buildKubernetesOutputPublisherManifests({
+						applicationId: releaseIdentity,
+						organizationId:
+							input.application.environment.project.organizationId,
+						deploymentId: input.deploymentId,
 						namespace,
-						buildJobName,
-						buildPodName: buildResult.podName,
-						publisherJobName,
-						publisherPodName: publication.podName,
-						verifierJobName,
-						verifierPodName: verification.podName,
-						runtimeImageRef,
-						supplyChain: verification.message,
-					},
+						publisherImage: supplyChain.outputPublisherImage,
+						manifestDigest: buildResult.message.outputManifestDigest,
+						objectPrefix,
+						publicBaseUrl,
+						storageProvider: objectStorage.provider,
+						storageEndpoint: objectStorage.endpoint,
+						storageRegion: objectStorage.region,
+						storageBucket: objectStorage.bucket,
+						storageAccessKeyId: objectStorage.accessKeyId,
+						storageSecretAccessKey: objectStorage.secretAccessKey,
+						serverSideEncryption: objectStorage.metadata.serverSideEncryption,
+						kmsKeyId: objectStorage.metadata.kmsKeyId,
+						cacheControl: objectStorage.metadata.cacheControl,
+						runtimeClassName:
+							nodePool?.runtimeClassName ||
+							buildPool.runtimeClassName ||
+							clusterMetadata.buildRuntimeClassName,
+						nodeSelector: nodePool?.labels,
+						tolerations: nodePool?.taints,
+						serviceAccountAnnotations:
+							supplyChain.outputPublisherServiceAccountAnnotations,
+						podLabels: supplyChain.outputPublisherPodLabels,
+						podAnnotations: supplyChain.outputPublisherPodAnnotations,
+						activeDeadlineSeconds: Math.max(
+							Math.ceil(completionTimeoutMs / 1000),
+							60,
+						),
+						resources: buildResources(),
+					});
+				const outputCredentialSecret = outputPublisherManifests.find(
+					(manifest) => manifest.kind === "Secret",
+				);
+				const outputServiceAccount = outputPublisherManifests.find(
+					(manifest) => manifest.kind === "ServiceAccount",
+				);
+				const outputJob = {
+					apiVersion: "batch/v1",
+					kind: "Job",
+					metadata: { name: outputPublisherJobName, namespace },
 				};
+				let outputPublication: {
+					message: z.infer<typeof outputPublicationTerminationMessage>;
+					podName: string | null;
+					logs: string;
+				};
+				try {
+					try {
+						await client.apply(outputPublisherManifests);
+						outputPublication = await waitForJob(
+							namespace,
+							outputPublisherJobName,
+							"output-publisher",
+							completionTimeoutMs,
+							parseOutputPublicationTerminationMessage,
+						);
+					} finally {
+						await Promise.allSettled([
+							...(outputCredentialSecret
+								? [client.delete(outputCredentialSecret)]
+								: []),
+							...(outputServiceAccount
+								? [client.delete(outputServiceAccount)]
+								: []),
+							client.delete(outputJob),
+						]);
+					}
+					if (outputPublication.logs) {
+						await fs.appendFile(input.logPath, `${outputPublication.logs}\n`);
+					}
+					const outputMetadata = outputPublication.message;
+					if (
+						outputMetadata.manifestDigest !==
+							buildResult.message.outputManifestDigest ||
+						outputMetadata.fileCount !== buildResult.message.outputFileCount ||
+						outputMetadata.totalBytes !==
+							buildResult.message.outputTotalBytes ||
+						outputMetadata.objectPrefix !== objectPrefix ||
+						outputMetadata.publicBaseUrl !== publicBaseUrl
+					) {
+						throw new Error("Output publication did not match build metadata");
+					}
+					const manifestBytes =
+						await publicationStore.getManifest(objectPrefix);
+					if (
+						buildOutputManifestDigest(manifestBytes) !==
+						outputMetadata.manifestDigest
+					) {
+						throw new Error("Published output manifest digest mismatch");
+					}
+					const outputManifest = parseBuildOutputManifestJson(manifestBytes);
+					if (
+						outputManifest.staticOutput.fileCount !==
+							outputMetadata.fileCount ||
+						outputManifest.staticOutput.totalBytes !== outputMetadata.totalBytes
+					) {
+						throw new Error("Published output manifest inventory mismatch");
+					}
+					await publicationStore.record({
+						organizationId:
+							input.application.environment.project.organizationId,
+						applicationId: input.application.applicationId,
+						deploymentId: input.deploymentId,
+						objectPrefix,
+						publicBaseUrl,
+						manifestDigest: outputMetadata.manifestDigest,
+						fileCount: outputMetadata.fileCount,
+						totalBytes: outputMetadata.totalBytes,
+						manifest: outputManifest,
+					});
+
+					return {
+						imageId: publication.message.imageId,
+						imageDigest: immutable.imageDigest,
+						imageRef: immutable.imageRef,
+						imageSizeBytes: publication.message.imageSizeBytes,
+						builder: input.application.buildType,
+						executor: "kubernetes-job",
+						durationMs: Date.now() - startedAt,
+						metadata: {
+							clusterId: buildPool.clusterId,
+							buildPoolId: buildPool.buildPoolId,
+							namespace,
+							buildJobName,
+							buildPodName: buildResult.podName,
+							publisherJobName,
+							publisherPodName: publication.podName,
+							verifierJobName,
+							verifierPodName: verification.podName,
+							outputPublisherJobName,
+							outputPublisherPodName: outputPublication.podName,
+							runtimeImageRef,
+							supplyChain: verification.message,
+							output: {
+								manifest: outputManifest,
+								manifestDigest: outputMetadata.manifestDigest,
+								publicBaseUrl,
+								objectPrefix,
+								...buildOutputManifestSummary(outputManifest),
+							},
+						},
+					};
+				} catch (error) {
+					const cleanup = await Promise.allSettled([
+						publicationStore.deletePrefix(objectPrefix),
+						publicationStore.removeRecord(input.deploymentId),
+					]);
+					for (const result of cleanup) {
+						if (result.status === "rejected") {
+							console.error(
+								"Failed to clean rejected framework output",
+								result.reason,
+							);
+						}
+					}
+					throw error;
+				}
 			} finally {
 				await client.deleteNamespace(namespace);
 			}

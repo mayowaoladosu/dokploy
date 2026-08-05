@@ -1,5 +1,6 @@
 import {
 	buildKubernetesBuildManifests,
+	buildKubernetesOutputPublisherManifests,
 	buildKubernetesPublisherManifests,
 	buildKubernetesRoutingManifests,
 	buildKubernetesRuntimeManifests,
@@ -190,6 +191,7 @@ describe("Kubernetes build manifests", () => {
 		buildCommand: "set -e; echo build",
 		sourceRunsInBuilder: false,
 		localImageRef: "example-app:latest",
+		workspacePath: "/etc/dokploy/applications/example-app/code",
 		runtimeClassName: "gvisor",
 		activeDeadlineSeconds: 900,
 		artifactStorageClassName: "encrypted-ephemeral",
@@ -270,6 +272,81 @@ describe("Kubernetes build manifests", () => {
 				.filter(({ manifest }) => manifest.kind === "NetworkPolicy")
 				.every(({ index }) => index < jobIndex),
 		).toBe(true);
+	});
+});
+
+describe("Kubernetes framework output publisher", () => {
+	const outputManifests = buildKubernetesOutputPublisherManifests({
+		applicationId: "application-1",
+		organizationId: "organization-1",
+		deploymentId: "deployment-1",
+		namespace: "vlyv-build-abc",
+		publisherImage: `registry.example.com/output-publisher@sha256:${"a".repeat(64)}`,
+		manifestDigest: `sha256:${"b".repeat(64)}`,
+		objectPrefix: "assets/tenant/application/release",
+		publicBaseUrl: "https://assets.vlyv.dev/assets/tenant/application/release",
+		storageProvider: "r2",
+		storageEndpoint: "https://account.r2.cloudflarestorage.com",
+		storageRegion: "auto",
+		storageBucket: "vlyv-assets",
+		storageAccessKeyId: "storage-access-key",
+		storageSecretAccessKey: "storage-secret-key",
+		runtimeClassName: "gvisor",
+		activeDeadlineSeconds: 900,
+		resources: {
+			memoryLimitBytes: 536_870_912,
+			memoryRequestBytes: 134_217_728,
+			cpuLimitNano: 1_000_000_000,
+			cpuRequestNano: 250_000_000,
+		},
+	});
+
+	it("mounts build artifacts read-only and scopes storage credentials to one job", () => {
+		const job = findManifest(outputManifests, "Job");
+		const secret = findManifest(outputManifests, "Secret");
+		const podSpec = job.spec.template.spec;
+		const publisher = podSpec.containers[0];
+
+		expect(podSpec).toMatchObject({
+			automountServiceAccountToken: false,
+			runtimeClassName: "gvisor",
+			restartPolicy: "Never",
+		});
+		expect(publisher.image).toContain("@sha256:");
+		expect(publisher.volumeMounts).toContainEqual(
+			expect.objectContaining({
+				mountPath: "/artifacts",
+				readOnly: true,
+			}),
+		);
+		expect(publisher.args[0]).toContain("manifest digest mismatch");
+		expect(publisher.args[0]).toContain("symbolic links");
+		expect(secret.data).toHaveProperty("RCLONE_CONFIG_VLYV_ACCESS_KEY_ID");
+		expect(JSON.stringify(job)).not.toContain("storage-access-key");
+		expect(JSON.stringify(job)).not.toContain("storage-secret-key");
+		expect(JSON.stringify(outputManifests)).not.toContain("source-secret");
+		expect(JSON.stringify(outputManifests)).not.toContain("registry-secret");
+	});
+
+	it("requires immutable publisher and output digests", () => {
+		expect(() =>
+			buildKubernetesOutputPublisherManifests({
+				...({} as any),
+				publisherImage: "registry.example.com/output-publisher:latest",
+			}),
+		).toThrow("immutable digest");
+		expect(() =>
+			buildKubernetesOutputPublisherManifests({
+				...({
+					applicationId: "application-1",
+					organizationId: "organization-1",
+					deploymentId: "deployment-1",
+					namespace: "build",
+					publisherImage: `publisher@sha256:${"a".repeat(64)}`,
+				} as any),
+				manifestDigest: "sha256:invalid",
+			}),
+		).toThrow("immutable digest");
 	});
 });
 

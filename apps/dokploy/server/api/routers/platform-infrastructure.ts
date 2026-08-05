@@ -81,6 +81,12 @@ const supplyChainPolicySchema = z.object({
 	verifierImage: z
 		.string()
 		.regex(/^[^\s@]+@sha256:[a-f0-9]{64}$/, "Verifier image must use a digest"),
+	outputPublisherImage: z
+		.string()
+		.regex(
+			/^[^\s@]+@sha256:[a-f0-9]{64}$/,
+			"Output publisher image must use a digest",
+		),
 	signingKeyRef: z
 		.string()
 		.regex(
@@ -97,6 +103,10 @@ const supplyChainPolicySchema = z.object({
 	serviceAccountAnnotations: kubernetesMetadataMapSchema.optional(),
 	podLabels: kubernetesMetadataMapSchema.optional(),
 	podAnnotations: kubernetesMetadataMapSchema.optional(),
+	outputPublisherServiceAccountAnnotations:
+		kubernetesMetadataMapSchema.optional(),
+	outputPublisherPodLabels: kubernetesMetadataMapSchema.optional(),
+	outputPublisherPodAnnotations: kubernetesMetadataMapSchema.optional(),
 });
 const runtimeTargetChangesSchema = z.object({
 	name: z.string().min(1).optional(),

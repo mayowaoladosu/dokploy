@@ -7,6 +7,7 @@ import { createKubernetesRuntimeScheduler } from "./kubernetes/runtime-scheduler
 import {
 	createCloudflarePlatformEdgeRouter,
 	findDefaultPlatformEdgeProvider,
+	findDefaultPlatformObjectStorage,
 } from "./platform-edge";
 import { findApplicationPlatformPlacement } from "./platform-infrastructure";
 import { createReleaseOrchestrator } from "./release-orchestrator";
@@ -54,10 +55,18 @@ export const createPlatformReleasePlan = async (
 			buildPool.runtimeRegistrySecretName ||
 			cluster.metadata.registrySecretName,
 	};
-	const edgeProvider = await findDefaultPlatformEdgeProvider();
+	const [edgeProvider, objectStorage] = await Promise.all([
+		findDefaultPlatformEdgeProvider(),
+		findDefaultPlatformObjectStorage(),
+	]);
 	if (IS_MANAGED_PAAS && !edgeProvider) {
 		throw new Error(
 			"Managed releases require an active platform edge provider",
+		);
+	}
+	if (!objectStorage) {
+		throw new Error(
+			"Kubernetes releases require active platform object storage",
 		);
 	}
 	const originRouter = createKubernetesEdgeRouter({
@@ -89,6 +98,7 @@ export const createPlatformReleasePlan = async (
 				clusterMetadata: cluster.metadata,
 				buildPool,
 				nodePool: buildPool.nodePool,
+				objectStorage,
 			}),
 			runtimeScheduler: createKubernetesRuntimeScheduler({
 				client,

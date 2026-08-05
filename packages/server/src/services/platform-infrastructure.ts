@@ -465,6 +465,9 @@ export const assertBuildPoolReadiness = (
 		supplyChain && !immutableImagePattern.test(supplyChain.verifierImage)
 			? "immutable supplyChain verifierImage"
 			: null,
+		supplyChain && !immutableImagePattern.test(supplyChain.outputPublisherImage)
+			? "immutable supplyChain outputPublisherImage"
+			: null,
 		supplyChain && !signingKeyPattern.test(supplyChain.signingKeyRef)
 			? "KMS-backed supplyChain signingKeyRef"
 			: null,

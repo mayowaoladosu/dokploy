@@ -163,6 +163,7 @@ export type PlatformBuildPoolMetadata = {
 	rootlessBuilderValidated?: boolean;
 	supplyChain?: {
 		verifierImage: string;
+		outputPublisherImage: string;
 		signingKeyRef: string;
 		maxCriticalVulnerabilities: number;
 		maxHighVulnerabilities: number;
@@ -174,6 +175,9 @@ export type PlatformBuildPoolMetadata = {
 		serviceAccountAnnotations?: Record<string, string>;
 		podLabels?: Record<string, string>;
 		podAnnotations?: Record<string, string>;
+		outputPublisherServiceAccountAnnotations?: Record<string, string>;
+		outputPublisherPodLabels?: Record<string, string>;
+		outputPublisherPodAnnotations?: Record<string, string>;
 	};
 };
 

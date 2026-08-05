@@ -15,9 +15,14 @@ import { TRPCError } from "@trpc/server";
 import { and, asc, eq, inArray, lt, sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
+	parseBuildOutputArtifactMetadata,
+	staticRoutePrefixes,
+} from "./build-output-manifest";
+import {
 	assertCloudflareEdgeConfig,
 	type CloudflareEdgeClient,
 	type CloudflareEdgeConfig,
+	type CloudflareStaticDelivery,
 	createCloudflareEdgeClient,
 } from "./cloudflare-edge";
 import { isPlatformManagedHostname } from "./domain-verification";
@@ -478,6 +483,80 @@ export const removeApplicationStaticAssets = async (applicationId: string) => {
 const domainsFor = (application: ReleaseApplication) =>
 	application.releaseDomains ?? application.domains ?? [];
 
+type EdgeRoutingSnapshot = {
+	deploymentId: string | null;
+	releaseIdentity: string;
+	kind: "dns" | "custom_hostname" | "load_balancer";
+	status: "pending" | "active" | "failed" | "deleting";
+	providerResourceId: string | null;
+	errorMessage: string | null;
+	metadata: Record<string, unknown>;
+};
+
+const staticDeliveryFromMetadata = (
+	metadata: Record<string, unknown>,
+): CloudflareStaticDelivery | undefined => {
+	const value = metadata.staticDelivery;
+	if (!value || typeof value !== "object") return undefined;
+	const candidate = value as Partial<CloudflareStaticDelivery>;
+	if (
+		typeof candidate.publicBaseUrl !== "string" ||
+		!Array.isArray(candidate.routePrefixes) ||
+		!candidate.routePrefixes.every((entry) => typeof entry === "string") ||
+		!(["container", "static", "hybrid"] as const).includes(
+			candidate.mode as "container" | "static" | "hybrid",
+		)
+	) {
+		return undefined;
+	}
+	return candidate as CloudflareStaticDelivery;
+};
+
+const routingSnapshot = (
+	publication: typeof platformEdgePublications.$inferSelect | undefined,
+): EdgeRoutingSnapshot | null => {
+	if (!publication) return null;
+	const { previousRouting: _previousRouting, ...metadata } =
+		publication.metadata;
+	return {
+		deploymentId: publication.deploymentId,
+		releaseIdentity: publication.releaseIdentity,
+		kind: publication.kind,
+		status: publication.status,
+		providerResourceId: publication.providerResourceId,
+		errorMessage: publication.errorMessage,
+		metadata,
+	};
+};
+
+const previousRoutingFromMetadata = (
+	metadata: Record<string, unknown>,
+): EdgeRoutingSnapshot | null => {
+	const value = metadata.previousRouting;
+	if (!value || typeof value !== "object") return null;
+	const candidate = value as Partial<EdgeRoutingSnapshot>;
+	if (
+		(typeof candidate.deploymentId !== "string" &&
+			candidate.deploymentId !== null) ||
+		typeof candidate.releaseIdentity !== "string" ||
+		!(["dns", "custom_hostname", "load_balancer"] as const).includes(
+			candidate.kind as "dns" | "custom_hostname" | "load_balancer",
+		) ||
+		!(["pending", "active", "failed", "deleting"] as const).includes(
+			candidate.status as "pending" | "active" | "failed" | "deleting",
+		) ||
+		(typeof candidate.providerResourceId !== "string" &&
+			candidate.providerResourceId !== null) ||
+		(typeof candidate.errorMessage !== "string" &&
+			candidate.errorMessage !== null) ||
+		!candidate.metadata ||
+		typeof candidate.metadata !== "object"
+	) {
+		return null;
+	}
+	return candidate as EdgeRoutingSnapshot;
+};
+
 export const createCloudflarePlatformEdgeRouter = ({
 	originRouter,
 	provider,
@@ -493,6 +572,20 @@ export const createCloudflarePlatformEdgeRouter = ({
 	publish: async (input) => {
 		const origin = await originRouter.publish(input);
 		const domains = domainsFor(input.application);
+		const output = input.artifact
+			? parseBuildOutputArtifactMetadata(input.artifact.metadata)
+			: null;
+		const routePrefixes = output ? staticRoutePrefixes(output.manifest) : [];
+		const staticDelivery =
+			output &&
+			output.manifest.staticOutput.fileCount > 0 &&
+			routePrefixes.length > 0
+				? {
+						publicBaseUrl: output.publicBaseUrl,
+						mode: output.manifest.mode,
+						routePrefixes,
+					}
+				: undefined;
 		const releaseIdentity =
 			input.application.releaseIdentity || input.application.applicationId;
 		const existing = await db.query.platformEdgePublications.findMany({
@@ -511,18 +604,81 @@ export const createCloudflarePlatformEdgeRouter = ({
 		const touchedResources: Array<{
 			hostname: string;
 			kind: "dns" | "custom_hostname" | "load_balancer";
-			resourceId: string;
+			resourceId: string | null;
 			created: boolean;
+			managed: boolean;
 			previous: (typeof existing)[number] | undefined;
 		}> = [];
+		const restoreRouting = async (
+			hostname: string,
+			previous: (typeof existing)[number] | undefined,
+		) => {
+			if (previous) {
+				await client.configureHostnameRouting(hostname, {
+					staticDelivery: staticDeliveryFromMetadata(previous.metadata),
+				});
+			} else {
+				await client.deleteHostnameRouting(hostname);
+			}
+		};
+		const persistPublication = async ({
+			hostname,
+			kind,
+			providerResourceId,
+			previous,
+		}: {
+			hostname: string;
+			kind: "dns" | "custom_hostname" | "load_balancer";
+			providerResourceId: string | null;
+			previous: (typeof existing)[number] | undefined;
+		}) => {
+			const previousRouting =
+				previous?.deploymentId === input.deploymentId
+					? previousRoutingFromMetadata(previous.metadata)
+					: routingSnapshot(previous);
+			const metadata = {
+				originProvider: origin.provider,
+				staticDelivery,
+				previousRouting,
+			};
+			await db
+				.insert(platformEdgePublications)
+				.values({
+					edgeProviderId: provider.edgeProviderId,
+					applicationId: input.application.applicationId,
+					deploymentId: input.deploymentId || null,
+					releaseIdentity,
+					hostname,
+					kind,
+					status: "active",
+					providerResourceId,
+					originHostname: provider.originHostname,
+					lastMeteredAt: new Date(),
+					metadata,
+				})
+				.onConflictDoUpdate({
+					target: [
+						platformEdgePublications.edgeProviderId,
+						platformEdgePublications.hostname,
+					],
+					set: {
+						applicationId: input.application.applicationId,
+						deploymentId: input.deploymentId || null,
+						releaseIdentity,
+						kind,
+						status: "active",
+						providerResourceId,
+						originHostname: provider.originHostname,
+						errorMessage: null,
+						metadata,
+						updatedAt: new Date(),
+					},
+				});
+		};
 		let currentHostname: string | null = null;
 		try {
 			for (const domain of domains) {
 				const hostname = normalizeHostname(domain.host, "Domain hostname");
-				if (isPlatformManagedHostname(hostname)) {
-					published.push(hostname);
-					continue;
-				}
 				const previous = existingByHostname.get(hostname);
 				if (previous && previous.releaseIdentity !== releaseIdentity) {
 					throw new Error(
@@ -530,48 +686,54 @@ export const createCloudflarePlatformEdgeRouter = ({
 					);
 				}
 				currentHostname = hostname;
-				const result = await client.publishHostname(hostname, {
-					expectedResourceId: previous?.providerResourceId,
-				});
+				if (isPlatformManagedHostname(hostname)) {
+					try {
+						await client.configureHostnameRouting(hostname, { staticDelivery });
+					} catch (error) {
+						await restoreRouting(hostname, previous).catch(() => undefined);
+						throw error;
+					}
+					touchedResources.push({
+						hostname,
+						kind: "dns",
+						resourceId: null,
+						created: !previous,
+						managed: true,
+						previous,
+					});
+					await persistPublication({
+						hostname,
+						kind: "dns",
+						providerResourceId: null,
+						previous,
+					});
+					published.push(hostname);
+					continue;
+				}
+				let result: Awaited<ReturnType<typeof client.publishHostname>>;
+				try {
+					result = await client.publishHostname(hostname, {
+						expectedResourceId: previous?.providerResourceId,
+						staticDelivery,
+					});
+				} catch (error) {
+					await restoreRouting(hostname, previous).catch(() => undefined);
+					throw error;
+				}
 				touchedResources.push({
 					hostname,
 					kind: result.kind,
 					resourceId: result.resource.id,
 					created: result.created,
+					managed: false,
 					previous,
 				});
-				await db
-					.insert(platformEdgePublications)
-					.values({
-						edgeProviderId: provider.edgeProviderId,
-						applicationId: input.application.applicationId,
-						deploymentId: input.deploymentId || null,
-						releaseIdentity,
-						hostname,
-						kind: result.kind,
-						status: "active",
-						providerResourceId: result.resource.id,
-						originHostname: provider.originHostname,
-						lastMeteredAt: new Date(),
-						metadata: { originProvider: origin.provider },
-					})
-					.onConflictDoUpdate({
-						target: [
-							platformEdgePublications.edgeProviderId,
-							platformEdgePublications.hostname,
-						],
-						set: {
-							applicationId: input.application.applicationId,
-							deploymentId: input.deploymentId || null,
-							releaseIdentity,
-							kind: result.kind,
-							status: "active",
-							providerResourceId: result.resource.id,
-							originHostname: provider.originHostname,
-							errorMessage: null,
-							updatedAt: new Date(),
-						},
-					});
+				await persistPublication({
+					hostname,
+					kind: result.kind,
+					providerResourceId: result.resource.id,
+					previous,
+				});
 				published.push(hostname);
 			}
 			const desired = new Set(published);
@@ -580,7 +742,9 @@ export const createCloudflarePlatformEdgeRouter = ({
 					publication.releaseIdentity === releaseIdentity &&
 					!desired.has(publication.hostname),
 			)) {
-				if (stale.providerResourceId) {
+				if (isPlatformManagedHostname(stale.hostname)) {
+					await client.deleteHostnameRouting(stale.hostname);
+				} else if (stale.providerResourceId) {
 					await client.deleteHostname({
 						hostname: stale.hostname,
 						kind: stale.kind,
@@ -598,36 +762,38 @@ export const createCloudflarePlatformEdgeRouter = ({
 			}
 		} catch (error) {
 			await Promise.allSettled(
-				touchedResources.map(async (created) => {
-					if (created.created) {
+				touchedResources.map(async (touched) => {
+					if (touched.created && !touched.managed && touched.resourceId) {
 						await client.deleteHostname({
-							hostname: created.hostname,
-							kind: created.kind,
-							resourceId: created.resourceId,
+							hostname: touched.hostname,
+							kind: touched.kind,
+							resourceId: touched.resourceId,
 						});
+					} else {
+						await restoreRouting(touched.hostname, touched.previous);
 					}
 					if (
-						created.previous &&
-						created.previous.releaseIdentity === releaseIdentity
+						touched.previous &&
+						touched.previous.releaseIdentity === releaseIdentity
 					) {
 						await db
 							.update(platformEdgePublications)
 							.set({
-								applicationId: created.previous.applicationId,
-								deploymentId: created.previous.deploymentId,
-								releaseIdentity: created.previous.releaseIdentity,
-								hostname: created.previous.hostname,
-								kind: created.previous.kind,
-								status: created.previous.status,
-								providerResourceId: created.previous.providerResourceId,
-								errorMessage: created.previous.errorMessage,
-								metadata: created.previous.metadata,
+								applicationId: touched.previous.applicationId,
+								deploymentId: touched.previous.deploymentId,
+								releaseIdentity: touched.previous.releaseIdentity,
+								hostname: touched.previous.hostname,
+								kind: touched.previous.kind,
+								status: touched.previous.status,
+								providerResourceId: touched.previous.providerResourceId,
+								errorMessage: touched.previous.errorMessage,
+								metadata: touched.previous.metadata,
 								updatedAt: new Date(),
 							})
 							.where(
 								eq(
 									platformEdgePublications.edgePublicationId,
-									created.previous.edgePublicationId,
+									touched.previous.edgePublicationId,
 								),
 							);
 					} else {
@@ -639,7 +805,7 @@ export const createCloudflarePlatformEdgeRouter = ({
 										platformEdgePublications.edgeProviderId,
 										provider.edgeProviderId,
 									),
-									eq(platformEdgePublications.hostname, created.hostname),
+									eq(platformEdgePublications.hostname, touched.hostname),
 								),
 							);
 					}
@@ -688,24 +854,102 @@ export const createCloudflarePlatformEdgeRouter = ({
 			publishedAt: new Date().toISOString(),
 		};
 	},
-	withdraw: async ({ application }) => {
-		const hostnames = domainsFor(application)
-			.map((domain) => normalizeHostname(domain.host, "Domain hostname"))
-			.filter((hostname) => !isPlatformManagedHostname(hostname));
-		if (hostnames.length === 0) {
-			await originRouter.withdraw({ application });
-			return;
-		}
+	rollback: async ({ application, deploymentId }) => {
 		const publications = await db.query.platformEdgePublications.findMany({
 			where: and(
 				eq(platformEdgePublications.edgeProviderId, provider.edgeProviderId),
 				eq(platformEdgePublications.applicationId, application.applicationId),
-				inArray(platformEdgePublications.hostname, hostnames),
+				eq(platformEdgePublications.deploymentId, deploymentId),
 			),
 		});
+		const results = await Promise.allSettled(
+			publications.map(async (publication) => {
+				const previous = previousRoutingFromMetadata(publication.metadata);
+				if (!previous) {
+					if (isPlatformManagedHostname(publication.hostname)) {
+						await client.deleteHostnameRouting(publication.hostname);
+					} else if (publication.providerResourceId) {
+						await client.deleteHostname({
+							hostname: publication.hostname,
+							kind: publication.kind,
+							resourceId: publication.providerResourceId,
+						});
+					} else {
+						await client.deleteHostnameRouting(publication.hostname);
+					}
+					await db
+						.delete(platformEdgePublications)
+						.where(
+							eq(
+								platformEdgePublications.edgePublicationId,
+								publication.edgePublicationId,
+							),
+						);
+					return;
+				}
+				await client.configureHostnameRouting(publication.hostname, {
+					staticDelivery: staticDeliveryFromMetadata(previous.metadata),
+				});
+				await db
+					.update(platformEdgePublications)
+					.set({
+						deploymentId: previous.deploymentId,
+						releaseIdentity: previous.releaseIdentity,
+						kind: previous.kind,
+						status: previous.status,
+						providerResourceId: previous.providerResourceId,
+						errorMessage: previous.errorMessage,
+						metadata: previous.metadata,
+						updatedAt: new Date(),
+					})
+					.where(
+						eq(
+							platformEdgePublications.edgePublicationId,
+							publication.edgePublicationId,
+						),
+					);
+			}),
+		);
+		const failure = results.find(
+			(result): result is PromiseRejectedResult => result.status === "rejected",
+		);
+		if (failure) throw failure.reason;
+	},
+	withdraw: async ({ application }) => {
+		const allHostnames = domainsFor(application).map((domain) =>
+			normalizeHostname(domain.host, "Domain hostname"),
+		);
+		const publications =
+			allHostnames.length > 0
+				? await db.query.platformEdgePublications.findMany({
+						where: and(
+							eq(
+								platformEdgePublications.edgeProviderId,
+								provider.edgeProviderId,
+							),
+							eq(
+								platformEdgePublications.applicationId,
+								application.applicationId,
+							),
+							inArray(platformEdgePublications.hostname, allHostnames),
+						),
+					})
+				: [];
+		const recordedHostnames = new Set(
+			publications.map((publication) => publication.hostname),
+		);
 		const results = await Promise.allSettled([
+			...allHostnames
+				.filter(
+					(hostname) =>
+						isPlatformManagedHostname(hostname) &&
+						!recordedHostnames.has(hostname),
+				)
+				.map((hostname) => client.deleteHostnameRouting(hostname)),
 			...publications.map(async (publication) => {
-				if (publication.providerResourceId) {
+				if (isPlatformManagedHostname(publication.hostname)) {
+					await client.deleteHostnameRouting(publication.hostname);
+				} else if (publication.providerResourceId) {
 					await client.deleteHostname({
 						hostname: publication.hostname,
 						kind: publication.kind,
@@ -860,15 +1104,21 @@ export const withdrawPlatformEdgePublications = async (
 		with: { provider: true },
 	});
 	for (const publication of publications) {
-		if (publication.providerResourceId && publication.provider) {
+		if (publication.provider) {
 			const client = createCloudflareEdgeClient({
 				config: cloudflareConfigFor(publication.provider),
 			});
-			await client.deleteHostname({
-				hostname: publication.hostname,
-				kind: publication.kind,
-				resourceId: publication.providerResourceId,
-			});
+			if (isPlatformManagedHostname(publication.hostname)) {
+				await client.deleteHostnameRouting(publication.hostname);
+			} else if (publication.providerResourceId) {
+				await client.deleteHostname({
+					hostname: publication.hostname,
+					kind: publication.kind,
+					resourceId: publication.providerResourceId,
+				});
+			} else {
+				await client.deleteHostnameRouting(publication.hostname);
+			}
 		}
 		await db
 			.delete(platformEdgePublications)

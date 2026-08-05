@@ -3,8 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import type {
 	PlatformBuildPool,
+	PlatformObjectStorage,
 	PlatformPlacement,
 } from "@dokploy/server/db/schema";
+import { buildOutputManifestDigest } from "@dokploy/server/services/build-output-manifest";
 import {
 	assertSupplyChainPolicy,
 	buildKubernetesBuildNamespace,
@@ -12,10 +14,35 @@ import {
 	partitionBuildManifests,
 } from "@dokploy/server/services/kubernetes/build-executor";
 import type { KubernetesControlPlane } from "@dokploy/server/services/kubernetes/client";
+import { staticAssetObjectPrefix } from "@dokploy/server/services/static-object-storage";
 import type { ApplicationNested } from "@dokploy/server/utils/builders";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const logFiles: string[] = [];
+const outputManifestBytes = Buffer.from(
+	JSON.stringify({
+		version: 1,
+		framework: { name: "vite", version: "6.0.0" },
+		mode: "static",
+		staticDirectories: [
+			{ directory: "dist", routePrefix: "/", cachePolicy: "revalidate" },
+		],
+		functions: [],
+		isr: [],
+		redirects: [],
+		headers: [],
+		edgeMiddleware: [],
+		staticOutput: { fileCount: 1, totalBytes: 42 },
+		metadata: { adapter: "static", generatedAt: "2026-08-05T00:00:00.000Z" },
+	}),
+);
+const outputManifestDigest = buildOutputManifestDigest(outputManifestBytes);
+const outputObjectPrefix = staticAssetObjectPrefix({
+	basePrefix: "assets",
+	organizationId: "organization-1",
+	applicationId: "application-1",
+	deploymentId: "deployment-1",
+});
 
 afterEach(async () => {
 	await Promise.all(
@@ -69,6 +96,32 @@ describe("Kubernetes build executor", () => {
 			readDeployment: vi.fn(async () => null),
 			readJob: vi.fn(async () => ({ status: { succeeded: 1 } }) as never),
 			listPods: vi.fn(async (_namespace, selector) => {
+				if (selector.includes("output-")) {
+					return [
+						{
+							metadata: { name: "output-publisher-pod" },
+							status: {
+								containerStatuses: [
+									{
+										name: "output-publisher",
+										state: {
+											terminated: {
+												exitCode: 0,
+												message: JSON.stringify({
+													manifestDigest: outputManifestDigest,
+													objectPrefix: outputObjectPrefix,
+													publicBaseUrl: `https://assets.example.com/${outputObjectPrefix}`,
+													fileCount: 1,
+													totalBytes: 42,
+												}),
+											},
+										},
+									},
+								],
+							},
+						},
+					] as never;
+				}
 				if (selector.includes("verify-")) {
 					return [
 						{
@@ -135,6 +188,9 @@ describe("Kubernetes build executor", () => {
 											message: JSON.stringify({
 												imageId: `sha256:${"a".repeat(64)}`,
 												imageSizeBytes: 4096,
+												outputManifestDigest,
+												outputFileCount: 1,
+												outputTotalBytes: 42,
 											}),
 										},
 									},
@@ -171,6 +227,7 @@ describe("Kubernetes build executor", () => {
 				rootlessBuilderValidated: true,
 				supplyChain: {
 					verifierImage: `registry.example.com/platform/verifier@sha256:${"f".repeat(64)}`,
+					outputPublisherImage: `registry.example.com/platform/output-publisher@sha256:${"e".repeat(64)}`,
 					signingKeyRef: "awskms:///alias/vlyv-image-signing",
 					maxCriticalVulnerabilities: 0,
 					maxHighVulnerabilities: 0,
@@ -188,6 +245,25 @@ describe("Kubernetes build executor", () => {
 				labels: { "vlyv.dev/pool": "build" },
 				runtimeClassName: "gvisor",
 			} as never,
+			objectStorage: {
+				objectStorageId: "object-storage-1",
+				provider: "s3",
+				status: "active",
+				endpoint: "https://s3.example.com",
+				region: "us-east-1",
+				bucket: "vlyv-assets",
+				accessKeyId: "access-key",
+				secretAccessKey: "secret-key",
+				publicBaseUrl: "https://assets.example.com",
+				prefix: "assets",
+				metadata: {},
+			} as PlatformObjectStorage,
+			outputPublicationStore: {
+				getManifest: vi.fn(async () => outputManifestBytes),
+				record: vi.fn(async () => undefined),
+				deletePrefix: vi.fn(async () => undefined),
+				removeRecord: vi.fn(async () => undefined),
+			},
 		});
 		const application = {
 			applicationId: "application-1",
@@ -235,7 +311,7 @@ describe("Kubernetes build executor", () => {
 				},
 			},
 		});
-		expect(apply).toHaveBeenCalledTimes(4);
+		expect(apply).toHaveBeenCalledTimes(5);
 		const builderWorkloads = apply.mock.calls.find(([manifests]) =>
 			manifests.some(
 				(manifest: { kind?: string; metadata?: { name?: string } }) =>
@@ -251,6 +327,7 @@ describe("Kubernetes build executor", () => {
 		expect(logs).toContain("builder output");
 		expect(logs).toContain("publisher output");
 		expect(logs).toContain("verifier output");
+		expect(logs).toContain("output-publisher output");
 
 		const previewApplication = {
 			...application,

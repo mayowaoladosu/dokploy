@@ -3,6 +3,7 @@ import type {
 	PlatformPlacement,
 } from "@dokploy/server/db/schema";
 import { removeTraefikConfig } from "@dokploy/server/utils/traefik/application";
+import type { BuildExecutionArtifact } from "./build-executor";
 import {
 	findVerifiedDomainsByApplicationId,
 	isPlatformManagedHostname,
@@ -27,7 +28,12 @@ export interface EdgeRouter {
 		releaseId: string;
 		deploymentId: string;
 		application: ReleaseApplication;
+		artifact?: BuildExecutionArtifact;
 	}): Promise<EdgePublication>;
+	rollback?(input: {
+		application: ReleaseApplication;
+		deploymentId: string;
+	}): Promise<void>;
 	withdraw(input: { application: ReleaseApplication }): Promise<void>;
 }
 

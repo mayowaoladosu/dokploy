@@ -75,6 +75,8 @@ const edgeClient = (): CloudflareEdgeClient =>
 	({
 		publishHostname: vi.fn(),
 		deleteHostname: vi.fn(async () => undefined),
+		configureHostnameRouting: vi.fn(async () => undefined),
+		deleteHostnameRouting: vi.fn(async () => undefined),
 	}) as unknown as CloudflareEdgeClient;
 
 afterEach(() => vi.unstubAllEnvs());
@@ -101,10 +103,70 @@ describe("platform Cloudflare edge lifecycle", () => {
 				releaseId: "release-platform",
 				deploymentId: "deployment-platform",
 				application: application("application-1", ["app.apps.vlyv.dev"]),
+				artifact: {
+					imageId: `sha256:${"a".repeat(64)}`,
+					imageDigest: `sha256:${"b".repeat(64)}`,
+					imageRef: `registry.example.com/app@sha256:${"b".repeat(64)}`,
+					imageSizeBytes: 42,
+					builder: "railpack",
+					executor: "kubernetes-job",
+					durationMs: 1,
+					metadata: {
+						output: {
+							manifestDigest: `sha256:${"c".repeat(64)}`,
+							objectPrefix: "assets/tenant/app/release",
+							publicBaseUrl:
+								"https://assets.vlyv.dev/assets/tenant/app/release",
+							manifest: {
+								version: 1,
+								framework: { name: "next", version: "16.0.0" },
+								mode: "hybrid",
+								staticDirectories: [
+									{
+										directory: ".next/static",
+										routePrefix: "/_next/static",
+										cachePolicy: "immutable",
+									},
+								],
+								functions: [],
+								isr: [],
+								redirects: [],
+								headers: [],
+								edgeMiddleware: [],
+								staticOutput: { fileCount: 2, totalBytes: 42 },
+								metadata: {
+									adapter: "next",
+									generatedAt: "2026-08-05T00:00:00.000Z",
+								},
+							},
+						},
+					},
+				},
 			}),
 		).resolves.toMatchObject({ domains: ["app.apps.vlyv.dev"] });
 		expect(client.publishHostname).not.toHaveBeenCalled();
-		expect(insertedValues).toHaveLength(0);
+		expect(client.configureHostnameRouting).toHaveBeenCalledWith(
+			"app.apps.vlyv.dev",
+			{
+				staticDelivery: {
+					publicBaseUrl: "https://assets.vlyv.dev/assets/tenant/app/release",
+					mode: "hybrid",
+					routePrefixes: ["/_next/static"],
+				},
+			},
+		);
+		expect(insertedValues).toHaveLength(1);
+		expect(insertedValues[0]).toMatchObject({
+			hostname: "app.apps.vlyv.dev",
+			deploymentId: "deployment-platform",
+			providerResourceId: null,
+			metadata: {
+				staticDelivery: {
+					routePrefixes: ["/_next/static"],
+				},
+				previousRouting: null,
+			},
+		});
 	});
 
 	it("prevents a preview from taking over a production hostname", async () => {
@@ -140,6 +202,122 @@ describe("platform Cloudflare edge lifecycle", () => {
 			}),
 		).rejects.toThrow("belongs to another release identity");
 		expect(client.publishHostname).not.toHaveBeenCalled();
+	});
+
+	it("restores the previous static route when a release rolls back", async () => {
+		existingPublications.push({
+			edgePublicationId: "publication-current",
+			edgeProviderId: "edge-1",
+			applicationId: "application-1",
+			deploymentId: "deployment-current",
+			releaseIdentity: "application-1",
+			hostname: "app.apps.vlyv.dev",
+			kind: "dns",
+			status: "active",
+			providerResourceId: null,
+			originHostname: "origin.vlyv.dev",
+			lastMeteredAt: new Date(0),
+			errorMessage: null,
+			metadata: {
+				staticDelivery: {
+					publicBaseUrl: "https://assets.vlyv.dev/current",
+					mode: "hybrid",
+					routePrefixes: ["/_next/static"],
+				},
+				previousRouting: {
+					deploymentId: "deployment-previous",
+					releaseIdentity: "application-1",
+					kind: "dns",
+					status: "active",
+					providerResourceId: null,
+					errorMessage: null,
+					metadata: {
+						staticDelivery: {
+							publicBaseUrl: "https://assets.vlyv.dev/previous",
+							mode: "hybrid",
+							routePrefixes: ["/_next/static"],
+						},
+					},
+				},
+			},
+			createdAt: new Date(0),
+			updatedAt: new Date(0),
+		});
+		const client = edgeClient();
+		const router = createCloudflarePlatformEdgeRouter({
+			originRouter: originRouter(),
+			provider,
+			client,
+		});
+
+		await router.rollback?.({
+			application: application("application-1", ["app.apps.vlyv.dev"]),
+			deploymentId: "deployment-current",
+		});
+
+		expect(client.configureHostnameRouting).toHaveBeenCalledWith(
+			"app.apps.vlyv.dev",
+			{
+				staticDelivery: {
+					publicBaseUrl: "https://assets.vlyv.dev/previous",
+					mode: "hybrid",
+					routePrefixes: ["/_next/static"],
+				},
+			},
+		);
+		expect(updatedValues).toContainEqual(
+			expect.objectContaining({
+				deploymentId: "deployment-previous",
+				metadata: expect.objectContaining({
+					staticDelivery: expect.objectContaining({
+						publicBaseUrl: "https://assets.vlyv.dev/previous",
+					}),
+				}),
+			}),
+		);
+	});
+
+	it("removes a newly introduced managed hostname on rollback", async () => {
+		existingPublications.push({
+			edgePublicationId: "publication-new",
+			edgeProviderId: "edge-1",
+			applicationId: "application-1",
+			deploymentId: "deployment-new",
+			releaseIdentity: "application-1",
+			hostname: "new.apps.vlyv.dev",
+			kind: "dns",
+			status: "active",
+			providerResourceId: null,
+			originHostname: "origin.vlyv.dev",
+			lastMeteredAt: new Date(0),
+			errorMessage: null,
+			metadata: {
+				staticDelivery: {
+					publicBaseUrl: "https://assets.vlyv.dev/new",
+					mode: "static",
+					routePrefixes: ["/"],
+				},
+				previousRouting: null,
+			},
+			createdAt: new Date(0),
+			updatedAt: new Date(0),
+		});
+		const client = edgeClient();
+		const router = createCloudflarePlatformEdgeRouter({
+			originRouter: originRouter(),
+			provider,
+			client,
+		});
+
+		await router.rollback?.({
+			application: application("application-1", ["new.apps.vlyv.dev"]),
+			deploymentId: "deployment-new",
+		});
+
+		expect(client.deleteHostnameRouting).toHaveBeenCalledWith(
+			"new.apps.vlyv.dev",
+		);
+		expect(client.configureHostnameRouting).not.toHaveBeenCalled();
 	});
 
 	it("restores an existing publication when a later hostname fails", async () => {

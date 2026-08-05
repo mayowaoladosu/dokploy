@@ -181,6 +181,7 @@ describe("Kubernetes cluster readiness", () => {
 					rootlessBuilderValidated: true,
 					supplyChain: {
 						verifierImage: `registry.example.com/verifier@sha256:${"c".repeat(64)}`,
+						outputPublisherImage: `registry.example.com/output-publisher@sha256:${"d".repeat(64)}`,
 						signingKeyRef: "awskms:///alias/vlyv-image-signing",
 						maxCriticalVulnerabilities: 0,
 						maxHighVulnerabilities: 0,

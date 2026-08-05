@@ -13,6 +13,7 @@ export * from "./services/application";
 export * from "./services/backup";
 export * from "./services/bitbucket";
 export * from "./services/build-executor";
+export * from "./services/build-output-manifest";
 export * from "./services/certificate";
 export * from "./services/cloudflare-edge";
 export * from "./services/cluster";

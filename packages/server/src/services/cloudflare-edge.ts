@@ -45,6 +45,12 @@ export type CloudflareUsage = {
 	egressBytes: bigint;
 };
 
+export type CloudflareStaticDelivery = {
+	publicBaseUrl: string;
+	mode: "container" | "static" | "hybrid";
+	routePrefixes: string[];
+};
+
 type CloudflareEnvelope<T> = {
 	success: boolean;
 	result: T;
@@ -72,7 +78,9 @@ type CloudflareRuleset = {
 };
 
 type CloudflareRulesetPhase =
+	| "http_request_transform"
 	| "http_request_late_transform"
+	| "http_request_origin"
 	| "http_request_cache_settings"
 	| "http_request_firewall_managed";
 
@@ -102,6 +110,97 @@ export const isHostnameInCloudflareZone = (
 
 const expressionString = (value: string) =>
 	`"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+
+const STATIC_EXTENSIONS = [
+	"avif",
+	"css",
+	"eot",
+	"gif",
+	"ico",
+	"jpeg",
+	"jpg",
+	"js",
+	"map",
+	"mp3",
+	"mp4",
+	"ogg",
+	"otf",
+	"pdf",
+	"png",
+	"svg",
+	"ttf",
+	"txt",
+	"wasm",
+	"webm",
+	"webp",
+	"woff",
+	"woff2",
+	"xml",
+];
+const STATIC_EXTENSION_EXPRESSION = `(${STATIC_EXTENSIONS.map(
+	(extension) =>
+		`ends_with(lower(raw.http.request.uri.path), ${expressionString(`.${extension}`)})`,
+).join(" or ")})`;
+
+const normalizeStaticDelivery = (
+	hostname: string,
+	delivery: CloudflareStaticDelivery,
+) => {
+	const url = new URL(delivery.publicBaseUrl);
+	if (
+		url.protocol !== "https:" ||
+		url.username ||
+		url.password ||
+		url.search ||
+		url.hash
+	) {
+		throw new Error("Cloudflare static delivery requires a clean HTTPS URL");
+	}
+	const originHostname = normalizedHostname(
+		url.hostname,
+		"static origin hostname",
+	);
+	if (originHostname === normalizedHostname(hostname)) {
+		throw new Error(
+			"Cloudflare static origin must not recurse to the app host",
+		);
+	}
+	const routePrefixes = Array.from(new Set(delivery.routePrefixes)).sort();
+	if (routePrefixes.length === 0 || routePrefixes.length > 32) {
+		throw new Error("Cloudflare static route prefixes are invalid");
+	}
+	for (const prefix of routePrefixes) {
+		if (
+			!prefix.startsWith("/") ||
+			prefix.includes("\\") ||
+			prefix.includes("\0") ||
+			prefix.length > 2_048
+		) {
+			throw new Error("Cloudflare static route prefix is invalid");
+		}
+	}
+	return {
+		originHostname,
+		basePath: url.pathname.replace(/\/+$/, ""),
+		mode: delivery.mode,
+		routePrefixes,
+	};
+};
+
+export const cloudflareStaticRouteExpression = (
+	hostname: string,
+	delivery: CloudflareStaticDelivery,
+) => {
+	const normalized = normalizeStaticDelivery(hostname, delivery);
+	const terms = normalized.routePrefixes.map((value) => {
+		const prefix = value === "/" ? "/" : value.replace(/\/+$/, "");
+		if (prefix === "/") {
+			return `((raw.http.request.uri.path eq "/index.html" or ${STATIC_EXTENSION_EXPRESSION}) and not starts_with(raw.http.request.uri.path, "/api/"))`;
+		}
+		return `(raw.http.request.uri.path eq ${expressionString(prefix)} or starts_with(raw.http.request.uri.path, ${expressionString(`${prefix}/`)}))`;
+	});
+	return `(http.host eq ${expressionString(normalizedHostname(hostname))} and http.request.method in {"GET" "HEAD"} and (${terms.join(" or ")}))`;
+};
 
 const ruleRef = (prefix: string, hostname: string) =>
 	`vlyv-${prefix}-${createHash("sha256")
@@ -464,7 +563,10 @@ export const createCloudflareEdgeClient = ({
 		});
 	};
 
-	const ensureCacheRule = async (hostname: string) => {
+	const ensureCacheRule = async (
+		hostname: string,
+		staticExpression?: string,
+	) => {
 		if (!config.cacheEnabled) return;
 		const host = normalizedHostname(hostname);
 		await upsertEntrypointRule("http_request_cache_settings", {
@@ -480,16 +582,110 @@ export const createCloudflareEdgeClient = ({
 				},
 				browser_ttl: {
 					mode: "override_origin",
-					default: config.browserTtlSeconds,
+					default: staticExpression ? 0 : config.browserTtlSeconds,
 				},
 			},
-			expression: `(http.host eq ${expressionString(host)} and http.request.method in {"GET" "HEAD"} and http.request.uri.path.extension in {"avif" "css" "eot" "gif" "ico" "jpeg" "jpg" "js" "map" "mp3" "mp4" "ogg" "otf" "pdf" "png" "svg" "ttf" "webm" "webp" "woff" "woff2" "wasm"})`,
+			expression:
+				staticExpression ||
+				`(http.host eq ${expressionString(host)} and http.request.method in {"GET" "HEAD"} and (http.request.uri.path.extension in {${STATIC_EXTENSIONS.map((extension) => expressionString(extension)).join(" ")}}))`,
 			description: `vlyv cache policy for ${host}`,
 			enabled: true,
 		});
 	};
 
+	const ensureStaticDelivery = async (
+		hostname: string,
+		delivery?: CloudflareStaticDelivery,
+	) => {
+		const host = normalizedHostname(hostname);
+		if (!delivery) {
+			await Promise.all([
+				deleteEntrypointRule(
+					"http_request_transform",
+					ruleRef("static-path", host),
+				),
+				deleteEntrypointRule(
+					"http_request_origin",
+					ruleRef("static-origin", host),
+				),
+			]);
+			return undefined;
+		}
+		const normalized = normalizeStaticDelivery(host, delivery);
+		const expression = cloudflareStaticRouteExpression(host, delivery);
+		const rewrittenPath = normalized.basePath
+			? `concat(${expressionString(normalized.basePath)}, http.request.uri.path)`
+			: "http.request.uri.path";
+		await Promise.all([
+			upsertEntrypointRule("http_request_transform", {
+				ref: ruleRef("static-path", host),
+				action: "rewrite",
+				action_parameters: {
+					uri: { path: { expression: rewrittenPath } },
+				},
+				expression,
+				description: `vlyv static object path for ${host}`,
+				enabled: true,
+			}),
+			upsertEntrypointRule("http_request_origin", {
+				ref: ruleRef("static-origin", host),
+				action: "route",
+				action_parameters: {
+					host_header: normalized.originHostname,
+					origin: { host: normalized.originHostname, port: 443 },
+				},
+				expression,
+				description: `vlyv static object origin for ${host}`,
+				enabled: true,
+			}),
+		]);
+		return expression;
+	};
+
+	const configureHostnameRouting = async (
+		hostname: string,
+		options: { staticDelivery?: CloudflareStaticDelivery } = {},
+	) => {
+		const host = normalizedHostname(hostname);
+		const staticExpression = await ensureStaticDelivery(
+			host,
+			options.staticDelivery,
+		);
+		await Promise.all([
+			ensureOriginProtection(host),
+			ensureCacheRule(host, staticExpression),
+		]);
+		await request(`/zones/${encodeURIComponent(config.zoneId)}/purge_cache`, {
+			method: "POST",
+			body: { hosts: [host] },
+		});
+	};
+
+	const deleteHostnameRouting = async (hostname: string) => {
+		const host = normalizedHostname(hostname);
+		await Promise.all([
+			deleteEntrypointRule(
+				"http_request_late_transform",
+				ruleRef("origin", host),
+			),
+			deleteEntrypointRule(
+				"http_request_cache_settings",
+				ruleRef("cache", host),
+			),
+			deleteEntrypointRule(
+				"http_request_transform",
+				ruleRef("static-path", host),
+			),
+			deleteEntrypointRule(
+				"http_request_origin",
+				ruleRef("static-origin", host),
+			),
+		]);
+	};
+
 	return {
+		configureHostnameRouting,
+		deleteHostnameRouting,
 		verifyCdnHostname: async (hostname: string) => {
 			const host = normalizedHostname(hostname);
 			if (isHostnameInCloudflareZone(host, config.zoneName)) {
@@ -589,7 +785,10 @@ export const createCloudflareEdgeClient = ({
 		},
 		publishHostname: async (
 			hostname: string,
-			options: { expectedResourceId?: string | null } = {},
+			options: {
+				expectedResourceId?: string | null;
+				staticDelivery?: CloudflareStaticDelivery;
+			} = {},
 		) => {
 			const host = normalizedHostname(hostname);
 			if (
@@ -614,11 +813,26 @@ export const createCloudflareEdgeClient = ({
 				publication = await ensureDnsRecord(host);
 				kind = "dns";
 			}
-			await Promise.all([ensureOriginProtection(host), ensureCacheRule(host)]);
-			await request(`/zones/${encodeURIComponent(config.zoneId)}/purge_cache`, {
-				method: "POST",
-				body: { hosts: [host] },
-			});
+			try {
+				await configureHostnameRouting(host, options);
+			} catch (error) {
+				if (publication.created) {
+					const segment =
+						kind === "dns"
+							? "dns_records"
+							: kind === "custom_hostname"
+								? "custom_hostnames"
+								: "load_balancers";
+					await Promise.allSettled([
+						request(
+							`/zones/${encodeURIComponent(config.zoneId)}/${segment}/${encodeURIComponent(publication.resource.id)}`,
+							{ method: "DELETE", allowNotFound: true },
+						),
+						deleteHostnameRouting(host),
+					]);
+				}
+				throw error;
+			}
 			return { ...publication, kind };
 		},
 		deleteHostname: async ({
@@ -641,16 +855,7 @@ export const createCloudflareEdgeClient = ({
 				`/zones/${encodeURIComponent(config.zoneId)}/${segment}/${encodeURIComponent(resourceId)}`,
 				{ method: "DELETE", allowNotFound: true },
 			);
-			await Promise.all([
-				deleteEntrypointRule(
-					"http_request_late_transform",
-					ruleRef("origin", host),
-				),
-				deleteEntrypointRule(
-					"http_request_cache_settings",
-					ruleRef("cache", host),
-				),
-			]);
+			await deleteHostnameRouting(host);
 		},
 		getUsage: async ({
 			hostname,

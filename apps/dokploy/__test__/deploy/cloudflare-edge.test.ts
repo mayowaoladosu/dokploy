@@ -1,6 +1,7 @@
 import {
 	assertCloudflareEdgeConfig,
 	type CloudflareEdgeConfig,
+	cloudflareStaticRouteExpression,
 	createCloudflareEdgeClient,
 	isHostnameInCloudflareZone,
 } from "@dokploy/server/services/cloudflare-edge";
@@ -80,7 +81,14 @@ describe("Cloudflare edge adapter", () => {
 			apiBase: "https://cloudflare.test/client/v4",
 		});
 
-		const publication = await client.publishHostname("app.vlyv.dev");
+		const publication = await client.publishHostname("app.vlyv.dev", {
+			staticDelivery: {
+				publicBaseUrl:
+					"https://assets.vlyv.dev/assets/tenant/application/release",
+				mode: "hybrid",
+				routePrefixes: ["/", "/_next/static"],
+			},
+		});
 
 		expect(publication).toMatchObject({
 			kind: "dns",
@@ -94,10 +102,105 @@ describe("Cloudflare edge adapter", () => {
 		const cacheRule = rules.find((request) =>
 			request.body?.ref?.startsWith("vlyv-cache-"),
 		);
-		expect(cacheRule?.body.expression).toContain(
-			"http.request.uri.path.extension",
-		);
+		expect(cacheRule?.body.expression).toContain("raw.http.request.uri.path");
 		expect(cacheRule?.body.expression).not.toContain('"html"');
+		expect(cacheRule?.body.expression).toContain(
+			'not starts_with(raw.http.request.uri.path, "/api/")',
+		);
+		const staticPathRule = rules.find((request) =>
+			request.body?.ref?.startsWith("vlyv-static-path-"),
+		);
+		const staticOriginRule = rules.find((request) =>
+			request.body?.ref?.startsWith("vlyv-static-origin-"),
+		);
+		expect(
+			staticPathRule?.body.action_parameters.uri.path.expression,
+		).toContain("/assets/tenant/application/release");
+		expect(staticOriginRule?.body).toMatchObject({
+			action: "route",
+			action_parameters: {
+				host_header: "assets.vlyv.dev",
+				origin: { host: "assets.vlyv.dev", port: 443 },
+			},
+		});
+	});
+
+	it("builds static routing expressions without capturing hybrid APIs", () => {
+		const hybrid = cloudflareStaticRouteExpression("app.vlyv.dev", {
+			publicBaseUrl: "https://assets.vlyv.dev/release",
+			mode: "hybrid",
+			routePrefixes: ["/", "/_next/static"],
+		});
+		expect(hybrid).toContain('http.host eq "app.vlyv.dev"');
+		expect(hybrid).toContain(
+			'starts_with(raw.http.request.uri.path, "/_next/static/")',
+		);
+		expect(hybrid).toContain(
+			'not starts_with(raw.http.request.uri.path, "/api/")',
+		);
+		expect(hybrid).not.toContain('"html"');
+
+		const staticOnly = cloudflareStaticRouteExpression("static.vlyv.dev", {
+			publicBaseUrl: "https://assets.vlyv.dev/release",
+			mode: "static",
+			routePrefixes: ["/"],
+		});
+		expect(staticOnly).toContain('raw.http.request.uri.path eq "/index.html"');
+		expect(staticOnly).toContain("ends_with(lower(raw.http.request.uri.path)");
+		expect(staticOnly).not.toContain("and (true)");
+		expect(() =>
+			cloudflareStaticRouteExpression("assets.vlyv.dev", {
+				publicBaseUrl: "https://assets.vlyv.dev/release",
+				mode: "static",
+				routePrefixes: ["/"],
+			}),
+		).toThrow("must not recurse");
+	});
+
+	it("deletes a newly created hostname when rule publication fails", async () => {
+		let failedRuleRead = false;
+		const requests: Array<{ url: string; method: string }> = [];
+		const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+			const url = String(input);
+			const method = init?.method || "GET";
+			requests.push({ url, method });
+			if (url.includes("/dns_records?") && method === "GET") {
+				return envelope([]);
+			}
+			if (url.endsWith("/dns_records") && method === "POST") {
+				return envelope({ id: "dns-created", proxied: true });
+			}
+			if (url.includes("/rulesets/phases/") && method === "GET") {
+				if (!failedRuleRead) {
+					failedRuleRead = true;
+					return envelope(null, 500);
+				}
+				const phase = url.split("/phases/")[1]?.split("/")[0] || "phase";
+				return envelope(rulesetResponse(phase));
+			}
+			if (url.endsWith("/dns_records/dns-created") && method === "DELETE") {
+				return envelope(null);
+			}
+			if (url.includes("/rules") && method === "POST") {
+				return envelope({ id: "rule" });
+			}
+			throw new Error(`Unexpected Cloudflare request: ${method} ${url}`);
+		});
+		const client = createCloudflareEdgeClient({
+			config: config(),
+			fetcher,
+			apiBase: "https://cloudflare.test/client/v4",
+		});
+
+		await expect(client.publishHostname("failed.vlyv.dev")).rejects.toThrow(
+			"Cloudflare API request failed",
+		);
+		expect(requests).toContainEqual(
+			expect.objectContaining({
+				method: "DELETE",
+				url: expect.stringContaining("/dns_records/dns-created"),
+			}),
+		);
 	});
 
 	it("waits for an out-of-zone custom hostname certificate", async () => {

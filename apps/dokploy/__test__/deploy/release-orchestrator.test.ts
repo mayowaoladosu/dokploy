@@ -251,10 +251,11 @@ describe("release orchestrator", () => {
 			expect.objectContaining({ application }),
 		);
 		expect(
-			vi.mocked(harness.edgeRouter.publish).mock.invocationCallOrder[0],
-		).toBeLessThan(
 			vi.mocked(harness.runtimeScheduler.verifyHealth).mock
-				.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+				.invocationCallOrder[0],
+		).toBeLessThan(
+			vi.mocked(harness.edgeRouter.publish).mock.invocationCallOrder[0] ??
+				Number.POSITIVE_INFINITY,
 		);
 		expect(harness.telemetrySink.flush).toHaveBeenCalledTimes(1);
 		expect(harness.usageMeter.assertBuildAllowed).toHaveBeenCalledWith(
@@ -334,7 +335,10 @@ describe("release orchestrator", () => {
 			}),
 		).rejects.toThrow("Preview returned HTTP 503");
 
-		expect(harness.edgeRouter.withdraw).toHaveBeenCalledWith({
+		expect(harness.edgeRouter.withdraw).not.toHaveBeenCalledWith({
+			application: previewApplication,
+		});
+		expect(harness.runtimeScheduler.remove).toHaveBeenCalledWith({
 			application: previewApplication,
 		});
 	});
