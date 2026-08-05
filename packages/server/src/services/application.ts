@@ -7,31 +7,13 @@ import {
 	environments,
 } from "@dokploy/server/db/schema";
 import { getAdvancedStats } from "@dokploy/server/monitoring/utils";
-import {
-	getBuildCommand,
-	mechanizeDockerContainer,
-} from "@dokploy/server/utils/builders";
 import { sendBuildErrorNotifications } from "@dokploy/server/utils/notifications/build-error";
 import { sendBuildSuccessNotifications } from "@dokploy/server/utils/notifications/build-success";
-import {
-	ExecError,
-	execAsync,
-	execAsyncRemote,
-} from "@dokploy/server/utils/process/execAsync";
-import { cloneBitbucketRepository } from "@dokploy/server/utils/providers/bitbucket";
-import { buildRemoteDocker } from "@dokploy/server/utils/providers/docker";
-import {
-	cloneGitRepository,
-	getGitCommitInfo,
-} from "@dokploy/server/utils/providers/git";
-import { cloneGiteaRepository } from "@dokploy/server/utils/providers/gitea";
-import { cloneGithubRepository } from "@dokploy/server/utils/providers/github";
-import { cloneGitlabRepository } from "@dokploy/server/utils/providers/gitlab";
+import { getGitCommitInfo } from "@dokploy/server/utils/providers/git";
 import { createTraefikConfig } from "@dokploy/server/utils/traefik/application";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import type { z } from "zod";
-import { encodeBase64 } from "../utils/docker/utils";
 import { getDokployUrl } from "./admin";
 import {
 	createDeployment,
@@ -39,6 +21,7 @@ import {
 	updateDeployment,
 	updateDeploymentStatus,
 } from "./deployment";
+import { appendDeploymentFailureLog } from "./deployment-log";
 import { type Domain, getDomainHost } from "./domain";
 import {
 	createPreviewDeploymentComment,
@@ -46,7 +29,6 @@ import {
 	issueCommentExists,
 	updateIssueComment,
 } from "./github";
-import { generateApplyPatchesCommand } from "./patch";
 import {
 	assertManagedResourceLimits,
 	getManagedResourceDefaults,
@@ -239,11 +221,6 @@ export const deployApplication = async ({
 	const application = await findApplicationById(applicationId);
 	const serverId = application.buildServerId || application.serverId;
 	const releasePlan = await createPlatformReleasePlan(application);
-	const applicationEntity = {
-		...application,
-		serverId: serverId,
-		credentialMode: releasePlan.registryCredentialMode,
-	};
 
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${application.environment.projectId}/environment/${application.environmentId}/services/application/${application.applicationId}?tab=deployments`;
 	const deployment = await createDeployment({
@@ -253,40 +230,10 @@ export const deployApplication = async ({
 	});
 
 	try {
-		let command = "set -e;";
-		if (application.sourceType === "github") {
-			command += await cloneGithubRepository(applicationEntity);
-		} else if (application.sourceType === "gitlab") {
-			command += await cloneGitlabRepository(applicationEntity);
-		} else if (application.sourceType === "gitea") {
-			command += await cloneGiteaRepository(applicationEntity);
-		} else if (application.sourceType === "bitbucket") {
-			command += await cloneBitbucketRepository(applicationEntity);
-		} else if (application.sourceType === "git") {
-			command += await cloneGitRepository(applicationEntity);
-		} else if (application.sourceType === "docker") {
-			command += await buildRemoteDocker(
-				application,
-				releasePlan.registryCredentialMode,
-			);
-		}
-
-		if (application.sourceType !== "docker") {
-			command += await generateApplyPatchesCommand({
-				id: application.applicationId,
-				type: "application",
-				serverId,
-			});
-		}
-
-		command += await getBuildCommand(application, {
-			registryCredentialMode: releasePlan.registryCredentialMode,
-			uploadApplicationRegistries: !releasePlan.usesPlatformRegistry,
-		});
 		await releasePlan.orchestrator.execute({
 			application,
 			deployment,
-			command,
+			intent: { kind: "deploy" },
 		});
 		await updateDeploymentStatus(deployment.deploymentId, "done");
 		await updateApplicationStatus(applicationId, "done");
@@ -301,21 +248,11 @@ export const deployApplication = async ({
 			environmentName: application.environment.name,
 		});
 	} catch (error) {
-		let command = "";
-
-		// Only log details for non-ExecError errors
-		if (!(error instanceof ExecError)) {
-			const message = error instanceof Error ? error.message : String(error);
-			const encodedMessage = encodeBase64(message);
-			command += `echo "${encodedMessage}" | base64 -d >> "${deployment.logPath}";`;
-		}
-
-		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
-		if (serverId) {
-			await execAsyncRemote(serverId, command);
-		} else {
-			await execAsync(command);
-		}
+		await appendDeploymentFailureLog({
+			error,
+			logPath: deployment.logPath,
+			serverId,
+		});
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await updateApplicationStatus(applicationId, "error");
 
@@ -369,17 +306,11 @@ export const rebuildApplication = async ({
 	});
 
 	try {
-		let command = "set -e;";
-		// Check case for docker only
 		const releasePlan = await createPlatformReleasePlan(application);
-		command += await getBuildCommand(application, {
-			registryCredentialMode: releasePlan.registryCredentialMode,
-			uploadApplicationRegistries: !releasePlan.usesPlatformRegistry,
-		});
 		await releasePlan.orchestrator.execute({
 			application,
 			deployment,
-			command,
+			intent: { kind: "rebuild" },
 		});
 		await updateDeploymentStatus(deployment.deploymentId, "done");
 		await updateApplicationStatus(applicationId, "done");
@@ -394,21 +325,11 @@ export const rebuildApplication = async ({
 			environmentName: application.environment.name,
 		});
 	} catch (error) {
-		let command = "";
-
-		// Only log details for non-ExecError errors
-		if (!(error instanceof ExecError)) {
-			const message = error instanceof Error ? error.message : String(error);
-			const encodedMessage = encodeBase64(message);
-			command += `echo "${encodedMessage}" | base64 -d >> "${deployment.logPath}";`;
-		}
-
-		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
-		if (serverId) {
-			await execAsyncRemote(serverId, command);
-		} else {
-			await execAsync(command);
-		}
+		await appendDeploymentFailureLog({
+			error,
+			logPath: deployment.logPath,
+			serverId,
+		});
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await updateApplicationStatus(applicationId, "error");
 		throw error;
@@ -429,15 +350,19 @@ export const deployPreviewApplication = async ({
 	previewDeploymentId: string;
 }) => {
 	const application = await findApplicationById(applicationId);
-
+	const previewDeployment =
+		await findPreviewDeploymentById(previewDeploymentId);
+	if (!previewDeployment.domain) {
+		throw new TRPCError({
+			code: "PRECONDITION_FAILED",
+			message: "Preview domain is not ready",
+		});
+	}
 	const deployment = await createDeploymentPreview({
 		title: titleLog,
 		description: descriptionLog,
 		previewDeploymentId: previewDeploymentId,
 	});
-
-	const previewDeployment =
-		await findPreviewDeploymentById(previewDeploymentId);
 
 	await updatePreviewDeployment(previewDeploymentId, {
 		createdAt: new Date().toISOString(),
@@ -490,24 +415,26 @@ export const deployPreviewApplication = async ({
 		application.buildRegistry = null;
 		application.rollbackRegistry = null;
 		application.registry = null;
-
-		let command = "set -e;";
-		if (application.sourceType === "github") {
-			command += await cloneGithubRepository({
+		application.branch = previewDeployment.branch;
+		const releasePlan = await createPlatformReleasePlan(application);
+		await releasePlan.orchestrator.execute({
+			application: {
 				...application,
-				appName: previewDeployment.appName,
-				branch: previewDeployment.branch,
-			});
-			command += await getBuildCommand(application);
-
-			const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-			if (application.serverId) {
-				await execAsyncRemote(application.serverId, commandWithLog);
-			} else {
-				await execAsync(commandWithLog);
-			}
-			await mechanizeDockerContainer(application);
-		}
+				releaseIdentity: previewDeployment.previewDeploymentId,
+				releaseDomains: [
+					{
+						host: previewDeployment.domain.host,
+						https: previewDeployment.domain.https,
+						path: previewDeployment.domain.path,
+					},
+				],
+			},
+			deployment,
+			intent: {
+				kind: "preview-deploy",
+				sourceApplicationId: applicationId,
+			},
+		});
 		const successComment = getIssueComment(
 			application.name,
 			"success",
@@ -551,6 +478,12 @@ export const rebuildPreviewApplication = async ({
 	const application = await findApplicationById(applicationId);
 	const previewDeployment =
 		await findPreviewDeploymentById(previewDeploymentId);
+	if (!previewDeployment.domain) {
+		throw new TRPCError({
+			code: "PRECONDITION_FAILED",
+			message: "Preview domain is not ready",
+		});
+	}
 
 	const deployment = await createDeploymentPreview({
 		title: titleLog,
@@ -610,17 +543,26 @@ export const rebuildPreviewApplication = async ({
 		application.rollbackRegistry = null;
 		application.registry = null;
 
-		const serverId = application.serverId;
-		let command = "set -e;";
-		// Only rebuild, don't clone repository
-		command += await getBuildCommand(application);
-		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		if (serverId) {
-			await execAsyncRemote(serverId, commandWithLog);
-		} else {
-			await execAsync(commandWithLog);
-		}
-		await mechanizeDockerContainer(application);
+		application.branch = previewDeployment.branch;
+		const releasePlan = await createPlatformReleasePlan(application);
+		await releasePlan.orchestrator.execute({
+			application: {
+				...application,
+				releaseIdentity: previewDeployment.previewDeploymentId,
+				releaseDomains: [
+					{
+						host: previewDeployment.domain.host,
+						https: previewDeployment.domain.https,
+						path: previewDeployment.domain.path,
+					},
+				],
+			},
+			deployment,
+			intent: {
+				kind: "preview-rebuild",
+				sourceApplicationId: applicationId,
+			},
+		});
 
 		const successComment = getIssueComment(
 			application.name,
@@ -636,22 +578,12 @@ export const rebuildPreviewApplication = async ({
 			previewStatus: "done",
 		});
 	} catch (error) {
-		let command = "";
-
-		// Only log details for non-ExecError errors
-		if (!(error instanceof ExecError)) {
-			const message = error instanceof Error ? error.message : String(error);
-			const encodedMessage = encodeBase64(message);
-			command += `echo "${encodedMessage}" | base64 -d >> "${deployment.logPath}";`;
-		}
-
-		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
 		const serverId = application.buildServerId || application.serverId;
-		if (serverId) {
-			await execAsyncRemote(serverId, command);
-		} else {
-			await execAsync(command);
-		}
+		await appendDeploymentFailureLog({
+			error,
+			logPath: deployment.logPath,
+			serverId,
+		});
 
 		const comment = getIssueComment(application.name, "error", previewDomain);
 		await updateIssueComment({

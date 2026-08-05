@@ -111,7 +111,6 @@ vi.mock("@dokploy/server/services/rollbacks", () => ({
 vi.mock("@dokploy/server/services/platform-release-orchestrator", () => ({
 	createPlatformReleasePlan: () => ({
 		orchestrator: { execute: releaseExecuteMock },
-		registryCredentialMode: "inline",
 	}),
 }));
 
@@ -215,36 +214,27 @@ describe("deployApplication - Command Generation Tests", () => {
 		expect(command).toContain("https://github.com/Dokploy/examples.git");
 	});
 
-	it("should verify nixpacks command is called with correct app", async () => {
-		const mockNixpacksCommand = "nixpacks build /path/to/app --name test-app";
-		vi.mocked(builders.getBuildCommand).mockResolvedValue(mockNixpacksCommand);
-
+	it("should send semantic deploy intent for nixpacks applications", async () => {
 		await deployApplication({
 			applicationId: "test-app-id",
 			titleLog: "Test deployment",
 			descriptionLog: "",
 		});
 
-		expect(builders.getBuildCommand).toHaveBeenCalledWith(
-			expect.objectContaining({
-				buildType: "nixpacks",
-				customGitUrl: "https://github.com/Dokploy/examples.git",
-				buildPath: "/astro",
-			}),
-			{
-				registryCredentialMode: "inline",
-				uploadApplicationRegistries: true,
-			},
-		);
-
 		expect(releaseExecuteMock).toHaveBeenCalledWith(
 			expect.objectContaining({
-				command: expect.stringContaining("nixpacks build"),
+				application: expect.objectContaining({
+					buildType: "nixpacks",
+					customGitUrl: "https://github.com/Dokploy/examples.git",
+					buildPath: "/astro",
+				}),
+				intent: { kind: "deploy" },
 			}),
 		);
+		expect(builders.getBuildCommand).not.toHaveBeenCalled();
 	});
 
-	it("should verify railpack command includes correct parameters", async () => {
+	it("should send semantic deploy intent for railpack applications", async () => {
 		const mockApp = createMockApplication({ buildType: "railpack" });
 		vi.mocked(db.query.applications.findFirst).mockResolvedValue(
 			mockApp as any,
@@ -253,49 +243,29 @@ describe("deployApplication - Command Generation Tests", () => {
 			mockApp as any,
 		);
 
-		const mockRailpackCommand = "railpack prepare /path/to/app";
-		vi.mocked(builders.getBuildCommand).mockResolvedValue(mockRailpackCommand);
-
 		await deployApplication({
 			applicationId: "test-app-id",
 			titleLog: "Railpack test",
 			descriptionLog: "",
 		});
 
-		expect(builders.getBuildCommand).toHaveBeenCalledWith(
-			expect.objectContaining({
-				buildType: "railpack",
-			}),
-			{
-				registryCredentialMode: "inline",
-				uploadApplicationRegistries: true,
-			},
-		);
-
 		expect(releaseExecuteMock).toHaveBeenCalledWith(
 			expect.objectContaining({
-				command: expect.stringContaining("railpack prepare"),
+				application: expect.objectContaining({ buildType: "railpack" }),
+				intent: { kind: "deploy" },
 			}),
 		);
 	});
 
-	it("should execute commands in correct order", async () => {
-		const mockNixpacksCommand = "nixpacks build";
-		vi.mocked(builders.getBuildCommand).mockResolvedValue(mockNixpacksCommand);
-
+	it("should keep command construction behind the release seam", async () => {
 		await deployApplication({
 			applicationId: "test-app-id",
 			titleLog: "Test",
 			descriptionLog: "",
 		});
 
-		const orchestratorInput = releaseExecuteMock.mock.calls[0]?.[0];
-		expect(orchestratorInput).toBeDefined();
-
-		const fullCommand = orchestratorInput.command;
-		expect(fullCommand).toContain("set -e");
-		expect(fullCommand).toContain("git clone");
-		expect(fullCommand).toContain("nixpacks build");
+		expect(builders.getBuildCommand).not.toHaveBeenCalled();
+		expect(releaseExecuteMock).toHaveBeenCalledTimes(1);
 	});
 
 	it("should pass the deployment log path to the release orchestrator", async () => {

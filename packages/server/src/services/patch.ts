@@ -6,8 +6,6 @@ import { TRPCError } from "@trpc/server";
 import { and, eq } from "drizzle-orm";
 import type { z } from "zod";
 import { encodeBase64 } from "../utils/docker/utils";
-import { findApplicationById } from "./application";
-import { findComposeById } from "./compose";
 
 export type Patch = typeof patch.$inferSelect;
 
@@ -131,20 +129,18 @@ interface ApplyPatchesOptions {
 	id: string;
 	type: "application" | "compose";
 	serverId: string | null;
+	appName: string;
 }
 
 export const generateApplyPatchesCommand = async ({
 	id,
 	type,
 	serverId,
+	appName,
 }: ApplyPatchesOptions) => {
-	const entity =
-		type === "application"
-			? await findApplicationById(id)
-			: await findComposeById(id);
 	const { COMPOSE_PATH, APPLICATIONS_PATH } = paths(!!serverId);
 	const basePath = type === "compose" ? COMPOSE_PATH : APPLICATIONS_PATH;
-	const codePath = join(basePath, entity.appName, "code");
+	const codePath = join(basePath, appName, "code");
 
 	const resultPatches = await findPatchesByEntityId(id, type);
 	const patches = resultPatches.filter((p) => p.enabled);

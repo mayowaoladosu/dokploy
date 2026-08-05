@@ -5,7 +5,10 @@ import type {
 	PlatformBuildPool,
 	PlatformPlacement,
 } from "@dokploy/server/db/schema";
-import { createKubernetesBuildExecutor } from "@dokploy/server/services/kubernetes/build-executor";
+import {
+	buildKubernetesBuildNamespace,
+	createKubernetesBuildExecutor,
+} from "@dokploy/server/services/kubernetes/build-executor";
 import type { KubernetesControlPlane } from "@dokploy/server/services/kubernetes/client";
 import type { ApplicationNested } from "@dokploy/server/utils/builders";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -118,5 +121,26 @@ describe("Kubernetes build executor", () => {
 			expect.objectContaining({ kind: "Secret" }),
 		);
 		expect(await fs.readFile(logPath, "utf8")).toContain("build output");
+
+		const previewApplication = {
+			...application,
+			releaseIdentity: "preview-42",
+		};
+		await executor.cancel({
+			deploymentId: "deployment-42",
+			buildServerId: null,
+			application: previewApplication,
+		});
+		expect(client.delete).toHaveBeenCalledWith(
+			expect.objectContaining({
+				kind: "Job",
+				metadata: expect.objectContaining({
+					namespace: buildKubernetesBuildNamespace(
+						"organization-1",
+						"preview-42",
+					),
+				}),
+			}),
+		);
 	});
 });

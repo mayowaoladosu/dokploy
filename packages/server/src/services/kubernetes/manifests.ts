@@ -89,6 +89,25 @@ const k8sName = (value: string, maxLength = 63) => {
 export const kubernetesApplicationResourceName = (applicationId: string) =>
 	k8sName(`app-${applicationId}`);
 
+export const kubernetesReleaseNamespace = ({
+	applicationId,
+	releaseIdentity,
+	placementNamespace,
+}: {
+	applicationId: string;
+	releaseIdentity?: string;
+	placementNamespace: string;
+}) => {
+	if (!releaseIdentity || releaseIdentity === applicationId) {
+		return placementNamespace;
+	}
+	const digest = createHash("sha256")
+		.update(releaseIdentity)
+		.digest("hex")
+		.slice(0, 12);
+	return k8sName(`${placementNamespace}-release-${digest}`);
+};
+
 const labelsFor = (
 	applicationId: string,
 	organizationId: string,
@@ -136,9 +155,7 @@ const workloadResources = (resources: KubernetesResourceSpec) => ({
 		cpu: nanoToMillicores(resources.cpuLimitNano),
 		...(resources.ephemeralStorageLimitBytes
 			? {
-					"ephemeral-storage": bytesToMi(
-						resources.ephemeralStorageLimitBytes,
-					),
+					"ephemeral-storage": bytesToMi(resources.ephemeralStorageLimitBytes),
 				}
 			: {}),
 	},
@@ -235,7 +252,7 @@ const buildEgressPolicyManifests = (
 export const buildKubernetesHttpRouteManifest = ({
 	applicationId,
 	organizationId,
-	appName,
+	appName: _appName,
 	namespace,
 	gateway,
 	domains,
@@ -285,7 +302,7 @@ export const buildKubernetesHttpRouteManifest = ({
 export const buildKubernetesRoutingManifests = ({
 	applicationId,
 	organizationId,
-	appName,
+	appName: _appName,
 	namespace,
 	gateway,
 	domains,
@@ -307,7 +324,7 @@ export const buildKubernetesRoutingManifests = ({
 			buildKubernetesHttpRouteManifest({
 				applicationId,
 				organizationId,
-				appName,
+				appName: _appName,
 				namespace,
 				gateway,
 				domains,
@@ -360,8 +377,7 @@ export const buildKubernetesRoutingManifests = ({
 								from: "Selector",
 								selector: {
 									matchLabels: {
-										"vlyv.dev/application":
-											labels["vlyv.dev/application"],
+										"vlyv.dev/application": labels["vlyv.dev/application"],
 									},
 								},
 							},
@@ -373,7 +389,7 @@ export const buildKubernetesRoutingManifests = ({
 		buildKubernetesHttpRouteManifest({
 			applicationId,
 			organizationId,
-			appName,
+			appName: _appName,
 			namespace,
 			gateway: {
 				namespace: gateway.namespace,
@@ -389,7 +405,7 @@ export const buildKubernetesRoutingManifests = ({
 export const buildKubernetesHpaManifest = ({
 	applicationId,
 	organizationId,
-	appName,
+	appName: _appName,
 	namespace,
 	minReplicas,
 	maxReplicas,
@@ -588,8 +604,7 @@ export const buildKubernetesRuntimeManifests = (
 								name: "tmp",
 								emptyDir: {
 									sizeLimit: bytesToMi(
-										spec.resources.ephemeralStorageLimitBytes ||
-											2 * 1024 ** 3,
+										spec.resources.ephemeralStorageLimitBytes || 2 * 1024 ** 3,
 									),
 								},
 							},
@@ -826,8 +841,7 @@ cat "$artifact_file" > /dev/termination-log
 								name: "workspace",
 								emptyDir: {
 									sizeLimit: bytesToMi(
-										spec.resources.ephemeralStorageLimitBytes ||
-											20 * 1024 ** 3,
+										spec.resources.ephemeralStorageLimitBytes || 20 * 1024 ** 3,
 									),
 								},
 							},

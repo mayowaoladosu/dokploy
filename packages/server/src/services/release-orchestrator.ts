@@ -1,24 +1,32 @@
-import type { ApplicationNested } from "@dokploy/server/utils/builders";
 import {
 	type BuildExecutionArtifact,
 	type BuildExecutor,
 	createShellBuildExecutor,
 } from "./build-executor";
 import type { Deployment } from "./deployment";
-import {
-	createDeploymentTelemetry,
-	type DeploymentTelemetry,
-	recordTelemetryBestEffort,
-} from "./deployment-telemetry";
+import { createSwarmEdgeRouter, type EdgeRouter } from "./edge-router";
 import {
 	createReleaseStateMachine,
 	type ReleaseStateMachine,
 } from "./release-state-machine";
+import type {
+	ApplicationReleaseIntent,
+	ReleaseApplication,
+} from "./release-types";
 import {
 	createSwarmRuntimeScheduler,
 	type RuntimeHealthResult,
 	type RuntimeScheduler,
 } from "./runtime-scheduler";
+import {
+	createApplicationSourcePreparer,
+	type SourcePreparer,
+} from "./source-preparer";
+import {
+	createDatabaseTelemetrySink,
+	recordReleaseTelemetryBestEffort,
+	type TelemetrySink,
+} from "./telemetry-sink";
 import { createUsageMeter, type UsageMeter } from "./usage-metering";
 
 export type ReleaseExecutionResult = {
@@ -29,17 +37,20 @@ export type ReleaseExecutionResult = {
 
 export interface ReleaseOrchestrator {
 	execute(input: {
-		application: ApplicationNested;
+		application: ReleaseApplication;
 		deployment: Deployment;
-		command: string;
+		intent: ApplicationReleaseIntent;
 	}): Promise<ReleaseExecutionResult>;
+	remove(input: { application: ReleaseApplication }): Promise<void>;
 }
 
 export type ReleaseOrchestratorDependencies = {
 	buildExecutor: BuildExecutor;
 	runtimeScheduler: RuntimeScheduler;
 	stateMachine: ReleaseStateMachine;
-	telemetry: DeploymentTelemetry;
+	sourcePreparer: SourcePreparer;
+	edgeRouter: EdgeRouter;
+	telemetrySink: TelemetrySink;
 	usageMeter: UsageMeter;
 	heartbeatIntervalMs: number;
 };
@@ -72,14 +83,30 @@ export const createReleaseOrchestrator = (
 		buildExecutor: createShellBuildExecutor(),
 		runtimeScheduler: createSwarmRuntimeScheduler(),
 		stateMachine: createReleaseStateMachine(),
-		telemetry: createDeploymentTelemetry(),
+		sourcePreparer: createApplicationSourcePreparer({
+			registryCredentialMode: "inline",
+			uploadApplicationRegistries: true,
+		}),
+		edgeRouter: createSwarmEdgeRouter(),
+		telemetrySink: createDatabaseTelemetrySink(),
 		usageMeter: createUsageMeter(),
 		heartbeatIntervalMs: 30_000,
 		...overrides,
 	};
 
 	return {
-		execute: async ({ application, deployment, command }) => {
+		remove: async ({ application }) => {
+			const results = await Promise.allSettled([
+				dependencies.edgeRouter.withdraw({ application }),
+				dependencies.runtimeScheduler.remove({ application }),
+			]);
+			const failure = results.find(
+				(result): result is PromiseRejectedResult =>
+					result.status === "rejected",
+			);
+			if (failure) throw failure.reason;
+		},
+		execute: async ({ application, deployment, intent }) => {
 			const organizationId = application.environment.project.organizationId;
 			await dependencies.usageMeter.assertBuildAllowed(organizationId);
 			const release = await dependencies.stateMachine.create({
@@ -91,11 +118,12 @@ export const createReleaseOrchestrator = (
 					buildIsolation: dependencies.buildExecutor.isolation,
 				},
 			});
-			await recordTelemetryBestEffort(() =>
-				dependencies.telemetry.initialize(
-					deployment.deploymentId,
-					application.applicationId,
-				),
+			await recordReleaseTelemetryBestEffort(() =>
+				dependencies.telemetrySink.record({
+					type: "release.initialized",
+					deploymentId: deployment.deploymentId,
+					applicationId: application.applicationId,
+				}),
 			);
 
 			const heartbeat = setInterval(() => {
@@ -108,6 +136,7 @@ export const createReleaseOrchestrator = (
 			heartbeat.unref?.();
 
 			let runtimeMutationStarted = false;
+			let edgePublicationStarted = false;
 			let previousImageRef: string | null = null;
 			try {
 				await dependencies.stateMachine.transition(
@@ -125,20 +154,29 @@ export const createReleaseOrchestrator = (
 					release.releaseId,
 					"building",
 				);
+				const prepared = await dependencies.sourcePreparer.prepare({
+					application,
+					intent,
+					workspace:
+						dependencies.buildExecutor.isolation === "ephemeral"
+							? "fresh"
+							: "persistent",
+				});
 				const artifact = await dependencies.buildExecutor.execute({
 					application,
 					deploymentId: deployment.deploymentId,
-					command,
+					command: prepared.command,
 					logPath: deployment.logPath,
 					buildServerId:
 						application.buildServerId || application.serverId || null,
 				});
-				await recordTelemetryBestEffort(() =>
-					dependencies.telemetry.recordBuild(
-						deployment.deploymentId,
-						artifact.durationMs,
-						artifact.imageSizeBytes,
-					),
+				await recordReleaseTelemetryBestEffort(() =>
+					dependencies.telemetrySink.record({
+						type: "build.completed",
+						deploymentId: deployment.deploymentId,
+						durationMs: artifact.durationMs,
+						imageSizeBytes: artifact.imageSizeBytes,
+					}),
 				);
 				await persistWithRetry(() =>
 					dependencies.usageMeter.recordBuild({
@@ -171,24 +209,42 @@ export const createReleaseOrchestrator = (
 					artifact,
 				});
 				const readinessDurationMs = Date.now() - runtimeStartedAt;
-				await recordTelemetryBestEffort(() =>
-					dependencies.telemetry.recordRuntime(
-						deployment.deploymentId,
+				await recordReleaseTelemetryBestEffort(() =>
+					dependencies.telemetrySink.record({
+						type: "runtime.ready",
+						deploymentId: deployment.deploymentId,
+						runtimeDurationMs: readinessDurationMs,
 						readinessDurationMs,
-						readinessDurationMs,
-					),
+					}),
 				);
 
 				await dependencies.stateMachine.transition(
 					release.releaseId,
 					"verifying",
 				);
+				edgePublicationStarted = true;
+				const publication = await dependencies.edgeRouter.publish({
+					releaseId: release.releaseId,
+					deploymentId: deployment.deploymentId,
+					application,
+				});
+				await recordReleaseTelemetryBestEffort(() =>
+					dependencies.telemetrySink.record({
+						type: "edge.published",
+						deploymentId: deployment.deploymentId,
+						publication,
+					}),
+				);
 				const health = await dependencies.runtimeScheduler.verifyHealth({
 					application,
 				});
 				await dependencies.stateMachine.recordHealth(release.releaseId, health);
-				await recordTelemetryBestEffort(() =>
-					dependencies.telemetry.recordHealth(deployment.deploymentId, health),
+				await recordReleaseTelemetryBestEffort(() =>
+					dependencies.telemetrySink.record({
+						type: "health.completed",
+						deploymentId: deployment.deploymentId,
+						result: health,
+					}),
 				);
 				if (!health.passed) {
 					throw new Error(health.error || "Runtime health verification failed");
@@ -199,20 +255,36 @@ export const createReleaseOrchestrator = (
 				});
 				return { releaseId: release.releaseId, artifact, health };
 			} catch (error) {
+				if (
+					edgePublicationStarted &&
+					!previousImageRef &&
+					(intent.kind === "preview-deploy" ||
+						intent.kind === "preview-rebuild")
+				) {
+					await dependencies.edgeRouter
+						.withdraw({ application })
+						.catch((withdrawError) =>
+							console.error(
+								"Failed to withdraw preview edge route",
+								withdrawError,
+							),
+						);
+				}
 				if (runtimeMutationStarted && previousImageRef) {
+					const rollbackImageRef = previousImageRef;
 					try {
 						await dependencies.stateMachine.transition(
 							release.releaseId,
 							"rolling_back",
 							{
 								reason: error instanceof Error ? error.message : String(error),
-								imageRef: previousImageRef,
+								imageRef: rollbackImageRef,
 							},
 						);
 						const rollbackStatus = await dependencies.runtimeScheduler.rollback(
 							{
 								application,
-								imageRef: previousImageRef,
+								imageRef: rollbackImageRef,
 							},
 						);
 						if (rollbackStatus.state !== "ready") {
@@ -223,7 +295,14 @@ export const createReleaseOrchestrator = (
 						await dependencies.stateMachine.transition(
 							release.releaseId,
 							"rolled_back",
-							{ imageRef: previousImageRef },
+							{ imageRef: rollbackImageRef },
+						);
+						await recordReleaseTelemetryBestEffort(() =>
+							dependencies.telemetrySink.record({
+								type: "rollback.completed",
+								deploymentId: deployment.deploymentId,
+								imageRef: rollbackImageRef,
+							}),
 						);
 					} catch (rollbackError) {
 						await dependencies.stateMachine.fail(
@@ -237,6 +316,9 @@ export const createReleaseOrchestrator = (
 				throw error;
 			} finally {
 				clearInterval(heartbeat);
+				await recordReleaseTelemetryBestEffort(() =>
+					dependencies.telemetrySink.flush(),
+				);
 			}
 		},
 	};

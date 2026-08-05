@@ -274,6 +274,7 @@ export const deployCompose = async ({
 				id: compose.composeId,
 				type: "compose",
 				serverId: compose.serverId,
+				appName: compose.appName,
 			});
 			commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
 			if (compose.serverId) {
@@ -388,6 +389,7 @@ export const rebuildCompose = async ({
 				id: compose.composeId,
 				type: "compose",
 				serverId: compose.serverId,
+				appName: compose.appName,
 			});
 			commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
 			if (compose.serverId) {

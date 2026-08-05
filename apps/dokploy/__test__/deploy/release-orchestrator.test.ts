@@ -4,7 +4,7 @@ import type {
 	BuildExecutor,
 } from "@dokploy/server/services/build-executor";
 import type { Deployment } from "@dokploy/server/services/deployment";
-import type { DeploymentTelemetry } from "@dokploy/server/services/deployment-telemetry";
+import type { EdgeRouter } from "@dokploy/server/services/edge-router";
 import { createReleaseOrchestrator } from "@dokploy/server/services/release-orchestrator";
 import type { ReleaseStateMachine } from "@dokploy/server/services/release-state-machine";
 import type {
@@ -12,6 +12,8 @@ import type {
 	RuntimeScheduler,
 	RuntimeStatus,
 } from "@dokploy/server/services/runtime-scheduler";
+import type { SourcePreparer } from "@dokploy/server/services/source-preparer";
+import type { TelemetrySink } from "@dokploy/server/services/telemetry-sink";
 import type { UsageMeter } from "@dokploy/server/services/usage-metering";
 import type { ApplicationNested } from "@dokploy/server/utils/builders";
 import { describe, expect, it, vi } from "vitest";
@@ -92,6 +94,7 @@ const createHarness = (health: RuntimeHealthResult = readyHealth) => {
 				state: "ready",
 			}),
 		),
+		remove: vi.fn(async () => undefined),
 	};
 	const transition = vi.fn(async (_releaseId, state) => ({
 		...release,
@@ -118,11 +121,29 @@ const createHarness = (health: RuntimeHealthResult = readyHealth) => {
 		getEvents: vi.fn(async () => []),
 		reconcileStale: vi.fn(async () => 0),
 	};
-	const telemetry: DeploymentTelemetry = {
-		initialize: vi.fn(async () => undefined),
-		recordBuild: vi.fn(async () => undefined),
-		recordRuntime: vi.fn(async () => undefined),
-		recordHealth: vi.fn(async () => undefined),
+	const sourcePreparer: SourcePreparer = {
+		prepare: vi.fn(async () => ({
+			command: "railpack build",
+			metadata: {
+				sourceType: "git" as const,
+				buildType: "railpack" as const,
+				cloned: true,
+				patchesApplied: true,
+			},
+		})),
+	};
+	const edgeRouter: EdgeRouter = {
+		provider: "test-edge",
+		publish: vi.fn(async () => ({
+			provider: "test-edge",
+			domains: ["app.example.com"],
+			publishedAt: new Date(0).toISOString(),
+		})),
+		withdraw: vi.fn(async () => undefined),
+	};
+	const telemetrySink: TelemetrySink = {
+		record: vi.fn(async () => undefined),
+		flush: vi.fn(async () => undefined),
 	};
 	const usageMeter: UsageMeter = {
 		assertBuildAllowed: vi.fn(async () => undefined),
@@ -132,7 +153,9 @@ const createHarness = (health: RuntimeHealthResult = readyHealth) => {
 		buildExecutor,
 		runtimeScheduler,
 		stateMachine,
-		telemetry,
+		sourcePreparer,
+		edgeRouter,
+		telemetrySink,
 		usageMeter,
 		heartbeatIntervalMs: 60_000,
 	});
@@ -142,7 +165,9 @@ const createHarness = (health: RuntimeHealthResult = readyHealth) => {
 		buildExecutor,
 		runtimeScheduler,
 		stateMachine,
-		telemetry,
+		sourcePreparer,
+		edgeRouter,
+		telemetrySink,
 		usageMeter,
 		transition,
 	};
@@ -155,7 +180,7 @@ describe("release orchestrator", () => {
 		const result = await harness.orchestrator.execute({
 			application,
 			deployment,
-			command: "railpack build",
+			intent: { kind: "deploy" },
 		});
 
 		expect(result).toEqual({
@@ -175,20 +200,30 @@ describe("release orchestrator", () => {
 			release.releaseId,
 			artifact,
 		);
-		expect(harness.telemetry.initialize).toHaveBeenCalledWith(
-			deployment.deploymentId,
-			application.applicationId,
+		expect(harness.sourcePreparer.prepare).toHaveBeenCalledWith({
+			application,
+			intent: { kind: "deploy" },
+			workspace: "fresh",
+		});
+		expect(harness.buildExecutor.execute).toHaveBeenCalledWith(
+			expect.objectContaining({ command: "railpack build" }),
 		);
-		expect(harness.telemetry.recordBuild).toHaveBeenCalledWith(
-			deployment.deploymentId,
-			artifact.durationMs,
-			artifact.imageSizeBytes,
+		expect(harness.telemetrySink.record).toHaveBeenCalledWith(
+			expect.objectContaining({
+				type: "build.completed",
+				deploymentId: deployment.deploymentId,
+			}),
 		);
-		expect(harness.telemetry.recordRuntime).toHaveBeenCalledTimes(1);
-		expect(harness.telemetry.recordHealth).toHaveBeenCalledWith(
-			deployment.deploymentId,
-			readyHealth,
+		expect(harness.edgeRouter.publish).toHaveBeenCalledWith(
+			expect.objectContaining({ application }),
 		);
+		expect(
+			vi.mocked(harness.edgeRouter.publish).mock.invocationCallOrder[0],
+		).toBeLessThan(
+			vi.mocked(harness.runtimeScheduler.verifyHealth).mock
+				.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+		);
+		expect(harness.telemetrySink.flush).toHaveBeenCalledTimes(1);
 		expect(harness.usageMeter.assertBuildAllowed).toHaveBeenCalledWith(
 			application.environment.project.organizationId,
 		);
@@ -216,7 +251,7 @@ describe("release orchestrator", () => {
 			harness.orchestrator.execute({
 				application,
 				deployment,
-				command: "railpack build",
+				intent: { kind: "deploy" },
 			}),
 		).rejects.toThrow("Health endpoint returned HTTP 503");
 
@@ -234,10 +269,52 @@ describe("release orchestrator", () => {
 			imageRef: "registry.example.com/team/app@sha256:previous",
 		});
 		expect(harness.stateMachine.fail).not.toHaveBeenCalled();
-		expect(harness.telemetry.recordHealth).toHaveBeenCalledWith(
-			deployment.deploymentId,
-			failedHealth,
+		expect(harness.telemetrySink.record).toHaveBeenCalledWith(
+			expect.objectContaining({
+				type: "health.completed",
+				result: failedHealth,
+			}),
 		);
+	});
+
+	it("withdraws a failed preview route", async () => {
+		const failedHealth: RuntimeHealthResult = {
+			passed: false,
+			latencyMs: 100,
+			error: "Preview returned HTTP 503",
+			checkedAt: new Date(0).toISOString(),
+		};
+		const harness = createHarness(failedHealth);
+		vi.mocked(harness.runtimeScheduler.getCurrentImage).mockResolvedValueOnce(
+			null,
+		);
+		const previewApplication = {
+			...application,
+			releaseIdentity: "preview-42",
+		};
+
+		await expect(
+			harness.orchestrator.execute({
+				application: previewApplication,
+				deployment,
+				intent: { kind: "preview-deploy" },
+			}),
+		).rejects.toThrow("Preview returned HTTP 503");
+
+		expect(harness.edgeRouter.withdraw).toHaveBeenCalledWith({
+			application: previewApplication,
+		});
+	});
+
+	it("removes edge and runtime resources through one lifecycle call", async () => {
+		const harness = createHarness();
+
+		await harness.orchestrator.remove({ application });
+
+		expect(harness.edgeRouter.withdraw).toHaveBeenCalledWith({ application });
+		expect(harness.runtimeScheduler.remove).toHaveBeenCalledWith({
+			application,
+		});
 	});
 
 	it("retries transient artifact persistence failures", async () => {
@@ -252,7 +329,7 @@ describe("release orchestrator", () => {
 		await harness.orchestrator.execute({
 			application,
 			deployment,
-			command: "railpack build",
+			intent: { kind: "deploy" },
 		});
 
 		expect(harness.stateMachine.attachArtifact).toHaveBeenCalledTimes(2);

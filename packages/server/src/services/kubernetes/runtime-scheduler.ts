@@ -18,6 +18,7 @@ import {
 	type KubernetesDomainRoute,
 	type KubernetesResourceSpec,
 	kubernetesApplicationResourceName,
+	kubernetesReleaseNamespace,
 } from "./manifests";
 
 type KubernetesRuntimeSchedulerInput = {
@@ -96,9 +97,16 @@ export const createKubernetesRuntimeScheduler = ({
 	const getStatus = async (
 		application: RuntimeApplication,
 	): Promise<RuntimeStatus> => {
+		const releaseIdentity =
+			application.releaseIdentity || application.applicationId;
+		const namespace = kubernetesReleaseNamespace({
+			applicationId: application.applicationId,
+			releaseIdentity: application.releaseIdentity,
+			placementNamespace: placement.namespace,
+		});
 		const deployment = await client.readDeployment(
-			placement.namespace,
-			kubernetesApplicationResourceName(application.applicationId),
+			namespace,
+			kubernetesApplicationResourceName(releaseIdentity),
 		);
 		const state = runtimeState(deployment);
 		const desiredReplicas =
@@ -147,30 +155,24 @@ export const createKubernetesRuntimeScheduler = ({
 			application.environment.project.env,
 			application.environment.env,
 		);
-		const routes = await verifiedRoutesForApplication(
-			application.applicationId,
-		);
+		const releaseIdentity =
+			application.releaseIdentity || application.applicationId;
+		const namespace = kubernetesReleaseNamespace({
+			applicationId: application.applicationId,
+			releaseIdentity: application.releaseIdentity,
+			placementNamespace: placement.namespace,
+		});
 		const maxReplicas = positiveInteger(
 			process.env.PLATFORM_KUBERNETES_MAX_REPLICAS,
 			Math.max(application.replicas ?? 1, 3),
 		);
-		const gateway =
-			clusterMetadata.gatewayNamespace && clusterMetadata.gatewayName
-				? {
-						namespace: clusterMetadata.gatewayNamespace,
-						name: clusterMetadata.gatewayName,
-						sectionName: clusterMetadata.gatewaySectionName,
-						className: clusterMetadata.gatewayClassName,
-						certIssuerName: clusterMetadata.certIssuerName,
-					}
-				: undefined;
 		try {
 			await client.apply(
 				buildKubernetesRuntimeManifests({
-					applicationId: application.applicationId,
+					applicationId: releaseIdentity,
 					organizationId: application.environment.project.organizationId,
 					appName: application.appName,
-					namespace: placement.namespace,
+					namespace,
 					imageRef,
 					replicas: Math.max(application.replicas ?? 1, 1),
 					maxReplicas,
@@ -193,8 +195,8 @@ export const createKubernetesRuntimeScheduler = ({
 					nodeSelector: nodePool?.labels,
 					tolerations: nodePool?.taints,
 					registrySecretName: clusterMetadata.registrySecretName,
-					gateway,
-					domains: routes,
+					gateway: undefined,
+					domains: [],
 					allowedEgressCidrs: clusterMetadata.allowedEgressCidrs,
 				}),
 			);
@@ -221,9 +223,9 @@ export const createKubernetesRuntimeScheduler = ({
 		verifyHealth: async ({ application, timeoutMs = 120_000 }) => {
 			const startedAt = Date.now();
 			await waitUntilReady(application, timeoutMs);
-			const route = (
-				await verifiedRoutesForApplication(application.applicationId)
-			)[0];
+			const route =
+				application.releaseDomains?.[0] ??
+				(await verifiedRoutesForApplication(application.applicationId))[0];
 			if (process.env.PLATFORM_HTTP_HEALTH_CHECK !== "true" || !route) {
 				return {
 					passed: true,
@@ -241,5 +243,38 @@ export const createKubernetesRuntimeScheduler = ({
 		},
 		rollback: async ({ application, imageRef, timeoutMs = 180_000 }) =>
 			scheduleImage(application, imageRef, timeoutMs),
+		remove: async ({ application }) => {
+			const releaseIdentity =
+				application.releaseIdentity || application.applicationId;
+			const namespace = kubernetesReleaseNamespace({
+				applicationId: application.applicationId,
+				releaseIdentity: application.releaseIdentity,
+				placementNamespace: placement.namespace,
+			});
+			if (application.releaseIdentity) {
+				await client.deleteNamespace(namespace);
+				return;
+			}
+			const name = kubernetesApplicationResourceName(releaseIdentity);
+			await Promise.all(
+				[
+					["autoscaling/v2", "HorizontalPodAutoscaler"],
+					["policy/v1", "PodDisruptionBudget"],
+					["apps/v1", "Deployment"],
+					["v1", "Service"],
+					["v1", "Secret"],
+					["v1", "ServiceAccount"],
+				].map(([apiVersion, kind]) =>
+					client.delete({
+						apiVersion,
+						kind,
+						metadata: {
+							name: kind === "Secret" ? `${name}-env` : name,
+							namespace,
+						},
+					}),
+				),
+			);
+		},
 	};
 };

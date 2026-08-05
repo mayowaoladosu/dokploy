@@ -1,14 +1,12 @@
 import { IS_MANAGED_PAAS } from "@dokploy/server/constants";
-import {
-	type ApplicationNested,
-	getImageName,
-} from "@dokploy/server/utils/builders";
+import { getImageName } from "@dokploy/server/utils/builders";
 import {
 	execAsync,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
 import { getRemoteDocker } from "@dokploy/server/utils/servers/remote-docker";
 import { quote } from "shell-quote";
+import type { ReleaseApplication } from "./release-types";
 
 export type BuildExecutionArtifact = {
 	imageId: string;
@@ -22,7 +20,7 @@ export type BuildExecutionArtifact = {
 };
 
 export type BuildExecutionInput = {
-	application: ApplicationNested;
+	application: ReleaseApplication;
 	deploymentId: string;
 	command: string;
 	logPath: string;
@@ -36,6 +34,7 @@ export interface BuildExecutor {
 	cancel(input: {
 		deploymentId: string;
 		buildServerId: string | null;
+		application: ReleaseApplication;
 	}): Promise<void>;
 }
 

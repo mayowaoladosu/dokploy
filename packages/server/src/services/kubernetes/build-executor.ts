@@ -68,7 +68,10 @@ const buildTerminationMessage = z.object({
 const defaultSleep = (durationMs: number) =>
 	new Promise<void>((resolve) => setTimeout(resolve, durationMs));
 
-const buildNamespace = (organizationId: string, applicationId: string) => {
+export const buildKubernetesBuildNamespace = (
+	organizationId: string,
+	applicationId: string,
+) => {
 	const digest = createHash("sha256")
 		.update(`${organizationId}:${applicationId}:build`)
 		.digest("hex")
@@ -309,14 +312,16 @@ export const createKubernetesBuildExecutor = ({
 		isolation: "ephemeral",
 		execute: async (input): Promise<BuildExecutionArtifact> => {
 			const startedAt = Date.now();
-			const namespace = buildNamespace(
+			const releaseIdentity =
+				input.application.releaseIdentity || input.application.applicationId;
+			const namespace = buildKubernetesBuildNamespace(
 				input.application.environment.project.organizationId,
-				input.application.applicationId,
+				releaseIdentity,
 			);
 			const jobName = kubernetesManifestName(`build-${input.deploymentId}`);
 			const runtimeImageRef = buildPoolImageRef(
 				buildPool,
-				input.application.applicationId,
+				releaseIdentity,
 				input.deploymentId,
 			);
 			const localImageRef =
@@ -334,7 +339,7 @@ export const createKubernetesBuildExecutor = ({
 				...(await sourceSecretsFor(input.application)),
 			};
 			const manifests = buildKubernetesBuildManifests({
-				applicationId: input.application.applicationId,
+				applicationId: releaseIdentity,
 				organizationId: input.application.environment.project.organizationId,
 				deploymentId: input.deploymentId,
 				namespace,
@@ -409,10 +414,10 @@ export const createKubernetesBuildExecutor = ({
 				},
 			};
 		},
-		cancel: async ({ deploymentId }) => {
-			const namespace = buildNamespace(
+		cancel: async ({ deploymentId, application }) => {
+			const namespace = buildKubernetesBuildNamespace(
 				placement.organizationId,
-				placement.applicationId,
+				application.releaseIdentity || application.applicationId,
 			);
 			const job: KubernetesObject = {
 				apiVersion: "batch/v1",

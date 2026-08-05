@@ -1,13 +1,12 @@
 import { promises as dns } from "node:dns";
 import { isIP } from "node:net";
-import {
-	type ApplicationNested,
-	mechanizeDockerContainer,
-} from "@dokploy/server/utils/builders";
+import { mechanizeDockerContainer } from "@dokploy/server/utils/builders";
+import { removeService } from "@dokploy/server/utils/docker/utils";
 import { getRemoteDocker } from "@dokploy/server/utils/servers/remote-docker";
 import type { BuildExecutionArtifact } from "./build-executor";
+import type { ReleaseApplication } from "./release-types";
 
-export type RuntimeApplication = ApplicationNested & {
+export type RuntimeApplication = ReleaseApplication & {
 	domains?: Array<{
 		host: string;
 		https: boolean;
@@ -50,6 +49,7 @@ export interface RuntimeScheduler {
 		imageRef: string;
 		timeoutMs?: number;
 	}): Promise<RuntimeStatus>;
+	remove(input: { application: RuntimeApplication }): Promise<void>;
 }
 
 type SchedulerOptions = {
@@ -302,7 +302,9 @@ export const createSwarmRuntimeScheduler = (
 			scheduleImage(application, artifact.imageRef, timeoutMs),
 		verifyHealth: async ({ application, timeoutMs = 120_000 }) => {
 			const startedAt = Date.now();
-			const domain = application.domains?.find((entry) => Boolean(entry.host));
+			const domain = (application.releaseDomains ?? application.domains)?.find(
+				(entry) => Boolean(entry.host),
+			);
 			const shouldCheckHttp =
 				Boolean(domain) && process.env.PLATFORM_HTTP_HEALTH_CHECK === "true";
 			if (!shouldCheckHttp || !domain) {
@@ -325,5 +327,8 @@ export const createSwarmRuntimeScheduler = (
 		},
 		rollback: async ({ application, imageRef, timeoutMs = 120_000 }) =>
 			scheduleImage(application, imageRef, timeoutMs),
+		remove: async ({ application }) => {
+			await removeService(application.appName, application.serverId);
+		},
 	};
 };

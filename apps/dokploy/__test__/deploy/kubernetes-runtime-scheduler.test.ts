@@ -3,6 +3,7 @@ import type {
 	PlatformPlacement,
 } from "@dokploy/server/db/schema";
 import type { KubernetesControlPlane } from "@dokploy/server/services/kubernetes/client";
+import { kubernetesReleaseNamespace } from "@dokploy/server/services/kubernetes/manifests";
 import { createKubernetesRuntimeScheduler } from "@dokploy/server/services/kubernetes/runtime-scheduler";
 import type { ApplicationNested } from "@dokploy/server/utils/builders";
 import { describe, expect, it, vi } from "vitest";
@@ -106,5 +107,35 @@ describe("Kubernetes runtime scheduler", () => {
 		expect(deployment.spec.template.spec.containers[0].image).toBe(
 			"registry.example.com/app@sha256:release",
 		);
+		expect(
+			appliedManifests.some((manifest) => manifest.kind === "HTTPRoute"),
+		).toBe(false);
+
+		const previewApplication = {
+			...application,
+			appName: "preview-example-app",
+			releaseIdentity: "preview-42",
+		};
+		await scheduler.schedule({
+			application: previewApplication,
+			artifact: {
+				imageRef: "registry.example.com/app@sha256:preview",
+			},
+		});
+		const previewNamespace = kubernetesReleaseNamespace({
+			applicationId: "application-1",
+			releaseIdentity: "preview-42",
+			placementNamespace: "vlyv-app-abc",
+		});
+		const previewManifests = vi.mocked(apply).mock.calls[1]?.[0] ?? [];
+		expect(
+			previewManifests.find((manifest) => manifest.kind === "Namespace")
+				?.metadata?.name,
+		).toBe(previewNamespace);
+		expect(previewNamespace).not.toBe(placement.namespace);
+
+		await scheduler.remove({ application: previewApplication });
+		expect(client.deleteNamespace).toHaveBeenCalledWith(previewNamespace);
+		expect(client.delete).not.toHaveBeenCalled();
 	});
 });

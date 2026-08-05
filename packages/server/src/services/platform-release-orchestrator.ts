@@ -1,16 +1,15 @@
 import { IS_MANAGED_PAAS } from "@dokploy/server/constants";
 import type { ApplicationNested } from "@dokploy/server/utils/builders";
-import type { RegistryCredentialMode } from "@dokploy/server/utils/cluster/upload";
+import { createKubernetesEdgeRouter } from "./edge-router";
 import { createKubernetesBuildExecutor } from "./kubernetes/build-executor";
 import { createKubernetesControlPlane } from "./kubernetes/client";
 import { createKubernetesRuntimeScheduler } from "./kubernetes/runtime-scheduler";
 import { findApplicationPlatformPlacement } from "./platform-infrastructure";
 import { createReleaseOrchestrator } from "./release-orchestrator";
+import { createApplicationSourcePreparer } from "./source-preparer";
 
 export type PlatformReleasePlan = {
 	orchestrator: ReturnType<typeof createReleaseOrchestrator>;
-	registryCredentialMode: RegistryCredentialMode;
-	usesPlatformRegistry: boolean;
 };
 
 export const createPlatformReleasePlan = async (
@@ -25,8 +24,6 @@ export const createPlatformReleasePlan = async (
 		}
 		return {
 			orchestrator: createReleaseOrchestrator(),
-			registryCredentialMode: "inline",
-			usesPlatformRegistry: false,
 		};
 	}
 	const { runtimeTarget, buildPool } = placement;
@@ -56,6 +53,10 @@ export const createPlatformReleasePlan = async (
 
 	return {
 		orchestrator: createReleaseOrchestrator({
+			sourcePreparer: createApplicationSourcePreparer({
+				registryCredentialMode: "environment",
+				uploadApplicationRegistries: false,
+			}),
 			buildExecutor: createKubernetesBuildExecutor({
 				client,
 				placement,
@@ -69,9 +70,12 @@ export const createPlatformReleasePlan = async (
 				clusterMetadata: runtimeMetadata,
 				nodePool: runtimeTarget.nodePool,
 			}),
+			edgeRouter: createKubernetesEdgeRouter({
+				client,
+				placement,
+				clusterMetadata: cluster.metadata,
+			}),
 		}),
-		registryCredentialMode: "environment",
-		usesPlatformRegistry: true,
 	};
 };
 

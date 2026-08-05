@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { db } from "@dokploy/server/db";
 import {
 	type apiCreatePreviewDeployment,
@@ -9,18 +10,36 @@ import { TRPCError } from "@trpc/server";
 import { and, desc, eq } from "drizzle-orm";
 import type { z } from "zod";
 import { generatePassword } from "../templates";
-import { removeService } from "../utils/docker/utils";
 import { removeDirectoryCode } from "../utils/filesystem/directory";
 import { authGithub } from "../utils/providers/github";
-import { removeTraefikConfig } from "../utils/traefik/application";
 import { manageDomain } from "../utils/traefik/domain";
 import { findApplicationById } from "./application";
 import { removeDeploymentsByPreviewDeploymentId } from "./deployment";
 import { createDomain } from "./domain";
 import { findGithubById, getIssueComment } from "./github";
+import { getManagedApplicationDomain } from "./platform";
+import { findApplicationPlatformPlacement } from "./platform-infrastructure";
+import { createPlatformReleasePlan } from "./platform-release-orchestrator";
 import { getWebServerSettings } from "./web-server-settings";
 
 export type PreviewDeployment = typeof previewDeployments.$inferSelect;
+
+export const buildPreviewAppName = (
+	applicationName: string,
+	suffix: string,
+) => {
+	const candidate = `preview-${applicationName}-${suffix}`
+		.toLowerCase()
+		.replace(/[^a-z0-9-]+/g, "-")
+		.replace(/-+/g, "-")
+		.replace(/^-+|-+$/g, "");
+	if (candidate.length <= 63) return candidate;
+	const digest = createHash("sha256")
+		.update(candidate)
+		.digest("hex")
+		.slice(0, 10);
+	return `${candidate.slice(0, 63 - digest.length - 1).replace(/-+$/g, "")}-${digest}`;
+};
 
 export const findPreviewDeploymentById = async (
 	previewDeploymentId: string,
@@ -55,9 +74,23 @@ export const removePreviewDeployment = async (previewDeploymentId: string) => {
 		);
 
 		application.appName = previewDeployment.appName;
+		const releasePlan = await createPlatformReleasePlan(application);
+		await releasePlan.orchestrator.remove({
+			application: {
+				...application,
+				releaseIdentity: previewDeployment.previewDeploymentId,
+				releaseDomains: previewDeployment.domain
+					? [
+							{
+								host: previewDeployment.domain.host,
+								https: previewDeployment.domain.https,
+								path: previewDeployment.domain.path,
+							},
+						]
+					: [],
+			},
+		});
 		const cleanupOperations = [
-			async () =>
-				await removeService(application?.appName, application?.serverId),
 			async () =>
 				await removeDeploymentsByPreviewDeploymentId(
 					previewDeployment,
@@ -65,15 +98,6 @@ export const removePreviewDeployment = async (previewDeploymentId: string) => {
 				),
 			async () =>
 				await removeDirectoryCode(application?.appName, application?.serverId),
-			async () =>
-				await removeTraefikConfig(application?.appName, application?.serverId),
-			async () =>
-				await db
-					.delete(previewDeployments)
-					.where(
-						eq(previewDeployments.previewDeploymentId, previewDeploymentId),
-					)
-					.returning(),
 		];
 		for (const operation of cleanupOperations) {
 			try {
@@ -82,6 +106,10 @@ export const removePreviewDeployment = async (previewDeploymentId: string) => {
 				console.error(error);
 			}
 		}
+		await db
+			.delete(previewDeployments)
+			.where(eq(previewDeployments.previewDeploymentId, previewDeploymentId))
+			.returning();
 		return previewDeployment;
 	} catch (error) {
 		const message =
@@ -130,17 +158,21 @@ export const createPreviewDeployment = async (
 	schema: z.infer<typeof apiCreatePreviewDeployment>,
 ) => {
 	const application = await findApplicationById(schema.applicationId);
-	const appName = `preview-${application.appName}-${generatePassword(6)}`;
+	const appName = buildPreviewAppName(application.appName, generatePassword(6));
+	const managedDomain = getManagedApplicationDomain(appName);
 
 	const org = await db.query.organization.findFirst({
 		where: eq(organization.id, application.environment.project.organizationId),
 	});
-	const generateDomain = await generateWildcardDomain(
-		application.previewWildcard || "*.sslip.io",
-		appName,
-		application.server?.ipAddress || "",
-		org?.ownerId || "",
-	);
+	const generateDomain =
+		managedDomain ||
+		(await generateWildcardDomain(
+			application.previewWildcard || "*.sslip.io",
+			appName,
+			application.server?.ipAddress || "",
+			org?.ownerId || "",
+		));
+	const previewHttps = Boolean(managedDomain) || application.previewHttps;
 
 	if (!application.githubId) {
 		throw new TRPCError({
@@ -157,7 +189,7 @@ export const createPreviewDeployment = async (
 	const runningComment = getIssueComment(
 		application.name,
 		"initializing",
-		`${application.previewHttps ? "https" : "http"}://${generateDomain}`,
+		`${previewHttps ? "https" : "http"}://${generateDomain}`,
 	);
 
 	const issue = await octokit.rest.issues.createComment({
@@ -188,16 +220,22 @@ export const createPreviewDeployment = async (
 		host: generateDomain,
 		path: application.previewPath,
 		port: application.previewPort,
-		https: application.previewHttps,
-		certificateType: application.previewCertificateType,
+		https: previewHttps,
+		certificateType: managedDomain
+			? "letsencrypt"
+			: application.previewCertificateType,
 		customCertResolver: application.previewCustomCertResolver,
 		domainType: "preview",
 		previewDeploymentId: previewDeployment.previewDeploymentId,
 	});
 
 	application.appName = appName;
-
-	await manageDomain(application, newDomain);
+	const placement = await findApplicationPlatformPlacement(
+		application.applicationId,
+	);
+	if (!placement || placement.runtimeTarget.runtime !== "kubernetes") {
+		await manageDomain(application, newDomain);
+	}
 
 	await db
 		.update(previewDeployments)
