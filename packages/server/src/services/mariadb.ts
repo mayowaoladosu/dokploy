@@ -13,6 +13,11 @@ import { TRPCError } from "@trpc/server";
 import { eq, getTableColumns } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
+import {
+	assertManagedResourceLimits,
+	getManagedResourceDefaults,
+	resolveManagedCompute,
+} from "./platform";
 import { validUniqueServerAppName } from "./project";
 
 export type Mariadb = typeof mariadb.$inferSelect;
@@ -21,6 +26,10 @@ export const createMariadb = async (
 	input: z.infer<typeof apiCreateMariaDB>,
 ) => {
 	const appName = buildAppName("mariadb", input.appName);
+	const compute = await resolveManagedCompute({
+		kind: "service",
+		requestedServerId: input.serverId,
+	});
 
 	const valid = await validUniqueServerAppName(appName);
 	if (!valid) {
@@ -34,6 +43,8 @@ export const createMariadb = async (
 		.insert(mariadb)
 		.values({
 			...input,
+			...compute,
+			...getManagedResourceDefaults(),
 			databasePassword: input.databasePassword
 				? input.databasePassword
 				: generatePassword(),
@@ -93,6 +104,7 @@ export const updateMariadbById = async (
 	mariadbId: string,
 	mariadbData: Partial<Mariadb>,
 ) => {
+	assertManagedResourceLimits(mariadbData);
 	const { appName, ...rest } = mariadbData;
 	const result = await db
 		.update(mariadb)

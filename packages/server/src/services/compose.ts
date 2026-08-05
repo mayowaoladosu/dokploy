@@ -43,6 +43,7 @@ import {
 	updateDeploymentStatus,
 } from "./deployment";
 import { generateApplyPatchesCommand } from "./patch";
+import { resolveManagedCompute } from "./platform";
 import { validUniqueServerAppName } from "./project";
 
 export type Compose = typeof compose.$inferSelect;
@@ -51,6 +52,10 @@ export const createCompose = async (
 	input: z.infer<typeof apiCreateCompose>,
 ) => {
 	const appName = buildAppName("compose", input.appName);
+	const compute = await resolveManagedCompute({
+		kind: "service",
+		requestedServerId: input.serverId,
+	});
 
 	const valid = await validUniqueServerAppName(appName);
 	if (!valid) {
@@ -64,6 +69,7 @@ export const createCompose = async (
 		.insert(compose)
 		.values({
 			...input,
+			...compute,
 			composeFile: input.composeFile || "",
 			appName,
 		})
@@ -84,6 +90,10 @@ export const createComposeByTemplate = async (
 	input: typeof compose.$inferInsert,
 ) => {
 	const appName = cleanAppName(input.appName);
+	const compute = await resolveManagedCompute({
+		kind: "service",
+		requestedServerId: input.serverId,
+	});
 	if (appName) {
 		const valid = await validUniqueServerAppName(appName);
 
@@ -98,6 +108,7 @@ export const createComposeByTemplate = async (
 		.insert(compose)
 		.values({
 			...input,
+			...compute,
 			appName,
 		})
 		.returning()

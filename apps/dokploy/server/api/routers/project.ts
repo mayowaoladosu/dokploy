@@ -28,6 +28,7 @@ import {
 	findRedisById,
 	findUserById,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
 	updateProjectById,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
@@ -74,7 +75,7 @@ export const projectRouter = createTRPCRouter({
 
 				const admin = await findUserById(ctx.user.ownerId);
 
-				if (admin.serversQuantity === 0 && IS_CLOUD) {
+				if (admin.serversQuantity === 0 && IS_CLOUD && !IS_MANAGED_PAAS) {
 					throw new TRPCError({
 						code: "NOT_FOUND",
 						message: "No servers available, Please subscribe to a plan",
@@ -811,6 +812,15 @@ export const projectRouter = createTRPCRouter({
 		.mutation(async ({ ctx, input }) => {
 			try {
 				await checkProjectAccess(ctx, "create");
+				if (
+					IS_MANAGED_PAAS &&
+					input.selectedServices?.some((service) => service.type === "compose")
+				) {
+					throw new TRPCError({
+						code: "FORBIDDEN",
+						message: "Compose workloads are not available on managed compute",
+					});
+				}
 
 				const sourceEnvironment = input.duplicateInSameProject
 					? await findEnvironmentById(input.sourceEnvironmentId)

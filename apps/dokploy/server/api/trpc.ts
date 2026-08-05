@@ -13,6 +13,7 @@ import { hasValidLicense } from "@dokploy/server/index";
 import type { statements } from "@dokploy/server/lib/access-control";
 import { validateRequest } from "@dokploy/server/lib/auth";
 import { checkPermission } from "@dokploy/server/services/permission";
+import { isPlatformAdmin } from "@dokploy/server/services/platform";
 import type { OpenApiMeta } from "@dokploy/trpc-openapi";
 import { initTRPC, TRPCError } from "@trpc/server";
 import type { CreateNextContextOptions } from "@trpc/server/adapters/next";
@@ -207,6 +208,24 @@ export const adminProcedure = t.procedure.use(({ ctx, next }) => {
 		},
 	});
 });
+
+/**
+ * Global control-plane administrator. Unlike `adminProcedure`, organization
+ * ownership does not grant this capability. Managed PaaS infrastructure must
+ * never become tenant-accessible merely because a customer owns their org.
+ */
+export const platformAdminProcedure = protectedProcedure.use(
+	async ({ ctx, next }) => {
+		if (!(await isPlatformAdmin(ctx.user.id))) {
+			throw new TRPCError({
+				code: "FORBIDDEN",
+				message: "Platform administrator access required",
+			});
+		}
+
+		return next();
+	},
+);
 
 /**
  * Requires admin/owner role AND enterprise enabled with a license key in DB.

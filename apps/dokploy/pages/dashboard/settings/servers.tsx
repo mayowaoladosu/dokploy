@@ -1,4 +1,8 @@
-import { validateRequest } from "@dokploy/server";
+import {
+	IS_MANAGED_PAAS,
+	isPlatformAdmin,
+	validateRequest,
+} from "@dokploy/server";
 import { createServerSideHelpers } from "@trpc/react-query/server";
 import type { GetServerSidePropsContext } from "next";
 import type { ReactElement } from "react";
@@ -30,6 +34,14 @@ export async function getServerSideProps(
 			redirect: {
 				permanent: false,
 				destination: "/",
+			},
+		};
+	}
+	if (IS_MANAGED_PAAS && !(await isPlatformAdmin(user.id))) {
+		return {
+			redirect: {
+				permanent: false,
+				destination: "/dashboard/home",
 			},
 		};
 	}

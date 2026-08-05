@@ -11,8 +11,14 @@ vi.mock("@dokploy/server/services/permission", () => ({
 }));
 
 const mockGetAccessibleServerIds = vi.hoisted(() => vi.fn());
+const mockIsPlatformAdmin = vi.hoisted(() => vi.fn());
+const platformMode = vi.hoisted(() => ({ isManaged: false }));
 vi.mock("@dokploy/server", () => ({
 	getAccessibleServerIds: mockGetAccessibleServerIds,
+	get IS_MANAGED_PAAS() {
+		return platformMode.isManaged;
+	},
+	isPlatformAdmin: mockIsPlatformAdmin,
 }));
 
 import {
@@ -25,6 +31,8 @@ const SESSION = { activeOrganizationId: "org-1" };
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	platformMode.isManaged = false;
+	mockIsPlatformAdmin.mockResolvedValue(false);
 });
 
 describe("canAccessDockerOverWss", () => {
@@ -76,6 +84,27 @@ describe("canAccessDockerOverWss", () => {
 		expect(mockHasPermission).not.toHaveBeenCalled();
 		expect(mockGetAccessibleServerIds).not.toHaveBeenCalled();
 	});
+
+	it("reserves generic Docker access for a platform admin in managed mode", async () => {
+		platformMode.isManaged = true;
+		mockHasPermission.mockResolvedValue(true);
+
+		expect(await canAccessDockerOverWss(USER, SESSION)).toBe(false);
+		mockIsPlatformAdmin.mockResolvedValue(true);
+		expect(await canAccessDockerOverWss(USER, SESSION)).toBe(true);
+	});
+
+	it("allows managed service logs but not a managed service terminal", async () => {
+		platformMode.isManaged = true;
+		mockCheckServiceAccess.mockResolvedValue(undefined);
+
+		expect(await canAccessDockerOverWss(USER, SESSION, null, "svc-1")).toBe(
+			true,
+		);
+		expect(
+			await canAccessDockerOverWss(USER, SESSION, null, "svc-1", false),
+		).toBe(false);
+	});
 });
 
 describe("canAccessTerminalOverWss", () => {
@@ -100,5 +129,14 @@ describe("canAccessTerminalOverWss", () => {
 		expect(await canAccessTerminalOverWss(USER, SESSION, "srv-2")).toBe(false);
 		// role lookup must not be needed for the remote path
 		expect(mockFindMember).not.toHaveBeenCalled();
+	});
+
+	it("reserves every terminal for a platform admin in managed mode", async () => {
+		platformMode.isManaged = true;
+		mockFindMember.mockResolvedValue({ role: "owner" });
+
+		expect(await canAccessTerminalOverWss(USER, SESSION, "local")).toBe(false);
+		mockIsPlatformAdmin.mockResolvedValue(true);
+		expect(await canAccessTerminalOverWss(USER, SESSION, "local")).toBe(true);
 	});
 });

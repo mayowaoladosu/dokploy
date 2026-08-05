@@ -169,6 +169,8 @@ export const ShowBuildChooseForm = ({ applicationId }: Props) => {
 		{ applicationId },
 		{ enabled: !!applicationId },
 	);
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
 
 	const form = useForm({
 		defaultValues: {
@@ -204,6 +206,9 @@ export const ShowBuildChooseForm = ({ applicationId }: Props) => {
 
 	// Hide builder section when Docker provider is selected
 	if (data?.sourceType === "docker") {
+		return null;
+	}
+	if (platformCapabilities?.mode === "managed") {
 		return null;
 	}
 

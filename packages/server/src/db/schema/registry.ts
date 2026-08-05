@@ -32,7 +32,11 @@ export const registry = pgTable("registry", {
 		.references(() => organization.id, { onDelete: "cascade" }),
 });
 
-export const registryRelations = relations(registry, ({ many }) => ({
+export const registryRelations = relations(registry, ({ one, many }) => ({
+	organization: one(organization, {
+		fields: [registry.organizationId],
+		references: [organization.id],
+	}),
 	applications: many(applications, {
 		relationName: "applicationRegistry",
 	}),

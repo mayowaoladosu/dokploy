@@ -70,6 +70,7 @@ export const ShowComposeContainers = ({
 				appName,
 				appType,
 				serverId,
+				serviceId,
 			},
 			{
 				enabled: !!appName,

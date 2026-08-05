@@ -1,5 +1,6 @@
 import {
 	addDomainToCompose,
+	assertNoManagedServerSelection,
 	clearOldDeployments,
 	cloneCompose,
 	createCommand,
@@ -20,6 +21,7 @@ import {
 	getContainerLogs,
 	getWebServerSettings,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
 	loadServices,
 	randomizeComposeFile,
 	randomizeIsolatedDeploymentComposeFile,
@@ -27,6 +29,7 @@ import {
 	removeComposeDirectory,
 	removeDeploymentsByComposeId,
 	removeDomainById,
+	resolveManagedCompute,
 	startCompose,
 	stopCompose,
 	updateCompose,
@@ -77,8 +80,16 @@ import {
 } from "@/server/queues/queueSetup";
 import { cancelDeployment, deploy } from "@/server/utils/deploy";
 import { generatePassword } from "@/templates/utils";
-import { createTRPCRouter, protectedProcedure } from "../trpc";
+import {
+	protectedProcedure as authenticatedProcedure,
+	createTRPCRouter,
+	platformAdminProcedure,
+} from "../trpc";
 import { audit } from "../utils/audit";
+
+const protectedProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: authenticatedProcedure;
 
 export const composeRouter = createTRPCRouter({
 	create: protectedProcedure
@@ -89,9 +100,11 @@ export const composeRouter = createTRPCRouter({
 				const project = await findProjectById(environment.projectId);
 
 				await checkServiceAccess(ctx, project.projectId, "create");
+				assertNoManagedServerSelection(input.serverId);
 
 				const webServerSettings = await getWebServerSettings();
 				if (
+					!IS_MANAGED_PAAS &&
 					(IS_CLOUD || webServerSettings?.remoteServersOnly) &&
 					!input.serverId
 				) {
@@ -107,7 +120,7 @@ export const composeRouter = createTRPCRouter({
 					});
 				}
 
-				if (input.serverId) {
+				if (!IS_MANAGED_PAAS && input.serverId) {
 					const accessibleIds = await getAccessibleServerIds(ctx.session);
 					if (!accessibleIds.has(input.serverId)) {
 						throw new TRPCError({
@@ -184,6 +197,7 @@ export const composeRouter = createTRPCRouter({
 
 			return {
 				...compose,
+				server: IS_MANAGED_PAAS ? null : compose.server,
 				hasGitProviderAccess,
 				unauthorizedProvider,
 			};
@@ -580,9 +594,11 @@ export const composeRouter = createTRPCRouter({
 			const environment = await findEnvironmentById(input.environmentId);
 
 			await checkServiceAccess(ctx, environment.projectId, "create");
+			assertNoManagedServerSelection(input.serverId);
 
 			const webServerSettings = await getWebServerSettings();
 			if (
+				!IS_MANAGED_PAAS &&
 				(IS_CLOUD || webServerSettings?.remoteServersOnly) &&
 				!input.serverId
 			) {
@@ -592,7 +608,7 @@ export const composeRouter = createTRPCRouter({
 				});
 			}
 
-			if (input.serverId) {
+			if (!IS_MANAGED_PAAS && input.serverId) {
 				const accessibleIds = await getAccessibleServerIds(ctx.session);
 				if (!accessibleIds.has(input.serverId)) {
 					throw new TRPCError({
@@ -607,12 +623,17 @@ export const composeRouter = createTRPCRouter({
 				fetchTemplateLogo(input.id, input.baseUrl),
 			]);
 
+			const compute = await resolveManagedCompute({
+				kind: "service",
+				requestedServerId: input.serverId,
+			});
+			const targetServerId = compute.serverId;
 			let serverIp = "127.0.0.1";
 
 			const project = await findProjectById(environment.projectId);
 
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
+			if (targetServerId) {
+				const server = await findServerById(targetServerId);
 				serverIp = server.ipAddress;
 			} else if (process.env.NODE_ENV === "development") {
 				serverIp = "127.0.0.1";
@@ -639,7 +660,7 @@ export const composeRouter = createTRPCRouter({
 				...input,
 				composeFile: template.dockerCompose,
 				env: generate.envs?.join("\n"),
-				serverId: input.serverId,
+				serverId: targetServerId,
 				name: input.id,
 				sourceType: "raw",
 				appName: appName,
@@ -875,7 +896,8 @@ export const composeRouter = createTRPCRouter({
 		)
 		.mutation(async ({ input, ctx }) => {
 			try {
-				if (input.serverId) {
+				assertNoManagedServerSelection(input.serverId);
+				if (!IS_MANAGED_PAAS && input.serverId) {
 					const accessibleIds = await getAccessibleServerIds(ctx.session);
 					if (!accessibleIds.has(input.serverId)) {
 						throw new TRPCError({
@@ -889,10 +911,14 @@ export const composeRouter = createTRPCRouter({
 					"utf-8",
 				);
 
+				const compute = await resolveManagedCompute({
+					kind: "service",
+					requestedServerId: input.serverId,
+				});
 				let serverIp = "127.0.0.1";
 
-				if (input.serverId) {
-					const server = await findServerById(input.serverId);
+				if (compute.serverId) {
+					const server = await findServerById(compute.serverId);
 					serverIp = server.ipAddress;
 				} else if (process.env.NODE_ENV !== "development") {
 					const settings = await getWebServerSettings();

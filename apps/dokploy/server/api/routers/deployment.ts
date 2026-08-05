@@ -8,6 +8,8 @@ import {
 	findDeploymentById,
 	findScheduleById,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
+	isPlatformAdmin,
 	removeDeployment,
 	resolveServicePath,
 	updateDeploymentStatus,
@@ -34,6 +36,42 @@ import { myQueue } from "@/server/queues/queueSetup";
 import { fetchDeployApiJobs, type QueueJobRow } from "@/server/utils/deploy";
 import { createTRPCRouter, protectedProcedure, withPermission } from "../trpc";
 
+const redactDeploymentInfrastructure = <T>(deployment: T): T => {
+	if (!IS_MANAGED_PAAS || !deployment || typeof deployment !== "object") {
+		return deployment;
+	}
+
+	return {
+		...(deployment as Record<string, unknown>),
+		serverId: null,
+		buildServerId: null,
+		server: null,
+		buildServer: null,
+		application:
+			"application" in deployment && deployment.application
+				? {
+						...(deployment.application as Record<string, unknown>),
+						serverId: null,
+						buildServerId: null,
+						server: null,
+						buildServer: null,
+					}
+				: "application" in deployment
+					? deployment.application
+					: undefined,
+		compose:
+			"compose" in deployment && deployment.compose
+				? {
+						...(deployment.compose as Record<string, unknown>),
+						serverId: null,
+						server: null,
+					}
+				: "compose" in deployment
+					? deployment.compose
+					: undefined,
+	} as T;
+};
+
 export const deploymentRouter = createTRPCRouter({
 	all: protectedProcedure
 		.input(apiFindAllByApplication)
@@ -41,7 +79,9 @@ export const deploymentRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				deployment: ["read"],
 			});
-			return await findAllDeploymentsByApplicationId(input.applicationId);
+			return (await findAllDeploymentsByApplicationId(input.applicationId)).map(
+				redactDeploymentInfrastructure,
+			);
 		}),
 
 	allByCompose: protectedProcedure
@@ -50,7 +90,9 @@ export const deploymentRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				deployment: ["read"],
 			});
-			return await findAllDeploymentsByComposeId(input.composeId);
+			return (await findAllDeploymentsByComposeId(input.composeId)).map(
+				redactDeploymentInfrastructure,
+			);
 		}),
 	allByServer: withPermission("deployment", "read")
 		.input(apiFindAllByServer)
@@ -74,7 +116,9 @@ export const deploymentRouter = createTRPCRouter({
 			if (accessedServices !== null && accessedServices.length === 0) {
 				return [];
 			}
-			return findAllDeploymentsCentralized(orgId, accessedServices);
+			return (await findAllDeploymentsCentralized(orgId, accessedServices)).map(
+				redactDeploymentInfrastructure,
+			);
 		},
 	),
 
@@ -113,7 +157,7 @@ export const deploymentRouter = createTRPCRouter({
 			rows = jobRows;
 		}
 
-		return Promise.all(
+		const resolvedRows = await Promise.all(
 			rows.map(async (row) => ({
 				...row,
 				servicePath: await resolveServicePath(
@@ -122,6 +166,20 @@ export const deploymentRouter = createTRPCRouter({
 				),
 			})),
 		);
+
+		return resolvedRows
+			.filter((row) => !IS_MANAGED_PAAS || Boolean(row.servicePath.href))
+			.map((row) => ({
+				...row,
+				data: IS_MANAGED_PAAS
+					? Object.fromEntries(
+							Object.entries(row.data ?? {}).filter(
+								([key]) =>
+									!["server", "serverId", "buildServerId"].includes(key),
+							),
+						)
+					: row.data,
+			}));
 	}),
 
 	allByType: protectedProcedure
@@ -157,7 +215,7 @@ export const deploymentRouter = createTRPCRouter({
 					rollback: true,
 				},
 			});
-			return deploymentsList;
+			return deploymentsList.map(redactDeploymentInfrastructure);
 		}),
 	killProcess: protectedProcedure
 		.input(
@@ -167,7 +225,10 @@ export const deploymentRouter = createTRPCRouter({
 		)
 		.mutation(async ({ input, ctx }) => {
 			const deployment = await findDeploymentById(input.deploymentId);
-			const serviceId = deployment.applicationId || deployment.composeId;
+			const serviceId =
+				deployment.applicationId ||
+				deployment.composeId ||
+				deployment.previewDeployment?.applicationId;
 			if (serviceId) {
 				await checkServicePermissionAndAccess(ctx, serviceId, {
 					deployment: ["cancel"],
@@ -180,6 +241,8 @@ export const deploymentRouter = createTRPCRouter({
 						message: "You don't have access to this deployment.",
 					});
 				}
+			} else if (IS_MANAGED_PAAS && !(await isPlatformAdmin(ctx.user.id))) {
+				throw new TRPCError({ code: "UNAUTHORIZED" });
 			}
 
 			if (!deployment.pid) {
@@ -212,7 +275,10 @@ export const deploymentRouter = createTRPCRouter({
 		)
 		.mutation(async ({ input, ctx }) => {
 			const deployment = await findDeploymentById(input.deploymentId);
-			const serviceId = deployment.applicationId || deployment.composeId;
+			const serviceId =
+				deployment.applicationId ||
+				deployment.composeId ||
+				deployment.previewDeployment?.applicationId;
 			if (serviceId) {
 				await checkServicePermissionAndAccess(ctx, serviceId, {
 					deployment: ["cancel"],
@@ -225,6 +291,8 @@ export const deploymentRouter = createTRPCRouter({
 						message: "You don't have access to this deployment.",
 					});
 				}
+			} else if (IS_MANAGED_PAAS && !(await isPlatformAdmin(ctx.user.id))) {
+				throw new TRPCError({ code: "UNAUTHORIZED" });
 			}
 			const result = await removeDeployment(input.deploymentId);
 			await audit(ctx, {
@@ -244,7 +312,10 @@ export const deploymentRouter = createTRPCRouter({
 		)
 		.query(async ({ input, ctx }) => {
 			const deployment = await findDeploymentById(input.deploymentId);
-			const serviceId = deployment.applicationId || deployment.composeId;
+			const serviceId =
+				deployment.applicationId ||
+				deployment.composeId ||
+				deployment.previewDeployment?.applicationId;
 			if (serviceId) {
 				await checkServicePermissionAndAccess(ctx, serviceId, {
 					deployment: ["read"],
@@ -257,6 +328,8 @@ export const deploymentRouter = createTRPCRouter({
 						message: "You don't have access to this deployment.",
 					});
 				}
+			} else if (IS_MANAGED_PAAS && !(await isPlatformAdmin(ctx.user.id))) {
+				throw new TRPCError({ code: "UNAUTHORIZED" });
 			}
 
 			if (!deployment.logPath) {
@@ -265,6 +338,7 @@ export const deploymentRouter = createTRPCRouter({
 
 			const command = `tail -n ${input.tail} "${deployment.logPath}" 2>/dev/null || echo ""`;
 			const serverId =
+				deployment.buildServerId ||
 				deployment.serverId ||
 				deployment.schedule?.serverId ||
 				deployment.application?.serverId ||

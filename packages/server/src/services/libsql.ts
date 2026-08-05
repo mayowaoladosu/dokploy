@@ -13,12 +13,21 @@ import { TRPCError } from "@trpc/server";
 import { eq, getTableColumns } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
+import {
+	assertManagedResourceLimits,
+	getManagedResourceDefaults,
+	resolveManagedCompute,
+} from "./platform";
 import { validUniqueServerAppName } from "./project";
 
 export type Libsql = typeof libsql.$inferSelect;
 
 export const createLibsql = async (input: z.infer<typeof apiCreateLibsql>) => {
 	const appName = buildAppName("libsql", input.appName);
+	const compute = await resolveManagedCompute({
+		kind: "service",
+		requestedServerId: input.serverId,
+	});
 
 	const valid = await validUniqueServerAppName(input.appName);
 	if (!valid) {
@@ -32,6 +41,8 @@ export const createLibsql = async (input: z.infer<typeof apiCreateLibsql>) => {
 		.insert(libsql)
 		.values({
 			...input,
+			...compute,
+			...getManagedResourceDefaults(),
 			databasePassword: input.databasePassword
 				? input.databasePassword
 				: generatePassword(),
@@ -88,6 +99,7 @@ export const updateLibsqlById = async (
 	libsqlId: string,
 	libsqlData: Partial<Libsql>,
 ) => {
+	assertManagedResourceLimits(libsqlData);
 	const { appName, ...rest } = libsqlData;
 	const result = await db
 		.update(libsql)

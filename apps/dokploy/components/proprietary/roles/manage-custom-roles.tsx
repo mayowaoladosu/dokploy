@@ -423,6 +423,13 @@ const ACTION_META: Record<
 
 /** Resources that should be hidden from the custom role editor (better-auth internals) */
 const HIDDEN_RESOURCES = ["organization", "invitation", "team", "ac"];
+const MANAGED_HIDDEN_RESOURCES = [
+	"docker",
+	"traefikFiles",
+	"server",
+	"registry",
+	"monitoring",
+];
 
 /** Predefined role presets with sensible permission defaults */
 const ROLE_PRESETS: {
@@ -591,6 +598,8 @@ function HandleCustomRole({
 	const [open, setOpen] = useState(false);
 	const [permissions, setPermissions] = useState<Record<string, string[]>>({});
 	const { data: statements } = api.customRole.getStatements.useQuery();
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
 	const isEdit = !!roleName;
 
 	const form = useForm<CreateRoleSchema>({
@@ -612,7 +621,10 @@ function HandleCustomRole({
 
 	const visibleResources = statements
 		? Object.entries(statements).filter(
-				([key]) => !HIDDEN_RESOURCES.includes(key),
+				([key]) =>
+					!HIDDEN_RESOURCES.includes(key) &&
+					(platformCapabilities?.mode !== "managed" ||
+						!MANAGED_HIDDEN_RESOURCES.includes(key)),
 			)
 		: [];
 

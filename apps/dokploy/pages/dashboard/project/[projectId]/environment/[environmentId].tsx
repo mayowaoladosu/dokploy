@@ -301,6 +301,9 @@ const EnvironmentPage = (
 	const { projectId, environmentId } = props;
 	const { data: auth } = api.user.get.useQuery();
 	const { data: permissions } = api.user.getPermissions.useQuery();
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
+	const isManaged = platformCapabilities?.mode === "managed";
 
 	const { data: environments } = api.environment.byProjectId.useQuery({
 		projectId: projectId,
@@ -1086,19 +1089,23 @@ const EnvironmentPage = (
 													projectName={projectData?.name}
 													environmentId={environmentId}
 												/>
-												<AddCompose
-													projectName={projectData?.name}
-													environmentId={environmentId}
-												/>
-												<AddTemplate environmentId={environmentId} />
-												<AddAiAssistant
-													projectName={projectData?.name}
-													environmentId={environmentId}
-												/>
-												<AddImport
-													projectName={projectData?.name}
-													environmentId={environmentId}
-												/>
+												{!isManaged && (
+													<>
+														<AddCompose
+															projectName={projectData?.name}
+															environmentId={environmentId}
+														/>
+														<AddTemplate environmentId={environmentId} />
+														<AddAiAssistant
+															projectName={projectData?.name}
+															environmentId={environmentId}
+														/>
+														<AddImport
+															projectName={projectData?.name}
+															environmentId={environmentId}
+														/>
+													</>
+												)}
 											</DropdownMenuContent>
 										</DropdownMenu>
 									)}
@@ -1566,39 +1573,40 @@ const EnvironmentPage = (
 												</Command>
 											</PopoverContent>
 										</Popover>
-										{(availableServers.length > 0 ||
-											hasServicesWithoutServer) && (
-											<Select
-												value={selectedServerId || "all"}
-												onValueChange={setSelectedServerId}
-											>
-												<SelectTrigger className="lg:w-[200px]">
-													<SelectValue placeholder="Filter by server..." />
-												</SelectTrigger>
-												<SelectContent>
-													<SelectItem value="all">All servers</SelectItem>
-													{hasServicesWithoutServer && (
-														<SelectItem value="dokploy-server">
-															<div className="flex items-center gap-2">
-																<ServerIcon className="size-4" />
-																<span>Dokploy server</span>
-															</div>
-														</SelectItem>
-													)}
-													{availableServers.map((server) => (
-														<SelectItem
-															key={server.serverId}
-															value={server.serverId}
-														>
-															<div className="flex items-center gap-2">
-																<ServerIcon className="size-4" />
-																<span>{server.serverName}</span>
-															</div>
-														</SelectItem>
-													))}
-												</SelectContent>
-											</Select>
-										)}
+										{!isManaged &&
+											(availableServers.length > 0 ||
+												hasServicesWithoutServer) && (
+												<Select
+													value={selectedServerId || "all"}
+													onValueChange={setSelectedServerId}
+												>
+													<SelectTrigger className="lg:w-[200px]">
+														<SelectValue placeholder="Filter by server..." />
+													</SelectTrigger>
+													<SelectContent>
+														<SelectItem value="all">All servers</SelectItem>
+														{hasServicesWithoutServer && (
+															<SelectItem value="dokploy-server">
+																<div className="flex items-center gap-2">
+																	<ServerIcon className="size-4" />
+																	<span>Dokploy server</span>
+																</div>
+															</SelectItem>
+														)}
+														{availableServers.map((server) => (
+															<SelectItem
+																key={server.serverId}
+																value={server.serverId}
+															>
+																<div className="flex items-center gap-2">
+																	<ServerIcon className="size-4" />
+																	<span>{server.serverName}</span>
+																</div>
+															</SelectItem>
+														))}
+													</SelectContent>
+												</Select>
+											)}
 									</div>
 								</div>
 
@@ -1722,7 +1730,7 @@ const EnvironmentPage = (
 																	</CardHeader>
 																	<CardFooter className="mt-auto">
 																		<div className="space-y-1 text-sm w-full">
-																			{service.serverName && (
+																			{!isManaged && service.serverName && (
 																				<div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
 																					<ServerIcon className="size-3" />
 																					<span className="truncate">

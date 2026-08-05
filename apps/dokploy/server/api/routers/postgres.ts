@@ -1,4 +1,5 @@
 import {
+	assertNoManagedServerSelection,
 	checkPortInUse,
 	createMount,
 	createPostgres,
@@ -15,6 +16,7 @@ import {
 	getServiceContainerCommand,
 	getWebServerSettings,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
 	rebuildDatabase,
 	removePostgresById,
 	removeService,
@@ -63,9 +65,11 @@ export const postgresRouter = createTRPCRouter({
 				const project = await findProjectById(environment.projectId);
 
 				await checkServiceAccess(ctx, project.projectId, "create");
+				assertNoManagedServerSelection(input.serverId);
 
 				const webServerSettings = await getWebServerSettings();
 				if (
+					!IS_MANAGED_PAAS &&
 					(IS_CLOUD || webServerSettings?.remoteServersOnly) &&
 					!input.serverId
 				) {
@@ -82,7 +86,7 @@ export const postgresRouter = createTRPCRouter({
 					});
 				}
 
-				if (input.serverId) {
+				if (!IS_MANAGED_PAAS && input.serverId) {
 					const accessibleIds = await getAccessibleServerIds(ctx.session);
 					if (!accessibleIds.has(input.serverId)) {
 						throw new TRPCError({
@@ -113,7 +117,9 @@ export const postgresRouter = createTRPCRouter({
 					resourceId: newPostgres.postgresId,
 					resourceName: newPostgres.appName,
 				});
-				return newPostgres;
+				return IS_MANAGED_PAAS
+					? { ...newPostgres, serverId: null }
+					: newPostgres;
 			} catch (error) {
 				if (error instanceof TRPCError) {
 					throw error;
@@ -140,7 +146,11 @@ export const postgresRouter = createTRPCRouter({
 					message: "You are not authorized to access this Postgres",
 				});
 			}
-			return postgres;
+			return {
+				...postgres,
+				serverId: IS_MANAGED_PAAS ? null : postgres.serverId,
+				server: IS_MANAGED_PAAS ? null : postgres.server,
+			};
 		}),
 
 	start: protectedProcedure
@@ -198,6 +208,12 @@ export const postgresRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.postgresId, {
 				service: ["create"],
 			});
+			if (IS_MANAGED_PAAS) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Database networking is managed by the platform",
+				});
+			}
 			const postgres = await findPostgresById(input.postgresId);
 
 			if (input.externalPort) {

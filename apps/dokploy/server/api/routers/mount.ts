@@ -12,6 +12,7 @@ import {
 	findPostgresById,
 	findRedisById,
 	getServiceContainer,
+	IS_MANAGED_PAAS,
 	updateMount,
 } from "@dokploy/server";
 import type { ServiceType } from "@dokploy/server/db/schema/mount";
@@ -30,6 +31,54 @@ import {
 	apiUpdateMount,
 } from "@/server/db/schema";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
+
+const assertManagedMountSafety = (input: {
+	type?: "bind" | "volume" | "file";
+	hostPath?: string | null;
+	volumeName?: string | null;
+	filePath?: string | null;
+	content?: string | null;
+}) => {
+	if (!IS_MANAGED_PAAS) return;
+	if (input.type === "bind" || input.hostPath !== undefined) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message: "Host bind mounts are not available on managed compute",
+		});
+	}
+
+	if (input.filePath !== undefined) {
+		const normalizedPath = (input.filePath ?? "").replaceAll("\\", "/");
+		if (
+			normalizedPath.startsWith("/") ||
+			normalizedPath.split("/").includes("..")
+		) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: "File mount path must stay inside the workload directory",
+			});
+		}
+	}
+
+	const configuredMaxContentBytes = Number.parseInt(
+		process.env.PLATFORM_MAX_FILE_MOUNT_BYTES || String(1024 * 1024),
+		10,
+	);
+	const maxContentBytes =
+		Number.isSafeInteger(configuredMaxContentBytes) &&
+		configuredMaxContentBytes > 0
+			? configuredMaxContentBytes
+			: 1024 * 1024;
+	if (
+		input.content !== undefined &&
+		Buffer.byteLength(input.content ?? "", "utf8") > maxContentBytes
+	) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "File mount exceeds the managed plan limit",
+		});
+	}
+};
 
 async function getServiceOrganizationId(
 	serviceId: string,
@@ -80,6 +129,7 @@ export const mountRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.serviceId, {
 				volume: ["create"],
 			});
+			assertManagedMountSafety(input);
 			const mount = await createMount(input);
 			await audit(ctx, {
 				action: "create",
@@ -151,6 +201,16 @@ export const mountRouter = createTRPCRouter({
 			if (serviceId) {
 				await checkServicePermissionAndAccess(ctx, serviceId, {
 					volume: ["create"],
+				});
+			}
+			assertManagedMountSafety({
+				...input,
+				type: input.type ?? mount.type,
+			});
+			if (IS_MANAGED_PAAS && input.volumeName !== undefined) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Volume names are managed by the platform",
 				});
 			}
 			await audit(ctx, {

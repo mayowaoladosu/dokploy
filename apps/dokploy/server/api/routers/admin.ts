@@ -1,15 +1,24 @@
 import {
 	getWebServerSettings,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
 	setupWebMonitoring,
 	updateWebServerSettings,
 } from "@dokploy/server";
 import { TRPCError } from "@trpc/server";
 import { apiUpdateWebServerMonitoring } from "@/server/db/schema";
-import { adminProcedure, createTRPCRouter } from "../trpc";
+import {
+	adminProcedure,
+	createTRPCRouter,
+	platformAdminProcedure,
+} from "../trpc";
+
+const infrastructureAdminProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: adminProcedure;
 
 export const adminRouter = createTRPCRouter({
-	setupMonitoring: adminProcedure
+	setupMonitoring: infrastructureAdminProcedure
 		.input(apiUpdateWebServerMonitoring)
 		.mutation(async ({ input }) => {
 			try {

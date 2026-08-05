@@ -104,6 +104,8 @@ type EnabledOpts = {
 	auth?: AuthQueryOutput;
 	permissions?: PermissionsOutput;
 	isCloud: boolean;
+	isManaged: boolean;
+	canManageInfrastructure: boolean;
 };
 
 type SingleNavItem = {
@@ -176,15 +178,25 @@ const MENU: Menu = {
 			url: "/dashboard/monitoring",
 			icon: BarChartHorizontalBigIcon,
 			// Only enabled in non-cloud environments and if user has monitoring.read
-			isEnabled: ({ isCloud, permissions }) =>
-				!isCloud && !!permissions?.monitoring.read,
+			isEnabled: ({
+				isCloud,
+				isManaged,
+				canManageInfrastructure,
+				permissions,
+			}) =>
+				isManaged
+					? canManageInfrastructure
+					: !isCloud && !!permissions?.monitoring.read,
 		},
 		{
 			isSingle: true,
 			title: "Schedules",
 			url: "/dashboard/schedules",
 			icon: Clock,
-			isEnabled: ({ permissions }) => !!permissions?.organization.update,
+			isEnabled: ({ permissions, isManaged, canManageInfrastructure }) =>
+				isManaged
+					? canManageInfrastructure
+					: !!permissions?.organization.update,
 		},
 		{
 			isSingle: true,
@@ -192,7 +204,8 @@ const MENU: Menu = {
 			url: "/dashboard/traefik",
 			icon: GalleryVerticalEnd,
 			// Only enabled for users with access to Traefik files
-			isEnabled: ({ permissions }) => !!permissions?.traefikFiles.read,
+			isEnabled: ({ permissions, isManaged, canManageInfrastructure }) =>
+				isManaged ? canManageInfrastructure : !!permissions?.traefikFiles.read,
 		},
 		{
 			isSingle: true,
@@ -200,7 +213,8 @@ const MENU: Menu = {
 			url: "/dashboard/docker",
 			icon: BlocksIcon,
 			// Only enabled for users with access to Docker
-			isEnabled: ({ permissions }) => !!permissions?.docker.read,
+			isEnabled: ({ permissions, isManaged, canManageInfrastructure }) =>
+				isManaged ? canManageInfrastructure : !!permissions?.docker.read,
 		},
 		{
 			isSingle: true,
@@ -208,7 +222,8 @@ const MENU: Menu = {
 			url: "/dashboard/swarm",
 			icon: PieChart,
 			// Only enabled for users with access to Docker
-			isEnabled: ({ permissions }) => !!permissions?.docker.read,
+			isEnabled: ({ permissions, isManaged, canManageInfrastructure }) =>
+				isManaged ? canManageInfrastructure : !!permissions?.docker.read,
 		},
 		{
 			isSingle: true,
@@ -216,13 +231,15 @@ const MENU: Menu = {
 			url: "/dashboard/networks",
 			icon: Network,
 			// Only enabled for admins and users with access to Docker in non-cloud environments
-			isEnabled: ({ auth, isCloud }) =>
-				!!(
-					(auth?.role === "owner" ||
-						auth?.role === "admin" ||
-						auth?.canAccessToDocker) &&
-					!isCloud
-				),
+			isEnabled: ({ auth, isCloud, isManaged, canManageInfrastructure }) =>
+				isManaged
+					? canManageInfrastructure
+					: !!(
+							(auth?.role === "owner" ||
+								auth?.role === "admin" ||
+								auth?.canAccessToDocker) &&
+							!isCloud
+						),
 		},
 		{
 			isSingle: true,
@@ -230,8 +247,15 @@ const MENU: Menu = {
 			url: "/dashboard/requests",
 			icon: Forward,
 			// Only enabled for users with access to Docker in non-cloud environments
-			isEnabled: ({ permissions, isCloud }) =>
-				!!(permissions?.docker.read && !isCloud),
+			isEnabled: ({
+				permissions,
+				isCloud,
+				isManaged,
+				canManageInfrastructure,
+			}) =>
+				isManaged
+					? canManageInfrastructure
+					: !!(permissions?.docker.read && !isCloud),
 		},
 
 		// Legacy unused menu, adjusted to the new structure
@@ -298,8 +322,8 @@ const MENU: Menu = {
 			url: "/dashboard/settings/server",
 			icon: Activity,
 			// Only enabled for admins in non-cloud environments
-			isEnabled: ({ permissions, isCloud }) =>
-				!!(permissions?.organization.update && !isCloud),
+			isEnabled: ({ permissions, isCloud, isManaged }) =>
+				isManaged ? false : !!(permissions?.organization.update && !isCloud),
 		},
 		{
 			isSingle: true,
@@ -312,15 +336,23 @@ const MENU: Menu = {
 			title: "Remote Servers",
 			url: "/dashboard/settings/servers",
 			icon: Server,
-			isEnabled: ({ permissions }) => !!permissions?.server.read,
+			isEnabled: ({ permissions, isManaged, canManageInfrastructure }) =>
+				isManaged ? canManageInfrastructure : !!permissions?.server.read,
 		},
 		{
 			isSingle: true,
 			title: "Deployments",
 			url: "/dashboard/settings/deployments",
 			icon: Boxes,
-			isEnabled: ({ permissions, isCloud }) =>
-				!!(permissions?.server.read && !isCloud),
+			isEnabled: ({
+				permissions,
+				isCloud,
+				isManaged,
+				canManageInfrastructure,
+			}) =>
+				isManaged
+					? canManageInfrastructure
+					: !!(permissions?.server.read && !isCloud),
 		},
 		{
 			isSingle: true,
@@ -350,7 +382,10 @@ const MENU: Menu = {
 			icon: BotIcon,
 			url: "/dashboard/settings/ai",
 			isSingle: true,
-			isEnabled: ({ permissions }) => !!permissions?.organization.update,
+			isEnabled: ({ permissions, isManaged, canManageInfrastructure }) =>
+				isManaged
+					? canManageInfrastructure
+					: !!permissions?.organization.update,
 		},
 		{
 			isSingle: true,
@@ -372,14 +407,16 @@ const MENU: Menu = {
 			title: "Registry",
 			url: "/dashboard/settings/registry",
 			icon: Package,
-			isEnabled: ({ permissions }) => !!permissions?.registry.read,
+			isEnabled: ({ permissions, isManaged, canManageInfrastructure }) =>
+				isManaged ? canManageInfrastructure : !!permissions?.registry.read,
 		},
 		{
 			isSingle: true,
 			title: "S3 Destinations",
 			url: "/dashboard/settings/destinations",
 			icon: Database,
-			isEnabled: ({ permissions }) => !!permissions?.destination.read,
+			isEnabled: ({ permissions, isManaged, canManageInfrastructure }) =>
+				isManaged ? canManageInfrastructure : !!permissions?.destination.read,
 		},
 
 		{
@@ -387,7 +424,8 @@ const MENU: Menu = {
 			title: "Certificates",
 			url: "/dashboard/settings/certificates",
 			icon: ShieldCheck,
-			isEnabled: ({ permissions }) => !!permissions?.certificate.read,
+			isEnabled: ({ permissions, isManaged, canManageInfrastructure }) =>
+				isManaged ? canManageInfrastructure : !!permissions?.certificate.read,
 		},
 		{
 			isSingle: true,
@@ -395,7 +433,10 @@ const MENU: Menu = {
 			url: "/dashboard/settings/cluster",
 			icon: Boxes,
 			// Only enabled for admins
-			isEnabled: ({ permissions }) => !!permissions?.organization.update,
+			isEnabled: ({ permissions, isManaged, canManageInfrastructure }) =>
+				isManaged
+					? canManageInfrastructure
+					: !!permissions?.organization.update,
 		},
 		{
 			isSingle: true,
@@ -411,7 +452,8 @@ const MENU: Menu = {
 			url: "/dashboard/settings/billing",
 			icon: CreditCard,
 			// Only enabled for owners in cloud environments
-			isEnabled: ({ auth, isCloud }) => !!(auth?.role === "owner" && isCloud),
+			isEnabled: ({ auth, isCloud, isManaged }) =>
+				!!(auth?.role === "owner" && isCloud && !isManaged),
 		},
 		{
 			isSingle: true,
@@ -419,7 +461,8 @@ const MENU: Menu = {
 			url: "/dashboard/settings/license",
 			icon: Key,
 			// Only enabled for owners
-			isEnabled: ({ auth }) => !!(auth?.role === "owner"),
+			isEnabled: ({ auth, isManaged }) =>
+				!!(auth?.role === "owner" && !isManaged),
 		},
 		{
 			isSingle: true,
@@ -435,7 +478,10 @@ const MENU: Menu = {
 			url: "/dashboard/settings/whitelabeling",
 			icon: Palette,
 			// Only enabled for owners in non-cloud environments (enterprise)
-			isEnabled: ({ auth, isCloud }) => !!(auth?.role === "owner" && !isCloud),
+			isEnabled: ({ auth, isCloud, isManaged, canManageInfrastructure }) =>
+				isManaged
+					? canManageInfrastructure
+					: !!(auth?.role === "owner" && !isCloud),
 		},
 	],
 
@@ -461,6 +507,8 @@ function createMenuForAuthUser(opts: {
 	auth?: AuthQueryOutput;
 	permissions?: PermissionsOutput;
 	isCloud: boolean;
+	isManaged: boolean;
+	canManageInfrastructure: boolean;
 	whitelabeling?: {
 		docsUrl?: string | null;
 		supportUrl?: string | null;
@@ -480,6 +528,8 @@ function createMenuForAuthUser(opts: {
 						auth: opts.auth,
 						permissions: opts.permissions,
 						isCloud: opts.isCloud,
+						isManaged: opts.isManaged,
+						canManageInfrastructure: opts.canManageInfrastructure,
 					}),
 		) as T[];
 
@@ -929,6 +979,8 @@ export default function Page({ children }: Props) {
 
 	const includesProjects = pathname?.includes("/dashboard/project");
 	const { data: isCloud } = api.settings.isCloud.useQuery();
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
 
 	const {
 		home: filteredHome,
@@ -938,6 +990,9 @@ export default function Page({ children }: Props) {
 		auth,
 		permissions,
 		isCloud: !!isCloud,
+		isManaged: platformCapabilities?.mode === "managed",
+		canManageInfrastructure:
+			platformCapabilities?.canManageInfrastructure ?? false,
 		whitelabeling,
 	});
 

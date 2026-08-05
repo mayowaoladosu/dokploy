@@ -1,4 +1,8 @@
-import { getAccessibleServerIds } from "@dokploy/server";
+import {
+	getAccessibleServerIds,
+	IS_MANAGED_PAAS,
+	isPlatformAdmin,
+} from "@dokploy/server";
 import {
 	checkServiceAccess,
 	findMemberByUserId,
@@ -24,8 +28,12 @@ export const canAccessDockerOverWss = async (
 	session: WssSession,
 	serverId?: string | null,
 	serviceId?: string | null,
+	allowManagedServiceAccess = true,
 ): Promise<boolean> => {
 	if (!user || !session?.activeOrganizationId) return false;
+	if (IS_MANAGED_PAAS && !allowManagedServiceAccess) {
+		return isPlatformAdmin(user.id);
+	}
 
 	const ctx = buildCtx(user, session.activeOrganizationId);
 
@@ -43,6 +51,8 @@ export const canAccessDockerOverWss = async (
 			return false;
 		}
 	}
+
+	if (IS_MANAGED_PAAS) return isPlatformAdmin(user.id);
 
 	// Generic Docker overview (no service context): mirror the docker tRPC router
 	// — require the docker permission and access to the target server.
@@ -68,6 +78,7 @@ export const canAccessTerminalOverWss = async (
 	serverId?: string | null,
 ): Promise<boolean> => {
 	if (!user || !session?.activeOrganizationId) return false;
+	if (IS_MANAGED_PAAS) return isPlatformAdmin(user.id);
 
 	if (serverId && serverId !== "local") {
 		const accessible = await getAccessibleServerIds({

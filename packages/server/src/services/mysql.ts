@@ -13,12 +13,21 @@ import { TRPCError } from "@trpc/server";
 import { eq, getTableColumns } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
+import {
+	assertManagedResourceLimits,
+	getManagedResourceDefaults,
+	resolveManagedCompute,
+} from "./platform";
 import { validUniqueServerAppName } from "./project";
 
 export type MySql = typeof mysql.$inferSelect;
 
 export const createMysql = async (input: z.infer<typeof apiCreateMySql>) => {
 	const appName = buildAppName("mysql", input.appName);
+	const compute = await resolveManagedCompute({
+		kind: "service",
+		requestedServerId: input.serverId,
+	});
 
 	const valid = await validUniqueServerAppName(appName);
 	if (!valid) {
@@ -32,6 +41,8 @@ export const createMysql = async (input: z.infer<typeof apiCreateMySql>) => {
 		.insert(mysql)
 		.values({
 			...input,
+			...compute,
+			...getManagedResourceDefaults(),
 			databasePassword: input.databasePassword
 				? input.databasePassword
 				: generatePassword(),
@@ -91,6 +102,7 @@ export const updateMySqlById = async (
 	mysqlId: string,
 	mysqlData: Partial<MySql>,
 ) => {
+	assertManagedResourceLimits(mysqlData);
 	const { appName, ...rest } = mysqlData;
 	const result = await db
 		.update(mysql)

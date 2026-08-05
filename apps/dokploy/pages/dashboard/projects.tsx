@@ -19,9 +19,13 @@ const ShowWelcomeDokploy = dynamic(
 
 const Dashboard = () => {
 	const { data: isCloud } = api.settings.isCloud.useQuery();
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
 	return (
 		<>
-			{isCloud && <ShowWelcomeDokploy />}
+			{isCloud && platformCapabilities?.mode !== "managed" && (
+				<ShowWelcomeDokploy />
+			)}
 
 			<ShowProjects />
 		</>

@@ -1,6 +1,15 @@
 import { spawn } from "node:child_process";
 import type http from "node:http";
-import { findServerById, IS_CLOUD, validateRequest } from "@dokploy/server";
+import {
+	findDeploymentById,
+	findServerById,
+	IS_CLOUD,
+	IS_MANAGED_PAAS,
+	isPlatformAdmin,
+	resolveManagedServiceExecutionTarget,
+	validateRequest,
+} from "@dokploy/server";
+import { checkServiceAccess } from "@dokploy/server/services/permission";
 import { encodeBase64 } from "@dokploy/server/utils/docker/utils";
 import { readValidDirectory } from "@dokploy/server/wss/utils";
 import { Client } from "ssh2";
@@ -30,7 +39,8 @@ export const setupDeploymentLogsWebSocketServer = (
 	wssTerm.on("connection", async (ws, req) => {
 		const url = new URL(req.url || "", `http://${req.headers.host}`);
 		const logPath = url.searchParams.get("logPath");
-		const serverId = url.searchParams.get("serverId");
+		let serverId = url.searchParams.get("serverId");
+		const deploymentId = url.searchParams.get("deploymentId");
 		const { user, session } = await validateRequest(req);
 
 		// Generate unique connection ID for tracking
@@ -41,13 +51,60 @@ export const setupDeploymentLogsWebSocketServer = (
 			return;
 		}
 
-		if (!readValidDirectory(logPath, serverId)) {
-			ws.close(4000, "Invalid log path");
+		if (!user || !session) {
+			ws.close();
+			return;
+		}
+		const organizationId = session.activeOrganizationId;
+		if (!organizationId) {
+			ws.close();
 			return;
 		}
 
-		if (!user || !session) {
-			ws.close();
+		if (IS_MANAGED_PAAS) {
+			try {
+				if (!deploymentId) {
+					if (!(await isPlatformAdmin(user.id))) {
+						ws.close(4003, "Not authorized");
+						return;
+					}
+				} else {
+					const deployment = await findDeploymentById(deploymentId);
+					if (deployment.logPath !== logPath) {
+						ws.close(4003, "Not authorized");
+						return;
+					}
+					const serviceId =
+						deployment.applicationId ||
+						deployment.composeId ||
+						deployment.previewDeployment?.applicationId;
+
+					if (!serviceId) {
+						if (!(await isPlatformAdmin(user.id))) {
+							ws.close(4003, "Not authorized");
+							return;
+						}
+					} else {
+						await checkServiceAccess(
+							{ user, session: { activeOrganizationId: organizationId } },
+							serviceId,
+							"read",
+						);
+						const target = await resolveManagedServiceExecutionTarget(
+							serviceId,
+							organizationId,
+						);
+						serverId = deployment.buildServerId || target.serverId;
+					}
+				}
+			} catch {
+				ws.close(4003, "Not authorized");
+				return;
+			}
+		}
+
+		if (!readValidDirectory(logPath, serverId)) {
+			ws.close(4000, "Invalid log path");
 			return;
 		}
 
@@ -58,7 +115,10 @@ export const setupDeploymentLogsWebSocketServer = (
 			if (serverId) {
 				const server = await findServerById(serverId);
 
-				if (server.organizationId !== session.activeOrganizationId) {
+				if (
+					server.organizationId !== session.activeOrganizationId &&
+					!IS_MANAGED_PAAS
+				) {
 					ws.close();
 					return;
 				}

@@ -95,6 +95,9 @@ function StatusListCard({
 
 export const ShowHome = () => {
 	const { data: auth } = api.user.get.useQuery();
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
+	const isManaged = platformCapabilities?.mode === "managed";
 	const { data: homeStats } = api.project.homeStats.useQuery();
 	const { data: permissions } = api.user.getPermissions.useQuery();
 	const canReadDeployments = !!permissions?.deployment.read;
@@ -262,10 +265,12 @@ export const ShowHome = () => {
 														{info.projectName} · {info.environment}
 													</span>
 												</div>
-												<span className="text-xs text-muted-foreground w-36 hidden lg:flex items-center justify-end gap-1.5 truncate">
-													<Server className="size-3 shrink-0" />
-													<span className="truncate">{info.serverName}</span>
-												</span>
+												{!isManaged && (
+													<span className="text-xs text-muted-foreground w-36 hidden lg:flex items-center justify-end gap-1.5 truncate">
+														<Server className="size-3 shrink-0" />
+														<span className="truncate">{info.serverName}</span>
+													</span>
+												)}
 												<span className="text-xs text-muted-foreground w-20 text-right hidden sm:inline">
 													{status}
 												</span>

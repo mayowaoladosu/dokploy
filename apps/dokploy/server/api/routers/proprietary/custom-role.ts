@@ -1,3 +1,4 @@
+import { IS_MANAGED_PAAS } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
 import { member, organizationRole, user } from "@dokploy/server/db/schema";
 import { statements } from "@dokploy/server/lib/access-control";
@@ -12,6 +13,30 @@ import {
 import { audit } from "../../utils/audit";
 
 const permissionsSchema = z.record(z.string(), z.array(z.string()));
+const MANAGED_INFRASTRUCTURE_RESOURCES = new Set([
+	"docker",
+	"traefikFiles",
+	"server",
+	"registry",
+	"monitoring",
+]);
+
+const rejectManagedInfrastructurePermissions = (
+	permissions: Record<string, string[]>,
+) => {
+	if (
+		IS_MANAGED_PAAS &&
+		Object.entries(permissions).some(
+			([resource, actions]) =>
+				MANAGED_INFRASTRUCTURE_RESOURCES.has(resource) && actions.length > 0,
+		)
+	) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message: "Infrastructure permissions are managed by the platform",
+		});
+	}
+};
 
 export const customRoleRouter = createTRPCRouter({
 	all: protectedProcedure.query(async ({ ctx }) => {
@@ -107,6 +132,7 @@ export const customRoleRouter = createTRPCRouter({
 				});
 			}
 
+			rejectManagedInfrastructurePermissions(input.permissions);
 			validatePermissions(input.permissions);
 
 			const [created] = await db
@@ -180,6 +206,7 @@ export const customRoleRouter = createTRPCRouter({
 					);
 			}
 
+			rejectManagedInfrastructurePermissions(input.permissions);
 			validatePermissions(input.permissions);
 
 			const [updated] = await db

@@ -1,6 +1,6 @@
 import {
 	getWebServerSettings,
-	IS_CLOUD,
+	IS_HOSTED,
 	isAdminPresent,
 } from "@dokploy/server";
 import { validateRequest } from "@dokploy/server/lib/auth";
@@ -470,7 +470,7 @@ Home.getLayout = (page: ReactElement) => {
 	return <OnboardingLayout>{page}</OnboardingLayout>;
 };
 export async function getServerSideProps(context: GetServerSidePropsContext) {
-	if (IS_CLOUD) {
+	if (IS_HOSTED) {
 		try {
 			const { user } = await validateRequest(context.req);
 			if (user) {
@@ -485,7 +485,7 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 
 		return {
 			props: {
-				IS_CLOUD: IS_CLOUD,
+				IS_CLOUD: IS_HOSTED,
 				enforceSSO: false,
 			},
 		};

@@ -3,6 +3,7 @@ import {
 	getWebServerSettings,
 	hasValidLicense,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
 	updateWebServerSettings,
 } from "@dokploy/server";
 import { TRPCError } from "@trpc/server";
@@ -10,23 +11,31 @@ import { apiUpdateWhitelabeling } from "@/server/db/schema";
 import {
 	createTRPCRouter,
 	enterpriseProcedure,
+	platformAdminProcedure,
 	protectedProcedure,
 	publicProcedure,
 } from "../../trpc";
+
+const whitelabelAdminProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: enterpriseProcedure;
 
 export const whitelabelingRouter = createTRPCRouter({
 	get: protectedProcedure.query(async ({ ctx }) => {
 		if (IS_CLOUD) {
 			return null;
 		}
-		if (!(await hasValidLicense(ctx.session.activeOrganizationId))) {
+		if (
+			!IS_MANAGED_PAAS &&
+			!(await hasValidLicense(ctx.session.activeOrganizationId))
+		) {
 			return null;
 		}
 		const settings = await getWebServerSettings();
 		return settings?.whitelabelingConfig ?? null;
 	}),
 
-	update: enterpriseProcedure
+	update: whitelabelAdminProcedure
 		.input(apiUpdateWhitelabeling)
 		.mutation(async ({ input, ctx }) => {
 			if (IS_CLOUD) {
@@ -36,7 +45,7 @@ export const whitelabelingRouter = createTRPCRouter({
 				});
 			}
 
-			if (ctx.user.role !== "owner") {
+			if (!IS_MANAGED_PAAS && ctx.user.role !== "owner") {
 				throw new TRPCError({
 					code: "FORBIDDEN",
 					message: "Only the owner can update whitelabeling settings",
@@ -50,7 +59,7 @@ export const whitelabelingRouter = createTRPCRouter({
 			return { success: true };
 		}),
 
-	reset: enterpriseProcedure.mutation(async ({ ctx }) => {
+	reset: whitelabelAdminProcedure.mutation(async ({ ctx }) => {
 		if (IS_CLOUD) {
 			throw new TRPCError({
 				code: "BAD_REQUEST",
@@ -58,7 +67,7 @@ export const whitelabelingRouter = createTRPCRouter({
 			});
 		}
 
-		if (ctx.user.role !== "owner") {
+		if (!IS_MANAGED_PAAS && ctx.user.role !== "owner") {
 			throw new TRPCError({
 				code: "FORBIDDEN",
 				message: "Only the owner can reset whitelabeling settings",

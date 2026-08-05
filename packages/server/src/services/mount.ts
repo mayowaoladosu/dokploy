@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
-import { paths } from "@dokploy/server/constants";
+import { IS_MANAGED_PAAS, paths } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
 import {
 	type apiCreateMount,
@@ -26,10 +27,18 @@ export type Mount = typeof mounts.$inferSelect;
 export const createMount = async (input: z.infer<typeof apiCreateMount>) => {
 	try {
 		const { serviceId, ...rest } = input;
+		const managedVolumeName =
+			IS_MANAGED_PAAS && input.type === "volume" && input.volumeName
+				? `vlyv-${createHash("sha256")
+						.update(`${serviceId}:${input.volumeName}`)
+						.digest("hex")
+						.slice(0, 32)}`
+				: input.volumeName;
 		const value = await db
 			.insert(mounts)
 			.values({
 				...rest,
+				volumeName: managedVolumeName,
 				...(input.serviceType === "application" && {
 					applicationId: serviceId,
 				}),

@@ -4,16 +4,31 @@ import {
 	execAsyncRemote,
 	findServerById,
 	getRemoteDocker,
+	IS_MANAGED_PAAS,
 } from "@dokploy/server";
 import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
 import { getLocalServerIp } from "@/server/wss/terminal";
-import { createTRPCRouter, withPermission } from "../trpc";
+import {
+	createTRPCRouter,
+	platformAdminProcedure,
+	withPermission,
+} from "../trpc";
+
+const serverReadProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: withPermission("server", "read");
+const serverCreateProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: withPermission("server", "create");
+const serverDeleteProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: withPermission("server", "delete");
 
 export const clusterRouter = createTRPCRouter({
-	getNodes: withPermission("server", "read")
+	getNodes: serverReadProcedure
 		.input(
 			z.object({
 				serverId: z.string().optional(),
@@ -34,7 +49,7 @@ export const clusterRouter = createTRPCRouter({
 			return workers;
 		}),
 
-	removeWorker: withPermission("server", "delete")
+	removeWorker: serverDeleteProcedure
 		.input(
 			z.object({
 				nodeId: z.string(),
@@ -78,7 +93,7 @@ export const clusterRouter = createTRPCRouter({
 			}
 		}),
 
-	addWorker: withPermission("server", "create")
+	addWorker: serverCreateProcedure
 		.input(
 			z.object({
 				serverId: z.string().optional(),
@@ -112,7 +127,7 @@ export const clusterRouter = createTRPCRouter({
 			};
 		}),
 
-	addManager: withPermission("server", "create")
+	addManager: serverCreateProcedure
 		.input(
 			z.object({
 				serverId: z.string().optional(),

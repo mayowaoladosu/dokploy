@@ -16,6 +16,7 @@ import { TerminalLine } from "../../docker/logs/terminal-line";
 import { type LogLine, parseLogs } from "../../docker/logs/utils";
 
 interface Props {
+	deploymentId?: string;
 	logPath: string | null;
 	open: boolean;
 	onClose: () => void;
@@ -23,6 +24,7 @@ interface Props {
 	errorMessage?: string;
 }
 export const ShowDeployment = ({
+	deploymentId,
 	logPath,
 	open,
 	onClose,
@@ -57,7 +59,7 @@ export const ShowDeployment = ({
 		setData("");
 		const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 
-		const wsUrl = `${protocol}//${window.location.host}/listen-deployment?logPath=${logPath}${serverId ? `&serverId=${serverId}` : ""}`;
+		const wsUrl = `${protocol}//${window.location.host}/listen-deployment?logPath=${encodeURIComponent(logPath)}${deploymentId ? `&deploymentId=${encodeURIComponent(deploymentId)}` : ""}${serverId ? `&serverId=${encodeURIComponent(serverId)}` : ""}`;
 		const ws = new WebSocket(wsUrl);
 		wsRef.current = ws; // Store WebSocket instance in ref
 
@@ -79,7 +81,7 @@ export const ShowDeployment = ({
 				wsRef.current = null;
 			}
 		};
-	}, [logPath, open]);
+	}, [deploymentId, logPath, open, serverId]);
 
 	useEffect(() => {
 		const logs = parseLogs(data);

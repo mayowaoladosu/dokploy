@@ -63,6 +63,9 @@ const Libsql = (
 	const { data: auth } = api.user.get.useQuery();
 
 	const { data: isCloud } = api.settings.isCloud.useQuery();
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
+	const isManaged = platformCapabilities?.mode === "managed";
 	const { data: serverIp } = api.settings.getIp.useQuery();
 
 	return (
@@ -100,49 +103,51 @@ const Libsql = (
 								</span>
 							</div>
 							<div className="flex flex-col h-fit w-fit gap-2">
-								<div className="flex flex-row h-fit w-fit gap-2">
-									<Badge
-										className="cursor-pointer"
-										onClick={() => {
-											const ip = data?.server?.ipAddress || serverIp;
-											if (ip) {
-												copy(ip);
-												toast.success("IP Address Copied!");
-											}
-										}}
-										variant={
-											!data?.serverId
-												? "default"
-												: data?.server?.serverStatus === "active"
+								{!isManaged && (
+									<div className="flex flex-row h-fit w-fit gap-2">
+										<Badge
+											className="cursor-pointer"
+											onClick={() => {
+												const ip = data?.server?.ipAddress || serverIp;
+												if (ip) {
+													copy(ip);
+													toast.success("IP Address Copied!");
+												}
+											}}
+											variant={
+												!data?.serverId
 													? "default"
-													: "destructive"
-										}
-									>
-										{data?.server?.name || "Dokploy Server"}
-									</Badge>
-									{data?.server?.serverStatus === "inactive" && (
-										<TooltipProvider delayDuration={0}>
-											<Tooltip>
-												<TooltipTrigger asChild>
-													<Label className="break-all w-fit flex flex-row gap-1 items-center">
-														<HelpCircle className="size-4 text-muted-foreground" />
-													</Label>
-												</TooltipTrigger>
-												<TooltipContent
-													className="z-999 w-[300px]"
-													align="start"
-													side="top"
-												>
-													<span>
-														You cannot, deploy this application because the
-														server is inactive, please upgrade your plan to add
-														more servers.
-													</span>
-												</TooltipContent>
-											</Tooltip>
-										</TooltipProvider>
-									)}
-								</div>
+													: data?.server?.serverStatus === "active"
+														? "default"
+														: "destructive"
+											}
+										>
+											{data?.server?.name || "Dokploy Server"}
+										</Badge>
+										{data?.server?.serverStatus === "inactive" && (
+											<TooltipProvider delayDuration={0}>
+												<Tooltip>
+													<TooltipTrigger asChild>
+														<Label className="break-all w-fit flex flex-row gap-1 items-center">
+															<HelpCircle className="size-4 text-muted-foreground" />
+														</Label>
+													</TooltipTrigger>
+													<TooltipContent
+														className="z-999 w-[300px]"
+														align="start"
+														side="top"
+													>
+														<span>
+															You cannot, deploy this application because the
+															server is inactive, please upgrade your plan to
+															add more servers.
+														</span>
+													</TooltipContent>
+												</Tooltip>
+											</TooltipProvider>
+										)}
+									</div>
+								)}
 								<div className="flex flex-row gap-2 justify-end">
 									<UpdateLibsql libsqlId={libsqlId} />
 									{(auth?.role === "owner" || auth?.canDeleteServices) && (
@@ -152,7 +157,7 @@ const Libsql = (
 							</div>
 						</CardHeader>
 						<CardContent className="space-y-2 py-8 border-t">
-							{data?.server?.serverStatus === "inactive" ? (
+							{!isManaged && data?.server?.serverStatus === "inactive" ? (
 								<div className="flex h-[55vh] border-2 rounded-xl border-dashed p-4">
 									<div className="max-w-3xl mx-auto flex flex-col items-center justify-center self-center gap-3">
 										<ServerOff className="size-10 text-muted-foreground self-center" />
@@ -199,10 +204,15 @@ const Libsql = (
 											<TabsTrigger value="general">General</TabsTrigger>
 											<TabsTrigger value="environment">Environment</TabsTrigger>
 											<TabsTrigger value="logs">Logs</TabsTrigger>
-											{((data?.serverId && isCloud) || !data?.server) && (
-												<TabsTrigger value="monitoring">Monitoring</TabsTrigger>
+											{!isManaged &&
+												((data?.serverId && isCloud) || !data?.server) && (
+													<TabsTrigger value="monitoring">
+														Monitoring
+													</TabsTrigger>
+												)}
+											{!isManaged && (
+												<TabsTrigger value="backups">Backups</TabsTrigger>
 											)}
-											<TabsTrigger value="backups">Backups</TabsTrigger>
 											<TabsTrigger value="advanced">Advanced</TabsTrigger>
 										</TabsList>
 									</div>
@@ -219,20 +229,21 @@ const Libsql = (
 											<ShowEnvironment id={libsqlId} type="libsql" />
 										</div>
 									</TabsContent>
-									<TabsContent value="monitoring">
-										<div className="pt-2.5">
-											<div className="flex flex-col gap-4 border rounded-lg p-6">
-												{data?.serverId && isCloud ? (
-													<ContainerPaidMonitoring
-														appName={data?.appName || ""}
-														baseUrl={`${data?.serverId ? `http://${data?.server?.ipAddress}:${data?.server?.metricsConfig?.server?.port}` : "http://localhost:4500"}`}
-														token={
-															data?.server?.metricsConfig?.server?.token || ""
-														}
-													/>
-												) : (
-													<>
-														{/* {monitoring?.enabledFeatures && (
+									{!isManaged && (
+										<TabsContent value="monitoring">
+											<div className="pt-2.5">
+												<div className="flex flex-col gap-4 border rounded-lg p-6">
+													{data?.serverId && isCloud ? (
+														<ContainerPaidMonitoring
+															appName={data?.appName || ""}
+															baseUrl={`${data?.serverId ? `http://${data?.server?.ipAddress}:${data?.server?.metricsConfig?.server?.port}` : "http://localhost:4500"}`}
+															token={
+																data?.server?.metricsConfig?.server?.token || ""
+															}
+														/>
+													) : (
+														<>
+															{/* {monitoring?.enabledFeatures && (
 															<div className="flex flex-row border w-fit p-4 rounded-lg items-center gap-2">
 																<Label className="text-muted-foreground">
 																	Change Monitoring
@@ -254,16 +265,17 @@ const Libsql = (
 															/>
 														) : (
 															<div> */}
-														<ContainerFreeMonitoring
-															appName={data?.appName || ""}
-														/>
-														{/* </div> */}
-														{/* )} */}
-													</>
-												)}
+															<ContainerFreeMonitoring
+																appName={data?.appName || ""}
+															/>
+															{/* </div> */}
+															{/* )} */}
+														</>
+													)}
+												</div>
 											</div>
-										</div>
-									</TabsContent>
+										</TabsContent>
+									)}
 									<TabsContent value="logs">
 										<div className="flex flex-col gap-4  pt-2.5">
 											<ShowDockerLogs

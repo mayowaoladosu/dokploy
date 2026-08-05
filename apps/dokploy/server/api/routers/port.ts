@@ -1,6 +1,7 @@
 import {
 	createPort,
 	finPortById,
+	IS_MANAGED_PAAS,
 	removePortById,
 	updatePortById,
 } from "@dokploy/server";
@@ -19,6 +20,12 @@ export const portRouter = createTRPCRouter({
 		.input(apiCreatePort)
 		.mutation(async ({ input, ctx }) => {
 			try {
+				if (IS_MANAGED_PAAS) {
+					throw new TRPCError({
+						code: "FORBIDDEN",
+						message: "Public ports are managed by the platform router",
+					});
+				}
 				await checkServicePermissionAndAccess(ctx, input.applicationId, {
 					service: ["create"],
 				});
@@ -60,6 +67,12 @@ export const portRouter = createTRPCRouter({
 	delete: protectedProcedure
 		.input(apiFindOnePort)
 		.mutation(async ({ input, ctx }) => {
+			if (IS_MANAGED_PAAS) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Public ports are managed by the platform router",
+				});
+			}
 			const port = await finPortById(input.portId);
 			await checkServicePermissionAndAccess(
 				ctx,
@@ -87,6 +100,12 @@ export const portRouter = createTRPCRouter({
 	update: protectedProcedure
 		.input(apiUpdatePort)
 		.mutation(async ({ input, ctx }) => {
+			if (IS_MANAGED_PAAS) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Public ports are managed by the platform router",
+				});
+			}
 			const port = await finPortById(input.portId);
 			await checkServicePermissionAndAccess(
 				ctx,

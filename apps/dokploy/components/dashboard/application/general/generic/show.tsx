@@ -48,6 +48,9 @@ export const ShowProviderForm = ({ applicationId }: Props) => {
 	const { data: application, refetch } = api.application.one.useQuery({
 		applicationId,
 	});
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
+	const isManaged = platformCapabilities?.mode === "managed";
 	const { mutateAsync: disconnectGitProvider } =
 		api.application.disconnectGitProvider.useMutation();
 
@@ -186,13 +189,15 @@ export const ShowProviderForm = ({ applicationId }: Props) => {
 								<GiteaIcon className="size-4 text-current fill-current" />
 								Gitea
 							</TabsTrigger>
-							<TabsTrigger
-								value="docker"
-								className="rounded-none border-b-2 gap-2 border-b-transparent data-[state=active]:border-b-2 data-[state=active]:border-b-border"
-							>
-								<DockerIcon className="size-5 text-current" />
-								Docker
-							</TabsTrigger>
+							{!isManaged && (
+								<TabsTrigger
+									value="docker"
+									className="rounded-none border-b-2 gap-2 border-b-transparent data-[state=active]:border-b-2 data-[state=active]:border-b-border"
+								>
+									<DockerIcon className="size-5 text-current" />
+									Docker
+								</TabsTrigger>
+							)}
 							<TabsTrigger
 								value="git"
 								className="rounded-none border-b-2 gap-2 border-b-transparent data-[state=active]:border-b-2 data-[state=active]:border-b-border"
@@ -200,13 +205,15 @@ export const ShowProviderForm = ({ applicationId }: Props) => {
 								<GitIcon />
 								Git
 							</TabsTrigger>
-							<TabsTrigger
-								value="drop"
-								className="rounded-none border-b-2 gap-2 border-b-transparent data-[state=active]:border-b-2 data-[state=active]:border-b-border"
-							>
-								<UploadCloud className="size-5 text-current" />
-								Drop
-							</TabsTrigger>
+							{!isManaged && (
+								<TabsTrigger
+									value="drop"
+									className="rounded-none border-b-2 gap-2 border-b-transparent data-[state=active]:border-b-2 data-[state=active]:border-b-border"
+								>
+									<UploadCloud className="size-5 text-current" />
+									Drop
+								</TabsTrigger>
+							)}
 						</TabsList>
 					</div>
 
@@ -290,16 +297,20 @@ export const ShowProviderForm = ({ applicationId }: Props) => {
 							</div>
 						)}
 					</TabsContent>
-					<TabsContent value="docker" className="w-full p-2">
-						<SaveDockerProvider applicationId={applicationId} />
-					</TabsContent>
+					{!isManaged && (
+						<TabsContent value="docker" className="w-full p-2">
+							<SaveDockerProvider applicationId={applicationId} />
+						</TabsContent>
+					)}
 
 					<TabsContent value="git" className="w-full p-2">
 						<SaveGitProvider applicationId={applicationId} />
 					</TabsContent>
-					<TabsContent value="drop" className="w-full p-2">
-						<SaveDragNDrop applicationId={applicationId} />
-					</TabsContent>
+					{!isManaged && (
+						<TabsContent value="drop" className="w-full p-2">
+							<SaveDragNDrop applicationId={applicationId} />
+						</TabsContent>
+					)}
 				</Tabs>
 			</CardContent>
 		</Card>

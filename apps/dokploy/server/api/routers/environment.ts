@@ -6,6 +6,7 @@ import {
 	findEnvironmentById,
 	findEnvironmentsByProjectId,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
 	updateEnvironmentById,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
@@ -32,6 +33,37 @@ import {
 	environments,
 	projects,
 } from "@/server/db/schema";
+
+const redactManagedEnvironmentInfrastructure = <T>(environment: T): T => {
+	if (!IS_MANAGED_PAAS || !environment || typeof environment !== "object") {
+		return environment;
+	}
+
+	const result = { ...(environment as Record<string, unknown>) };
+	for (const key of [
+		"applications",
+		"libsql",
+		"mariadb",
+		"mongo",
+		"mysql",
+		"postgres",
+		"redis",
+	]) {
+		const services = result[key];
+		if (Array.isArray(services)) {
+			result[key] = services.map((service) => ({
+				...(service as Record<string, unknown>),
+				serverId: null,
+				buildServerId: null,
+				server: null,
+				buildServer: null,
+			}));
+		}
+	}
+	result.compose = [];
+
+	return result as T;
+};
 
 export const environmentRouter = createTRPCRouter({
 	create: protectedProcedure
@@ -79,7 +111,9 @@ export const environmentRouter = createTRPCRouter({
 	one: protectedProcedure
 		.input(apiFindOneEnvironment)
 		.query(async ({ input, ctx }) => {
-			const environment = await findEnvironmentById(input.environmentId);
+			const environment = redactManagedEnvironmentInfrastructure(
+				await findEnvironmentById(input.environmentId),
+			);
 			if (
 				environment.project.organizationId !== ctx.session.activeOrganizationId
 			) {
@@ -145,13 +179,15 @@ export const environmentRouter = createTRPCRouter({
 							accessedEnvironments.includes(environment.environmentId),
 						)
 						.map((environment) =>
-							filterEnvironmentServices(environment, accessedServices),
+							redactManagedEnvironmentInfrastructure(
+								filterEnvironmentServices(environment, accessedServices),
+							),
 						);
 
 					return filteredEnvironments;
 				}
 
-				return environments;
+				return environments.map(redactManagedEnvironmentInfrastructure);
 			} catch (error) {
 				console.log(error);
 				throw new TRPCError({
@@ -278,6 +314,13 @@ export const environmentRouter = createTRPCRouter({
 		.input(apiDuplicateEnvironment)
 		.mutation(async ({ input, ctx }) => {
 			try {
+				if (IS_MANAGED_PAAS) {
+					throw new TRPCError({
+						code: "FORBIDDEN",
+						message:
+							"Environment duplication is unavailable while managed workload isolation is enabled",
+					});
+				}
 				await checkEnvironmentAccess(ctx, input.environmentId, "read");
 				const environment = await findEnvironmentById(input.environmentId);
 				if (

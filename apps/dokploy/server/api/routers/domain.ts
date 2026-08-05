@@ -1,4 +1,5 @@
 import {
+	assertNoManagedServerSelection,
 	createDomain,
 	findApplicationById,
 	findDomainById,
@@ -7,7 +8,9 @@ import {
 	findPreviewDeploymentById,
 	findServerById,
 	generateTraefikMeDomain,
+	getManagedApplicationDomain,
 	getWebServerSettings,
+	IS_MANAGED_PAAS,
 	manageDomain,
 	removeDomain,
 	removeDomainById,
@@ -45,7 +48,18 @@ export const domainRouter = createTRPCRouter({
 						domain: ["create"],
 					});
 				}
-				const domain = await createDomain(input);
+				const domain = await createDomain(
+					IS_MANAGED_PAAS
+						? {
+								...input,
+								https: true,
+								certificateType: "letsencrypt",
+								customEntrypoint: undefined,
+								customCertResolver: undefined,
+								middlewares: [],
+							}
+						: input,
+				);
 				await audit(ctx, {
 					action: "create",
 					resourceType: "domain",
@@ -83,6 +97,17 @@ export const domainRouter = createTRPCRouter({
 	generateDomain: withPermission("domain", "create")
 		.input(z.object({ appName: z.string(), serverId: z.string().optional() }))
 		.mutation(async ({ input, ctx }) => {
+			assertNoManagedServerSelection(input.serverId);
+			if (IS_MANAGED_PAAS) {
+				const host = getManagedApplicationDomain(input.appName);
+				if (!host) {
+					throw new TRPCError({
+						code: "PRECONDITION_FAILED",
+						message: "Managed apps domain is not configured",
+					});
+				}
+				return host;
+			}
 			return generateTraefikMeDomain(
 				input.appName,
 				ctx.user.ownerId,
@@ -92,6 +117,7 @@ export const domainRouter = createTRPCRouter({
 	canGenerateTraefikMeDomains: withPermission("domain", "read")
 		.input(z.object({ serverId: z.string() }))
 		.query(async ({ input }) => {
+			if (IS_MANAGED_PAAS) return "";
 			if (input.serverId) {
 				const server = await findServerById(input.serverId);
 				return server.ipAddress;
@@ -118,7 +144,19 @@ export const domainRouter = createTRPCRouter({
 				});
 			}
 
-			const result = await updateDomainById(input.domainId, input);
+			const result = await updateDomainById(
+				input.domainId,
+				IS_MANAGED_PAAS
+					? {
+							...input,
+							https: true,
+							certificateType: "letsencrypt",
+							customEntrypoint: undefined,
+							customCertResolver: undefined,
+							middlewares: [],
+						}
+					: input,
+			);
 			const domain = await findDomainById(input.domainId);
 			await audit(ctx, {
 				action: "update",

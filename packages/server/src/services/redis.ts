@@ -12,6 +12,11 @@ import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
+import {
+	assertManagedResourceLimits,
+	getManagedResourceDefaults,
+	resolveManagedCompute,
+} from "./platform";
 import { validUniqueServerAppName } from "./project";
 
 export type Redis = typeof redis.$inferSelect;
@@ -19,6 +24,10 @@ export type Redis = typeof redis.$inferSelect;
 // https://github.com/drizzle-team/drizzle-orm/discussions/1483#discussioncomment-7523881
 export const createRedis = async (input: z.infer<typeof apiCreateRedis>) => {
 	const appName = buildAppName("redis", input.appName);
+	const compute = await resolveManagedCompute({
+		kind: "service",
+		requestedServerId: input.serverId,
+	});
 
 	const valid = await validUniqueServerAppName(appName);
 	if (!valid) {
@@ -32,6 +41,8 @@ export const createRedis = async (input: z.infer<typeof apiCreateRedis>) => {
 		.insert(redis)
 		.values({
 			...input,
+			...compute,
+			...getManagedResourceDefaults(),
 			databasePassword: input.databasePassword
 				? input.databasePassword
 				: generatePassword(),
@@ -76,6 +87,7 @@ export const updateRedisById = async (
 	redisId: string,
 	redisData: Partial<Redis>,
 ) => {
+	assertManagedResourceLimits(redisData);
 	const { appName, ...rest } = redisData;
 	const result = await db
 		.update(redis)

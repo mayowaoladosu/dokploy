@@ -9,6 +9,7 @@ import {
 	getUserByToken,
 	getWebServerSettings,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
 	removeUserById,
 	renderInvitationEmail,
 	sendEmailNotification,
@@ -374,6 +375,12 @@ export const userRouter = createTRPCRouter({
 	assignPermissions: withPermission("member", "update")
 		.input(apiAssignPermissions)
 		.mutation(async ({ input, ctx }) => {
+			if (IS_MANAGED_PAAS && (input.accessedServers?.length ?? 0) > 0) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Server access is managed by the platform",
+				});
+			}
 			try {
 				const organization = await findOrganizationById(
 					ctx.session?.activeOrganizationId || "",

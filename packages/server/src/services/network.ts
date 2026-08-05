@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import { db } from "@dokploy/server/db";
 import { type apiCreateNetwork, network } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { z } from "zod";
-import { IS_CLOUD } from "../constants";
+import { IS_CLOUD, IS_MANAGED_PAAS } from "../constants";
 import type { ApplicationNested } from "../utils/builders";
 import { getRemoteDocker } from "../utils/servers/remote-docker";
 
@@ -15,6 +16,45 @@ const RESERVED_NETWORKS = [
 	"docker_gwbridge",
 	"dokploy-network",
 ];
+
+export const getManagedNetworkName = (organizationId: string) =>
+	`vlyv-${createHash("sha256").update(organizationId).digest("hex").slice(0, 20)}`;
+
+const ensureManagedNetwork = async (
+	organizationId: string,
+	serverId: string,
+) => {
+	const networkName = getManagedNetworkName(organizationId);
+	const docker = await getRemoteDocker(serverId);
+	const managedNetwork = docker.getNetwork(networkName);
+
+	try {
+		await managedNetwork.inspect();
+	} catch {
+		try {
+			await docker.createNetwork({
+				Name: networkName,
+				Driver: "overlay",
+				CheckDuplicate: true,
+				Attachable: true,
+			});
+		} catch (error) {
+			const statusCode = (error as { statusCode?: number }).statusCode;
+			if (statusCode !== 409) throw error;
+		}
+	}
+
+	try {
+		await docker.getNetwork(networkName).connect({
+			Container: process.env.PLATFORM_ROUTER_CONTAINER || "dokploy-traefik",
+		});
+	} catch (error) {
+		const message = error instanceof Error ? error.message.toLowerCase() : "";
+		if (!message.includes("already exists")) throw error;
+	}
+
+	return networkName;
+};
 
 type DockerNetworkInfo = {
 	Name: string;
@@ -291,6 +331,20 @@ export const recreateNetwork = async (networkId: string) => {
 export const resolveServiceNetworks = async (
 	application: Partial<ApplicationNested>,
 ) => {
+	if (IS_MANAGED_PAAS) {
+		const organizationId = application.environment?.project?.organizationId;
+		const serverId = application.serverId;
+		if (!organizationId || !serverId) {
+			throw new TRPCError({
+				code: "PRECONDITION_FAILED",
+				message: "Managed workload network could not be resolved",
+			});
+		}
+
+		const networkName = await ensureManagedNetwork(organizationId, serverId);
+		return [{ Target: networkName }];
+	}
+
 	if (application.networkSwarm) {
 		return application.networkSwarm;
 	}

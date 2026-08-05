@@ -91,8 +91,16 @@ export const AddImport = ({ environmentId, projectName }: Props) => {
 
 	const slug = slugify(projectName);
 	const { data: isCloud } = api.settings.isCloud.useQuery();
-	const { data: servers } = api.server.withSSHKey.useQuery();
-	const shouldShowServerDropdown = !!(servers && servers.length > 0);
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
+	const { data: servers } = api.server.withSSHKey.useQuery(undefined, {
+		enabled: platformCapabilities?.mode !== "managed",
+	});
+	const shouldShowServerDropdown = !!(
+		platformCapabilities?.mode !== "managed" &&
+		servers &&
+		servers.length > 0
+	);
 
 	const { mutateAsync: previewTemplate, isPending: isProcessing } =
 		api.compose.previewTemplate.useMutation();

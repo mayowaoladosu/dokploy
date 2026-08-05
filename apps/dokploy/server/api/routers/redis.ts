@@ -1,4 +1,5 @@
 import {
+	assertNoManagedServerSelection,
 	checkPortInUse,
 	createMount,
 	createRedis,
@@ -13,6 +14,7 @@ import {
 	getServiceContainerCommand,
 	getWebServerSettings,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
 	rebuildDatabase,
 	removeRedisById,
 	removeService,
@@ -59,9 +61,11 @@ export const redisRouter = createTRPCRouter({
 				const project = await findProjectById(environment.projectId);
 
 				await checkServiceAccess(ctx, project.projectId, "create");
+				assertNoManagedServerSelection(input.serverId);
 
 				const webServerSettings = await getWebServerSettings();
 				if (
+					!IS_MANAGED_PAAS &&
 					(IS_CLOUD || webServerSettings?.remoteServersOnly) &&
 					!input.serverId
 				) {
@@ -78,7 +82,7 @@ export const redisRouter = createTRPCRouter({
 					});
 				}
 
-				if (input.serverId) {
+				if (!IS_MANAGED_PAAS && input.serverId) {
 					const accessibleIds = await getAccessibleServerIds(ctx.session);
 					if (!accessibleIds.has(input.serverId)) {
 						throw new TRPCError({
@@ -107,7 +111,7 @@ export const redisRouter = createTRPCRouter({
 					resourceId: newRedis.redisId,
 					resourceName: newRedis.appName,
 				});
-				return newRedis;
+				return IS_MANAGED_PAAS ? { ...newRedis, serverId: null } : newRedis;
 			} catch (error) {
 				throw error;
 			}
@@ -127,7 +131,11 @@ export const redisRouter = createTRPCRouter({
 					message: "You are not authorized to access this Redis",
 				});
 			}
-			return redis;
+			return {
+				...redis,
+				serverId: IS_MANAGED_PAAS ? null : redis.serverId,
+				server: IS_MANAGED_PAAS ? null : redis.server,
+			};
 		}),
 
 	start: protectedProcedure
@@ -218,6 +226,12 @@ export const redisRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.redisId, {
 				service: ["create"],
 			});
+			if (IS_MANAGED_PAAS) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Database networking is managed by the platform",
+				});
+			}
 			const redis = await findRedisById(input.redisId);
 
 			if (input.externalPort) {

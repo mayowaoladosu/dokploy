@@ -1,4 +1,5 @@
 import {
+	assertNoManagedServerSelection,
 	checkPortInUse,
 	createMongo,
 	createMount,
@@ -14,6 +15,7 @@ import {
 	getServiceContainerCommand,
 	getWebServerSettings,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
 	rebuildDatabase,
 	removeMongoById,
 	removeService,
@@ -61,9 +63,11 @@ export const mongoRouter = createTRPCRouter({
 				const project = await findProjectById(environment.projectId);
 
 				await checkServiceAccess(ctx, project.projectId, "create");
+				assertNoManagedServerSelection(input.serverId);
 
 				const webServerSettings = await getWebServerSettings();
 				if (
+					!IS_MANAGED_PAAS &&
 					(IS_CLOUD || webServerSettings?.remoteServersOnly) &&
 					!input.serverId
 				) {
@@ -80,7 +84,7 @@ export const mongoRouter = createTRPCRouter({
 					});
 				}
 
-				if (input.serverId) {
+				if (!IS_MANAGED_PAAS && input.serverId) {
 					const accessibleIds = await getAccessibleServerIds(ctx.session);
 					if (!accessibleIds.has(input.serverId)) {
 						throw new TRPCError({
@@ -109,7 +113,7 @@ export const mongoRouter = createTRPCRouter({
 					resourceId: newMongo.mongoId,
 					resourceName: newMongo.appName,
 				});
-				return newMongo;
+				return IS_MANAGED_PAAS ? { ...newMongo, serverId: null } : newMongo;
 			} catch (error) {
 				if (error instanceof TRPCError) {
 					throw error;
@@ -136,7 +140,11 @@ export const mongoRouter = createTRPCRouter({
 					message: "You are not authorized to access this mongo",
 				});
 			}
-			return mongo;
+			return {
+				...mongo,
+				serverId: IS_MANAGED_PAAS ? null : mongo.serverId,
+				server: IS_MANAGED_PAAS ? null : mongo.server,
+			};
 		}),
 
 	start: protectedProcedure
@@ -195,6 +203,12 @@ export const mongoRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.mongoId, {
 				service: ["create"],
 			});
+			if (IS_MANAGED_PAAS) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Database networking is managed by the platform",
+				});
+			}
 			const mongo = await findMongoById(input.mongoId);
 
 			if (input.externalPort) {

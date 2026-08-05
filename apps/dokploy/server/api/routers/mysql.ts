@@ -1,4 +1,5 @@
 import {
+	assertNoManagedServerSelection,
 	checkPortInUse,
 	createMount,
 	createMysql,
@@ -14,6 +15,7 @@ import {
 	getServiceContainerCommand,
 	getWebServerSettings,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
 	rebuildDatabase,
 	removeMySqlById,
 	removeService,
@@ -62,9 +64,11 @@ export const mysqlRouter = createTRPCRouter({
 				const project = await findProjectById(environment.projectId);
 
 				await checkServiceAccess(ctx, project.projectId, "create");
+				assertNoManagedServerSelection(input.serverId);
 
 				const webServerSettings = await getWebServerSettings();
 				if (
+					!IS_MANAGED_PAAS &&
 					(IS_CLOUD || webServerSettings?.remoteServersOnly) &&
 					!input.serverId
 				) {
@@ -81,7 +85,7 @@ export const mysqlRouter = createTRPCRouter({
 					});
 				}
 
-				if (input.serverId) {
+				if (!IS_MANAGED_PAAS && input.serverId) {
 					const accessibleIds = await getAccessibleServerIds(ctx.session);
 					if (!accessibleIds.has(input.serverId)) {
 						throw new TRPCError({
@@ -110,7 +114,7 @@ export const mysqlRouter = createTRPCRouter({
 					resourceId: newMysql.mysqlId,
 					resourceName: newMysql.appName,
 				});
-				return newMysql;
+				return IS_MANAGED_PAAS ? { ...newMysql, serverId: null } : newMysql;
 			} catch (error) {
 				if (error instanceof TRPCError) {
 					throw error;
@@ -136,7 +140,11 @@ export const mysqlRouter = createTRPCRouter({
 					message: "You are not authorized to access this MySQL",
 				});
 			}
-			return mysql;
+			return {
+				...mysql,
+				serverId: IS_MANAGED_PAAS ? null : mysql.serverId,
+				server: IS_MANAGED_PAAS ? null : mysql.server,
+			};
 		}),
 
 	start: protectedProcedure
@@ -194,6 +202,12 @@ export const mysqlRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.mysqlId, {
 				service: ["create"],
 			});
+			if (IS_MANAGED_PAAS) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Database networking is managed by the platform",
+				});
+			}
 			const mysql = await findMySqlById(input.mysqlId);
 
 			if (input.externalPort) {

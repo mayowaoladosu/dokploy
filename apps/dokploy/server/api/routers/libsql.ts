@@ -1,4 +1,5 @@
 import {
+	assertNoManagedServerSelection,
 	checkPortInUse,
 	createLibsql,
 	createMount,
@@ -10,6 +11,7 @@ import {
 	getContainerLogs,
 	getWebServerSettings,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
 	rebuildDatabase,
 	removeLibsqlById,
 	removeService,
@@ -51,9 +53,11 @@ export const libsqlRouter = createTRPCRouter({
 				const project = await findProjectById(environment.projectId);
 
 				await checkServiceAccess(ctx, project.projectId, "create");
+				assertNoManagedServerSelection(input.serverId);
 
 				const webServerSettings = await getWebServerSettings();
 				if (
+					!IS_MANAGED_PAAS &&
 					(IS_CLOUD || webServerSettings?.remoteServersOnly) &&
 					!input.serverId
 				) {
@@ -70,7 +74,7 @@ export const libsqlRouter = createTRPCRouter({
 					});
 				}
 
-				if (input.serverId) {
+				if (!IS_MANAGED_PAAS && input.serverId) {
 					const accessibleIds = await getAccessibleServerIds(ctx.session);
 					if (!accessibleIds.has(input.serverId)) {
 						throw new TRPCError({
@@ -119,7 +123,11 @@ export const libsqlRouter = createTRPCRouter({
 					message: "You are not authorized to access this Libsql",
 				});
 			}
-			return libsql;
+			return {
+				...libsql,
+				serverId: IS_MANAGED_PAAS ? null : libsql.serverId,
+				server: IS_MANAGED_PAAS ? null : libsql.server,
+			};
 		}),
 
 	start: protectedProcedure

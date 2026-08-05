@@ -64,6 +64,9 @@ const Redis = (
 	const { data: permissions } = api.user.getPermissions.useQuery();
 
 	const { data: isCloud } = api.settings.isCloud.useQuery();
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
+	const isManaged = platformCapabilities?.mode === "managed";
 	const { data: serverIp } = api.settings.getIp.useQuery();
 	const { data: environments } = api.environment.byProjectId.useQuery({
 		projectId: data?.environment?.projectId || "",
@@ -110,49 +113,51 @@ const Redis = (
 								</span>
 							</div>
 							<div className="flex flex-col h-fit w-fit gap-2">
-								<div className="flex flex-row h-fit w-fit gap-2">
-									<Badge
-										className="cursor-pointer"
-										onClick={() => {
-											const ip = data?.server?.ipAddress || serverIp;
-											if (ip) {
-												copy(ip);
-												toast.success("IP Address Copied!");
-											}
-										}}
-										variant={
-											!data?.serverId
-												? "default"
-												: data?.server?.serverStatus === "active"
+								{!isManaged && (
+									<div className="flex flex-row h-fit w-fit gap-2">
+										<Badge
+											className="cursor-pointer"
+											onClick={() => {
+												const ip = data?.server?.ipAddress || serverIp;
+												if (ip) {
+													copy(ip);
+													toast.success("IP Address Copied!");
+												}
+											}}
+											variant={
+												!data?.serverId
 													? "default"
-													: "destructive"
-										}
-									>
-										{data?.server?.name || "Dokploy Server"}
-									</Badge>
-									{data?.server?.serverStatus === "inactive" && (
-										<TooltipProvider delayDuration={0}>
-											<Tooltip>
-												<TooltipTrigger asChild>
-													<Label className="break-all w-fit flex flex-row gap-1 items-center">
-														<HelpCircle className="size-4 text-muted-foreground" />
-													</Label>
-												</TooltipTrigger>
-												<TooltipContent
-													className="z-999 w-[300px]"
-													align="start"
-													side="top"
-												>
-													<span>
-														You cannot, deploy this application because the
-														server is inactive, please upgrade your plan to add
-														more servers.
-													</span>
-												</TooltipContent>
-											</Tooltip>
-										</TooltipProvider>
-									)}
-								</div>
+													: data?.server?.serverStatus === "active"
+														? "default"
+														: "destructive"
+											}
+										>
+											{data?.server?.name || "Dokploy Server"}
+										</Badge>
+										{data?.server?.serverStatus === "inactive" && (
+											<TooltipProvider delayDuration={0}>
+												<Tooltip>
+													<TooltipTrigger asChild>
+														<Label className="break-all w-fit flex flex-row gap-1 items-center">
+															<HelpCircle className="size-4 text-muted-foreground" />
+														</Label>
+													</TooltipTrigger>
+													<TooltipContent
+														className="z-999 w-[300px]"
+														align="start"
+														side="top"
+													>
+														<span>
+															You cannot, deploy this application because the
+															server is inactive, please upgrade your plan to
+															add more servers.
+														</span>
+													</TooltipContent>
+												</Tooltip>
+											</TooltipProvider>
+										)}
+									</div>
+								)}
 
 								<div className="flex flex-row gap-2 justify-end">
 									{permissions?.service.create && (
@@ -165,7 +170,7 @@ const Redis = (
 							</div>
 						</CardHeader>
 						<CardContent className="space-y-2 py-8 border-t">
-							{data?.server?.serverStatus === "inactive" ? (
+							{!isManaged && data?.server?.serverStatus === "inactive" ? (
 								<div className="flex h-[55vh] border-2 rounded-xl border-dashed p-4">
 									<div className="max-w-3xl mx-auto flex flex-col items-center justify-center self-center gap-3">
 										<ServerOff className="size-10 text-muted-foreground self-center" />
@@ -218,7 +223,8 @@ const Redis = (
 											{permissions?.logs.read && (
 												<TabsTrigger value="logs">Logs</TabsTrigger>
 											)}
-											{permissions?.monitoring.read &&
+											{!isManaged &&
+												permissions?.monitoring.read &&
 												((data?.serverId && isCloud) || !data?.server) && (
 													<TabsTrigger value="monitoring">
 														Monitoring
@@ -234,7 +240,9 @@ const Redis = (
 										<div className="flex flex-col gap-4 pt-2.5">
 											<ShowGeneralRedis redisId={redisId} />
 											<ShowInternalRedisCredentials redisId={redisId} />
-											<ShowExternalRedisCredentials redisId={redisId} />
+											{!isManaged && (
+												<ShowExternalRedisCredentials redisId={redisId} />
+											)}
 										</div>
 									</TabsContent>
 									{permissions?.envVars.read && (
@@ -244,7 +252,7 @@ const Redis = (
 											</div>
 										</TabsContent>
 									)}
-									{permissions?.monitoring.read && (
+									{!isManaged && permissions?.monitoring.read && (
 										<TabsContent value="monitoring">
 											<div className="pt-2.5">
 												<div className="flex flex-col gap-4 border rounded-lg p-6">

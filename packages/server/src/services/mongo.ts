@@ -14,12 +14,21 @@ import { TRPCError } from "@trpc/server";
 import { eq, getTableColumns } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
+import {
+	assertManagedResourceLimits,
+	getManagedResourceDefaults,
+	resolveManagedCompute,
+} from "./platform";
 import { validUniqueServerAppName } from "./project";
 
 export type Mongo = typeof mongo.$inferSelect;
 
 export const createMongo = async (input: z.infer<typeof apiCreateMongo>) => {
 	const appName = buildAppName("mongo", input.appName);
+	const compute = await resolveManagedCompute({
+		kind: "service",
+		requestedServerId: input.serverId,
+	});
 
 	const valid = await validUniqueServerAppName(appName);
 	if (!valid) {
@@ -33,6 +42,8 @@ export const createMongo = async (input: z.infer<typeof apiCreateMongo>) => {
 		.insert(mongo)
 		.values({
 			...input,
+			...compute,
+			...getManagedResourceDefaults(),
 			databasePassword: input.databasePassword
 				? input.databasePassword
 				: generatePassword(),
@@ -88,6 +99,7 @@ export const updateMongoById = async (
 	mongoId: string,
 	mongoData: Partial<Mongo>,
 ) => {
+	assertManagedResourceLimits(mongoData);
 	const { appName, ...rest } = mongoData;
 	const result = await db
 		.update(mongo)

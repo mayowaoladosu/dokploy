@@ -51,6 +51,7 @@ export const ShowDockerLogsStack = ({
 			{
 				appName,
 				serverId,
+				serviceId,
 			},
 			{
 				enabled: !!appName && option === "swarm",
@@ -63,6 +64,7 @@ export const ShowDockerLogsStack = ({
 				appName,
 				appType: "stack",
 				serverId,
+				serviceId,
 			},
 			{
 				enabled: !!appName && option === "native",

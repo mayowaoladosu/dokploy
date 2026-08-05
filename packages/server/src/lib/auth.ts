@@ -9,7 +9,7 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { admin, organization, twoFactor } from "better-auth/plugins";
 import { and, desc, eq } from "drizzle-orm";
-import { IS_CLOUD } from "../constants";
+import { IS_CLOUD, IS_HOSTED } from "../constants";
 import { db } from "../db";
 import * as schema from "../db/schema";
 import {
@@ -17,6 +17,7 @@ import {
 	getTrustedProviders,
 	getUserByToken,
 } from "../services/admin";
+import { ensureBootstrapPlatformAdmin } from "../services/platform";
 import { createAuditLog } from "../services/proprietary/audit-log";
 import {
 	getWebServerSettings,
@@ -62,6 +63,13 @@ const resolveTrustedOrigins = async () => {
 	}
 };
 
+const betterAuthAdminUserIds = [
+	process.env.USER_ADMIN_ID,
+	...(process.env.PLATFORM_ADMIN_USER_IDS?.split(",") ?? []),
+]
+	.map((id) => id?.trim())
+	.filter((id): id is string => Boolean(id));
+
 const createBetterAuth = () =>
 	betterAuth({
 		database: drizzleAdapter(db, {
@@ -73,10 +81,10 @@ const createBetterAuth = () =>
 			"/organization/create",
 			"/organization/update",
 			"/organization/delete",
-			...(!IS_CLOUD ? ["/verify-email"] : []),
+			...(!IS_HOSTED ? ["/verify-email"] : []),
 		],
 		secret: betterAuthSecret,
-		...(!IS_CLOUD
+		...(!IS_HOSTED
 			? {
 					advanced: {
 						useSecureCookies: false,
@@ -100,7 +108,7 @@ const createBetterAuth = () =>
 				allowDifferentEmails: true,
 			},
 		},
-		appName: "Dokploy",
+		appName: process.env.APP_NAME || (IS_HOSTED ? "vlyv" : "Dokploy"),
 		socialProviders: {
 			github: {
 				clientId: process.env.GITHUB_CLIENT_ID as string,
@@ -128,7 +136,7 @@ const createBetterAuth = () =>
 			autoSignInAfterVerification: true,
 			sendOnSignIn: true,
 			sendVerificationEmail: async ({ user, url }) => {
-				if (IS_CLOUD) {
+				if (IS_HOSTED) {
 					await sendVerificationEmail({
 						userName: user.name || "User",
 						email: user.email,
@@ -139,9 +147,9 @@ const createBetterAuth = () =>
 		},
 		emailAndPassword: {
 			enabled: true,
-			autoSignIn: !IS_CLOUD,
+			autoSignIn: !IS_HOSTED,
 			requireEmailVerification:
-				IS_CLOUD && process.env.NODE_ENV === "production",
+				IS_HOSTED && process.env.NODE_ENV === "production",
 			password: {
 				async hash(password) {
 					return bcrypt.hashSync(password, 10);
@@ -164,7 +172,7 @@ const createBetterAuth = () =>
 			user: {
 				create: {
 					before: async (_user, context) => {
-						if (!IS_CLOUD) {
+						if (!IS_HOSTED) {
 							const xDokployToken =
 								context?.request?.headers?.get("x-dokploy-token");
 							if (xDokployToken) {
@@ -212,13 +220,14 @@ const createBetterAuth = () =>
 						}
 					},
 					after: async (user, context) => {
+						await ensureBootstrapPlatformAdmin(user.id, user.email);
 						const isSSORequest = context?.path.includes("/sso");
 						const isSCIMRequest = context?.path.includes("/scim");
 						const isAdminPresent = await db.query.member.findFirst({
 							where: eq(schema.member.role, "owner"),
 						});
 
-						if (!IS_CLOUD && !isAdminPresent) {
+						if (!IS_HOSTED && !isAdminPresent) {
 							await updateWebServerSettings({
 								serverIp: await getPublicIpWithFallback(),
 							});
@@ -253,7 +262,7 @@ const createBetterAuth = () =>
 							return;
 						}
 
-						if (IS_CLOUD || !isAdminPresent) {
+						if (IS_HOSTED || !isAdminPresent) {
 							await db.transaction(async (tx) => {
 								const organization = await tx
 									.insert(schema.organization)
@@ -453,8 +462,8 @@ const createBetterAuth = () =>
 			// maps to the admin plugin's `banned` field and is rejected without it.
 			// adminRoles: [] keeps every /admin/* endpoint locked on self-hosted.
 			admin(
-				IS_CLOUD
-					? { adminUserIds: [process.env.USER_ADMIN_ID as string] }
+				IS_HOSTED && betterAuthAdminUserIds.length > 0
+					? { adminUserIds: betterAuthAdminUserIds }
 					: { adminRoles: [] },
 			),
 		],
@@ -592,6 +601,8 @@ export const validateRequest = async (request: IncomingMessage) => {
 			user: null,
 		};
 	}
+
+	await ensureBootstrapPlatformAdmin(session.user.id, session.user.email);
 
 	if (session?.user) {
 		const member = await db.query.member.findFirst({

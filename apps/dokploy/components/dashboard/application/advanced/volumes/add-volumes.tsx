@@ -87,6 +87,9 @@ export const AddVolumes = ({
 }: Props) => {
 	const [isOpen, setIsOpen] = useState(false);
 	const { mutateAsync } = api.mounts.create.useMutation();
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
+	const isManaged = platformCapabilities?.mode === "managed";
 	const form = useForm<AddMount>({
 		defaultValues: {
 			type: serviceType === "compose" ? "file" : "bind",
@@ -100,6 +103,12 @@ export const AddVolumes = ({
 	useEffect(() => {
 		form.reset();
 	}, [form, form.reset, form.formState.isSubmitSuccessful]);
+
+	useEffect(() => {
+		if (isManaged && form.getValues("type") === "bind") {
+			form.setValue("type", "volume");
+		}
+	}, [form, isManaged]);
 
 	const onSubmit = async (data: AddMount) => {
 		if (data.type === "bind") {
@@ -209,7 +218,7 @@ export const AddVolumes = ({
 											defaultValue={field.value}
 											className="grid w-full grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4"
 										>
-											{serviceType !== "compose" && (
+											{!isManaged && serviceType !== "compose" && (
 												<FormItem className="flex items-center space-x-3 space-y-0">
 													<FormControl className="w-full">
 														<div>

@@ -1,5 +1,12 @@
 import type http from "node:http";
-import { findServerById, IS_CLOUD, validateRequest } from "@dokploy/server";
+import {
+	findServerById,
+	getConfig,
+	IS_CLOUD,
+	IS_MANAGED_PAAS,
+	resolveManagedServiceExecutionTarget,
+	validateRequest,
+} from "@dokploy/server";
 import { spawn } from "node-pty";
 import { Client } from "ssh2";
 import { WebSocketServer } from "ws";
@@ -40,7 +47,7 @@ export const setupDockerContainerLogsWebSocketServer = (
 		const tail = url.searchParams.get("tail") ?? "100";
 		const search = url.searchParams.get("search") ?? "";
 		const since = url.searchParams.get("since") ?? "all";
-		const serverId = url.searchParams.get("serverId");
+		let serverId = url.searchParams.get("serverId");
 		const runType = url.searchParams.get("runType");
 		const serviceId = url.searchParams.get("serviceId");
 		const { user, session } = await validateRequest(req);
@@ -75,10 +82,39 @@ export const setupDockerContainerLogsWebSocketServer = (
 			ws.close();
 			return;
 		}
+		const organizationId = session.activeOrganizationId;
+		if (!organizationId) {
+			ws.close();
+			return;
+		}
 
 		if (!(await canAccessDockerOverWss(user, session, serverId, serviceId))) {
 			ws.close(4003, "Not authorized");
 			return;
+		}
+
+		if (IS_MANAGED_PAAS && serviceId) {
+			try {
+				const target = await resolveManagedServiceExecutionTarget(
+					serviceId,
+					organizationId,
+				);
+				serverId = target.serverId;
+				const config = await getConfig(containerId, serverId);
+				const labels = config?.Config?.Labels ?? {};
+				const belongsToService =
+					config?.Name?.includes(target.appName) ||
+					labels["com.docker.swarm.service.name"] === target.appName ||
+					labels["com.docker.compose.project"] === target.appName;
+
+				if (!belongsToService) {
+					ws.close(4003, "Not authorized");
+					return;
+				}
+			} catch {
+				ws.close(4003, "Not authorized");
+				return;
+			}
 		}
 
 		// Set up keep-alive ping mechanism to prevent timeout
@@ -92,7 +128,10 @@ export const setupDockerContainerLogsWebSocketServer = (
 			if (serverId) {
 				const server = await findServerById(serverId);
 
-				if (server.organizationId !== session.activeOrganizationId) {
+				if (
+					server.organizationId !== session.activeOrganizationId &&
+					!(IS_MANAGED_PAAS && serviceId)
+				) {
 					ws.close();
 					return;
 				}

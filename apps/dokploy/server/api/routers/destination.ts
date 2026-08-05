@@ -4,6 +4,7 @@ import {
 	execAsyncRemote,
 	findDestinationById,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
 	removeDestinationById,
 	updateDestinationById,
 } from "@dokploy/server";
@@ -11,7 +12,11 @@ import { db } from "@dokploy/server/db";
 import { TRPCError } from "@trpc/server";
 import { desc, eq } from "drizzle-orm";
 import { quote } from "shell-quote";
-import { createTRPCRouter, withPermission } from "@/server/api/trpc";
+import {
+	createTRPCRouter,
+	platformAdminProcedure,
+	withPermission,
+} from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
 import {
 	apiCreateDestination,
@@ -21,8 +26,18 @@ import {
 	destinations,
 } from "@/server/db/schema";
 
+const destinationCreateProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: withPermission("destination", "create");
+const destinationReadProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: withPermission("destination", "read");
+const destinationDeleteProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: withPermission("destination", "delete");
+
 export const destinationRouter = createTRPCRouter({
-	create: withPermission("destination", "create")
+	create: destinationCreateProcedure
 		.input(apiCreateDestination)
 		.mutation(async ({ input, ctx }) => {
 			try {
@@ -45,7 +60,7 @@ export const destinationRouter = createTRPCRouter({
 				});
 			}
 		}),
-	testConnection: withPermission("destination", "create")
+	testConnection: destinationCreateProcedure
 		.input(apiCreateDestination)
 		.mutation(async ({ input }) => {
 			const {
@@ -102,7 +117,7 @@ export const destinationRouter = createTRPCRouter({
 				});
 			}
 		}),
-	one: withPermission("destination", "read")
+	one: destinationReadProcedure
 		.input(apiFindOneDestination)
 		.query(async ({ input, ctx }) => {
 			const destination = await findDestinationById(input.destinationId);
@@ -114,13 +129,13 @@ export const destinationRouter = createTRPCRouter({
 			}
 			return destination;
 		}),
-	all: withPermission("destination", "read").query(async ({ ctx }) => {
+	all: destinationReadProcedure.query(async ({ ctx }) => {
 		return await db.query.destinations.findMany({
 			where: eq(destinations.organizationId, ctx.session.activeOrganizationId),
 			orderBy: [desc(destinations.createdAt)],
 		});
 	}),
-	remove: withPermission("destination", "delete")
+	remove: destinationDeleteProcedure
 		.input(apiRemoveDestination)
 		.mutation(async ({ input, ctx }) => {
 			try {
@@ -147,7 +162,7 @@ export const destinationRouter = createTRPCRouter({
 				throw error;
 			}
 		}),
-	update: withPermission("destination", "create")
+	update: destinationCreateProcedure
 		.input(apiUpdateDestination)
 		.mutation(async ({ input, ctx }) => {
 			try {

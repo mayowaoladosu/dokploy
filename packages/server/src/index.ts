@@ -32,6 +32,7 @@ export * from "./services/network";
 export * from "./services/notification";
 export * from "./services/patch";
 export * from "./services/patch-repo";
+export * from "./services/platform";
 export * from "./services/port";
 export * from "./services/postgres";
 export * from "./services/preview-deployment";

@@ -62,6 +62,7 @@ export const ShowDockerLogs = ({ appName, serverId, serviceId }: Props) => {
 			{
 				appName,
 				serverId,
+				serviceId,
 			},
 			{
 				enabled: !!appName && option === "swarm",
@@ -73,6 +74,7 @@ export const ShowDockerLogs = ({ appName, serverId, serviceId }: Props) => {
 			{
 				appName,
 				serverId,
+				serviceId,
 			},
 			{
 				enabled: !!appName && option === "native",

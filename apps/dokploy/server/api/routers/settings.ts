@@ -19,6 +19,9 @@ import {
 	getUpdateData,
 	getWebServerSettings,
 	IS_CLOUD,
+	IS_HOSTED,
+	IS_MANAGED_PAAS,
+	isPlatformAdmin,
 	parseRawConfig,
 	paths,
 	prepareEnvironmentVariables,
@@ -74,16 +77,24 @@ import { removeJob, schedule } from "@/server/utils/backup";
 import packageInfo from "../../../package.json";
 import { appRouter } from "../root";
 import {
-	adminProcedure,
 	createTRPCRouter,
 	enterpriseProcedure,
+	adminProcedure as organizationAdminProcedure,
+	platformAdminProcedure,
 	protectedProcedure,
 	publicProcedure,
 } from "../trpc";
 
+const adminProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: organizationAdminProcedure;
+const infrastructureProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: protectedProcedure;
+
 export const settingsRouter = createTRPCRouter({
 	getWebServerSettings: protectedProcedure.query(async () => {
-		if (IS_CLOUD) {
+		if (IS_HOSTED) {
 			return null;
 		}
 		const settings = await getWebServerSettings();
@@ -581,7 +592,7 @@ export const settingsRouter = createTRPCRouter({
 	getReleaseTag: protectedProcedure.query(() => {
 		return getDokployImageTag();
 	}),
-	readDirectories: protectedProcedure
+	readDirectories: infrastructureProcedure
 		.input(apiServerSchema)
 		.query(async ({ ctx, input }) => {
 			try {
@@ -594,7 +605,7 @@ export const settingsRouter = createTRPCRouter({
 			}
 		}),
 
-	updateTraefikFile: protectedProcedure
+	updateTraefikFile: infrastructureProcedure
 		.input(apiModifyTraefikConfig)
 		.mutation(async ({ input, ctx }) => {
 			await checkPermission(ctx, { traefikFiles: ["write"] });
@@ -611,7 +622,7 @@ export const settingsRouter = createTRPCRouter({
 			return true;
 		}),
 
-	readTraefikFile: protectedProcedure
+	readTraefikFile: infrastructureProcedure
 		.input(apiReadTraefikConfig)
 		.query(async ({ input, ctx }) => {
 			await checkPermission(ctx, { traefikFiles: ["read"] });
@@ -627,7 +638,7 @@ export const settingsRouter = createTRPCRouter({
 			return readConfigInPath(input.path, input.serverId);
 		}),
 	getIp: protectedProcedure.query(async () => {
-		if (IS_CLOUD) {
+		if (IS_HOSTED) {
 			return "";
 		}
 		const settings = await getWebServerSettings();
@@ -776,7 +787,7 @@ export const settingsRouter = createTRPCRouter({
 			return ports.some((port) => port.targetPort === 8080);
 		}),
 
-	readStatsLogs: protectedProcedure
+	readStatsLogs: infrastructureProcedure
 		.meta({
 			openapi: {
 				path: "/read-stats-logs",
@@ -839,7 +850,7 @@ export const settingsRouter = createTRPCRouter({
 			const processedLogs = processLogs(rawConfig as string, input?.dateRange);
 			return processedLogs || [];
 		}),
-	haveActivateRequests: protectedProcedure.query(async () => {
+	haveActivateRequests: infrastructureProcedure.query(async () => {
 		if (IS_CLOUD) {
 			return true;
 		}
@@ -854,7 +865,7 @@ export const settingsRouter = createTRPCRouter({
 
 		return !!parsedConfig?.accessLog?.filePath;
 	}),
-	toggleRequests: protectedProcedure
+	toggleRequests: infrastructureProcedure
 		.input(
 			z.object({
 				enable: z.boolean(),
@@ -895,7 +906,15 @@ export const settingsRouter = createTRPCRouter({
 			return true;
 		}),
 	isCloud: publicProcedure.query(async () => {
-		return IS_CLOUD;
+		return IS_HOSTED;
+	}),
+	platformCapabilities: protectedProcedure.query(async ({ ctx }) => {
+		return {
+			mode: IS_MANAGED_PAAS ? ("managed" as const) : ("self-hosted" as const),
+			canManageInfrastructure: IS_MANAGED_PAAS
+				? await isPlatformAdmin(ctx.user.id)
+				: ctx.user.role === "owner" || ctx.user.role === "admin",
+		};
 	}),
 	isUserSubscribed: protectedProcedure.query(async ({ ctx }) => {
 		const haveServers = await db.query.server.findMany({
@@ -1065,7 +1084,7 @@ export const settingsRouter = createTRPCRouter({
 			const ports = await readPorts("dokploy-traefik", input?.serverId);
 			return ports;
 		}),
-	updateLogCleanup: protectedProcedure
+	updateLogCleanup: infrastructureProcedure
 		.input(
 			z.object({
 				cronExpression: z.string().nullable(),
@@ -1089,7 +1108,7 @@ export const settingsRouter = createTRPCRouter({
 			return result;
 		}),
 
-	getLogCleanupStatus: protectedProcedure.query(async () => {
+	getLogCleanupStatus: infrastructureProcedure.query(async () => {
 		return getLogCleanupStatus();
 	}),
 

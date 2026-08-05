@@ -30,6 +30,8 @@ export const ServerFilter = ({ children }: Props) => {
 	const { data: isCloud, isLoading: isLoadingCloud } =
 		api.settings.isCloud.useQuery();
 	const { data: permissions } = api.user.getPermissions.useQuery();
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
 
 	const queryServerId =
 		typeof router.query.serverId === "string"
@@ -69,6 +71,13 @@ export const ServerFilter = ({ children }: Props) => {
 				</div>
 			</Card>
 		);
+	}
+
+	if (
+		platformCapabilities?.mode === "managed" &&
+		!platformCapabilities.canManageInfrastructure
+	) {
+		return null;
 	}
 
 	if (isCloud && !servers?.length) {

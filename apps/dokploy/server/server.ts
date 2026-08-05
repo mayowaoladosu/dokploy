@@ -1,9 +1,11 @@
 import http from "node:http";
 import {
+	assertManagedPlatformConfiguration,
 	createDefaultMiddlewares,
 	createDefaultServerTraefikConfig,
 	createDefaultTraefikConfig,
 	IS_CLOUD,
+	IS_HOSTED,
 	initCancelDeployments,
 	initCronJobs,
 	initEnterpriseBackupCronJobs,
@@ -24,6 +26,7 @@ import { setupDeploymentLogsWebSocketServer } from "./wss/listen-deployment";
 import { setupTerminalWebSocketServer } from "./wss/terminal";
 
 config({ path: ".env" });
+assertManagedPlatformConfiguration();
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 const HOST = process.env.HOST || "0.0.0.0";
 const dev = process.env.NODE_ENV !== "production";
@@ -52,7 +55,7 @@ void app.prepare().then(async () => {
 		setupDockerContainerLogsWebSocketServer(server);
 		setupDockerContainerTerminalWebSocketServer(server);
 		setupTerminalWebSocketServer(server);
-		if (!IS_CLOUD) {
+		if (!IS_HOSTED) {
 			setupDockerStatsMonitoringSocketServer(server);
 		}
 

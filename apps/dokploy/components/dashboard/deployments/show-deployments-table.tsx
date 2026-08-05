@@ -95,6 +95,9 @@ function getServiceInfo(d: DeploymentRow) {
 }
 
 export function ShowDeploymentsTable() {
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
+	const isManaged = platformCapabilities?.mode === "managed";
 	const [sorting, setSorting] = useState<SortingState>([
 		{ id: "createdAt", desc: true },
 	]);
@@ -140,13 +143,14 @@ export function ShowDeploymentsTable() {
 					info.projectName.toLowerCase().includes(q) ||
 					info.environmentName.toLowerCase().includes(q) ||
 					(d.title?.toLowerCase().includes(q) ?? false) ||
-					serverName.toLowerCase().includes(q) ||
-					buildServerName.toLowerCase().includes(q)
+					(!isManaged &&
+						(serverName.toLowerCase().includes(q) ||
+							buildServerName.toLowerCase().includes(q)))
 				);
 			});
 		}
 		return list;
-	}, [deploymentsList, statusFilter, typeFilter, globalFilter]);
+	}, [deploymentsList, statusFilter, typeFilter, globalFilter, isManaged]);
 
 	const columns = useMemo(
 		() => [
@@ -250,87 +254,97 @@ export function ShowDeploymentsTable() {
 					);
 				},
 			},
-			{
-				id: "serverName",
-				accessorFn: (row: DeploymentRow) =>
-					row.server?.name ??
-					row.application?.server?.name ??
-					row.compose?.server?.name ??
-					"",
-				header: ({
-					column,
-				}: {
-					column: {
-						getIsSorted: () => false | "asc" | "desc";
-						toggleSorting: (asc: boolean) => void;
-					};
-				}) => (
-					<Button
-						variant="ghost"
-						className="-ml-3 h-8"
-						onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}
-					>
-						Server
-						<ArrowUpDown className="ml-2 size-4" />
-					</Button>
-				),
-				cell: ({ row }: { row: { original: DeploymentRow } }) => {
-					const d = row.original;
-					const serverName =
-						d.server?.name ??
-						d.application?.server?.name ??
-						d.compose?.server?.name ??
-						null;
-					const serverType =
-						d.server?.serverType ??
-						d.application?.server?.serverType ??
-						d.compose?.server?.serverType ??
-						null;
-					const buildServerName =
-						d.buildServer?.name ?? d.application?.buildServer?.name ?? null;
-					const buildServerType =
-						d.buildServer?.serverType ??
-						d.application?.buildServer?.serverType ??
-						null;
-					const showBuild =
-						buildServerName != null && buildServerName !== serverName;
-					if (!serverName && !showBuild) {
-						return <span className="text-muted-foreground">—</span>;
-					}
-					return (
-						<div className="flex flex-col gap-0.5 text-sm">
-							{serverName && (
-								<div className="flex items-center gap-1.5 flex-wrap">
-									<Server className="size-3.5 text-muted-foreground shrink-0" />
-									<span className="truncate">{serverName}</span>
-									{serverType && (
-										<Badge
-											variant="outline"
-											className="text-[10px] font-normal"
-										>
-											{serverType}
-										</Badge>
-									)}
-								</div>
-							)}
-							{showBuild && buildServerName && (
-								<div className="flex items-center gap-1.5 text-muted-foreground flex-wrap">
-									<span className="text-[10px]">Build:</span>
-									<span className="truncate text-xs">{buildServerName}</span>
-									{buildServerType && (
-										<Badge
-											variant="outline"
-											className="text-[10px] font-normal"
-										>
-											{buildServerType}
-										</Badge>
-									)}
-								</div>
-							)}
-						</div>
-					);
-				},
-			},
+			...(!isManaged
+				? [
+						{
+							id: "serverName",
+							accessorFn: (row: DeploymentRow) =>
+								row.server?.name ??
+								row.application?.server?.name ??
+								row.compose?.server?.name ??
+								"",
+							header: ({
+								column,
+							}: {
+								column: {
+									getIsSorted: () => false | "asc" | "desc";
+									toggleSorting: (asc: boolean) => void;
+								};
+							}) => (
+								<Button
+									variant="ghost"
+									className="-ml-3 h-8"
+									onClick={() =>
+										column.toggleSorting(column.getIsSorted() === "asc")
+									}
+								>
+									Server
+									<ArrowUpDown className="ml-2 size-4" />
+								</Button>
+							),
+							cell: ({ row }: { row: { original: DeploymentRow } }) => {
+								const d = row.original;
+								const serverName =
+									d.server?.name ??
+									d.application?.server?.name ??
+									d.compose?.server?.name ??
+									null;
+								const serverType =
+									d.server?.serverType ??
+									d.application?.server?.serverType ??
+									d.compose?.server?.serverType ??
+									null;
+								const buildServerName =
+									d.buildServer?.name ??
+									d.application?.buildServer?.name ??
+									null;
+								const buildServerType =
+									d.buildServer?.serverType ??
+									d.application?.buildServer?.serverType ??
+									null;
+								const showBuild =
+									buildServerName != null && buildServerName !== serverName;
+								if (!serverName && !showBuild) {
+									return <span className="text-muted-foreground">—</span>;
+								}
+								return (
+									<div className="flex flex-col gap-0.5 text-sm">
+										{serverName && (
+											<div className="flex items-center gap-1.5 flex-wrap">
+												<Server className="size-3.5 text-muted-foreground shrink-0" />
+												<span className="truncate">{serverName}</span>
+												{serverType && (
+													<Badge
+														variant="outline"
+														className="text-[10px] font-normal"
+													>
+														{serverType}
+													</Badge>
+												)}
+											</div>
+										)}
+										{showBuild && buildServerName && (
+											<div className="flex items-center gap-1.5 text-muted-foreground flex-wrap">
+												<span className="text-[10px]">Build:</span>
+												<span className="truncate text-xs">
+													{buildServerName}
+												</span>
+												{buildServerType && (
+													<Badge
+														variant="outline"
+														className="text-[10px] font-normal"
+													>
+														{buildServerType}
+													</Badge>
+												)}
+											</div>
+										)}
+									</div>
+								);
+							},
+						},
+					]
+				: []),
 			{
 				accessorKey: "title",
 				header: ({
@@ -429,7 +443,7 @@ export function ShowDeploymentsTable() {
 				},
 			},
 		],
-		[],
+		[isManaged],
 	);
 
 	const table = useReactTable({

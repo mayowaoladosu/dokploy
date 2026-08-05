@@ -94,6 +94,9 @@ export const findDeploymentById = async (deploymentId: string) => {
 			compose: {
 				columns: { composeId: true, appName: true, name: true, serverId: true },
 			},
+			previewDeployment: {
+				columns: { applicationId: true },
+			},
 			schedule: true,
 		},
 	});

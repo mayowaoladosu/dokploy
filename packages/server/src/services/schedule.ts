@@ -2,7 +2,7 @@ import path from "node:path";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import type { z } from "zod";
-import { IS_CLOUD, paths } from "../constants";
+import { IS_CLOUD, IS_MANAGED_PAAS, paths } from "../constants";
 import { db } from "../db";
 import type {
 	createScheduleSchema,
@@ -12,6 +12,7 @@ import { type Schedule, schedules } from "../db/schema/schedule";
 import { encodeBase64 } from "../utils/docker/utils";
 import { execAsync, execAsyncRemote } from "../utils/process/execAsync";
 import { findMemberByUserId } from "./permission";
+import { isPlatformAdmin } from "./platform";
 import { findServerById } from "./server";
 
 export type ScheduleExtended = Awaited<ReturnType<typeof findScheduleById>>;
@@ -26,6 +27,12 @@ export const assertHostScheduleAccess = async (
 	serverId: string | null | undefined,
 ) => {
 	if (scheduleType !== "server" && scheduleType !== "dokploy-server") return;
+	if (IS_MANAGED_PAAS && !(await isPlatformAdmin(ctx.user.id))) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message: "Host-level schedules are managed by the platform",
+		});
+	}
 
 	if (scheduleType === "dokploy-server" && IS_CLOUD) {
 		throw new TRPCError({

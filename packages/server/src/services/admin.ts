@@ -7,7 +7,7 @@ import {
 } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
-import { IS_CLOUD } from "../constants";
+import { IS_CLOUD, IS_HOSTED } from "../constants";
 import { getWebServerSettings } from "./web-server-settings";
 
 export const findUserById = async (userId: string) => {
@@ -105,8 +105,12 @@ export const removeUserById = async (userId: string) => {
 };
 
 export const getDokployUrl = async () => {
-	if (IS_CLOUD) {
-		return "https://app.dokploy.com";
+	if (IS_HOSTED) {
+		return (
+			process.env.PLATFORM_URL ||
+			process.env.BETTER_AUTH_URL ||
+			(IS_CLOUD ? "https://app.dokploy.com" : "http://localhost:3000")
+		);
 	}
 	const settings = await getWebServerSettings();
 

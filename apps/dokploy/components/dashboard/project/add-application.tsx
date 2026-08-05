@@ -73,16 +73,21 @@ export const AddApplication = ({ environmentId, projectName }: Props) => {
 	const { data: isCloud } = api.settings.isCloud.useQuery();
 	const { data: webServerSettings } =
 		api.settings.getWebServerSettings.useQuery();
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
+	const isManaged = platformCapabilities?.mode === "managed";
 	const showLocalOption = !isCloud && !webServerSettings?.remoteServersOnly;
 	const [visible, setVisible] = useState(false);
 	const slug = slugify(projectName);
-	const { data: servers } = api.server.withSSHKey.useQuery();
+	const { data: servers } = api.server.withSSHKey.useQuery(undefined, {
+		enabled: platformCapabilities?.mode !== "managed",
+	});
 
 	const hasServers = servers && servers.length > 0;
 	// Show dropdown logic based on cloud environment
 	// Cloud: show only if there are remote servers (no Dokploy option)
 	// Self-hosted: show only if there are remote servers (Dokploy is default, hide if no remote servers)
-	const shouldShowServerDropdown = hasServers;
+	const shouldShowServerDropdown = !isManaged && hasServers;
 
 	const { mutateAsync, isPending, error, isError } =
 		api.application.create.useMutation();

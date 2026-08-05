@@ -2,13 +2,18 @@ import {
 	createCertificate,
 	findCertificateById,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
 	removeCertificateById,
 	updateCertificate,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
-import { createTRPCRouter, withPermission } from "@/server/api/trpc";
+import {
+	createTRPCRouter,
+	platformAdminProcedure,
+	withPermission,
+} from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
 import {
 	apiCreateCertificate,
@@ -17,8 +22,21 @@ import {
 	certificates,
 } from "@/server/db/schema";
 
+const certificateCreateProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: withPermission("certificate", "create");
+const certificateReadProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: withPermission("certificate", "read");
+const certificateDeleteProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: withPermission("certificate", "delete");
+const certificateUpdateProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: withPermission("certificate", "update");
+
 export const certificateRouter = createTRPCRouter({
-	create: withPermission("certificate", "create")
+	create: certificateCreateProcedure
 		.input(apiCreateCertificate)
 		.mutation(async ({ input, ctx }) => {
 			if (IS_CLOUD && !input.serverId) {
@@ -40,7 +58,7 @@ export const certificateRouter = createTRPCRouter({
 			return cert;
 		}),
 
-	one: withPermission("certificate", "read")
+	one: certificateReadProcedure
 		.input(apiFindCertificate)
 		.query(async ({ input, ctx }) => {
 			const certificates = await findCertificateById(input.certificateId);
@@ -52,7 +70,7 @@ export const certificateRouter = createTRPCRouter({
 			}
 			return certificates;
 		}),
-	remove: withPermission("certificate", "delete")
+	remove: certificateDeleteProcedure
 		.input(apiFindCertificate)
 		.mutation(async ({ input, ctx }) => {
 			const certificates = await findCertificateById(input.certificateId);
@@ -71,7 +89,7 @@ export const certificateRouter = createTRPCRouter({
 			await removeCertificateById(input.certificateId);
 			return true;
 		}),
-	all: withPermission("certificate", "read").query(async ({ ctx }) => {
+	all: certificateReadProcedure.query(async ({ ctx }) => {
 		return await db.query.certificates.findMany({
 			where: eq(certificates.organizationId, ctx.session.activeOrganizationId),
 			with: {
@@ -79,7 +97,7 @@ export const certificateRouter = createTRPCRouter({
 			},
 		});
 	}),
-	update: withPermission("certificate", "update")
+	update: certificateUpdateProcedure
 		.input(apiUpdateCertificate)
 		.mutation(async ({ input, ctx }) => {
 			const certificate = await findCertificateById(input.certificateId);

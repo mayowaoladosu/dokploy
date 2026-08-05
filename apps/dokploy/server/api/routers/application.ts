@@ -1,6 +1,8 @@
 import {
+	assertNoManagedServerSelection,
 	clearOldDeployments,
 	createApplication,
+	createDomain,
 	deleteAllMiddlewares,
 	findApplicationById,
 	findEnvironmentById,
@@ -9,8 +11,10 @@ import {
 	getAccessibleServerIds,
 	getApplicationStats,
 	getContainerLogs,
+	getManagedApplicationDomain,
 	getWebServerSettings,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
 	mechanizeDockerContainer,
 	readConfig,
 	readRemoteConfig,
@@ -87,9 +91,11 @@ export const applicationRouter = createTRPCRouter({
 				const project = await findProjectById(environment.projectId);
 
 				await checkServiceAccess(ctx, project.projectId, "create");
+				assertNoManagedServerSelection(input.serverId);
 
 				const webServerSettings = await getWebServerSettings();
 				if (
+					!IS_MANAGED_PAAS &&
 					(IS_CLOUD || webServerSettings?.remoteServersOnly) &&
 					!input.serverId
 				) {
@@ -106,7 +112,7 @@ export const applicationRouter = createTRPCRouter({
 					});
 				}
 
-				if (input.serverId) {
+				if (!IS_MANAGED_PAAS && input.serverId) {
 					const accessibleIds = await getAccessibleServerIds(ctx.session);
 					if (!accessibleIds.has(input.serverId)) {
 						throw new TRPCError({
@@ -117,6 +123,27 @@ export const applicationRouter = createTRPCRouter({
 				}
 
 				const newApplication = await createApplication(input);
+				const managedDomain = getManagedApplicationDomain(
+					newApplication.appName,
+				);
+				if (managedDomain) {
+					try {
+						await createDomain({
+							host: managedDomain,
+							https: true,
+							certificateType: "letsencrypt",
+							domainType: "application",
+							applicationId: newApplication.applicationId,
+						});
+					} catch (error) {
+						await db
+							.delete(applications)
+							.where(
+								eq(applications.applicationId, newApplication.applicationId),
+							);
+						throw error;
+					}
+				}
 
 				await addNewService(ctx, newApplication.applicationId);
 				await audit(ctx, {
@@ -125,7 +152,16 @@ export const applicationRouter = createTRPCRouter({
 					resourceId: newApplication.applicationId,
 					resourceName: newApplication.appName,
 				});
-				return newApplication;
+				return IS_MANAGED_PAAS
+					? {
+							...newApplication,
+							serverId: null,
+							buildServerId: null,
+							registryId: null,
+							buildRegistryId: null,
+							rollbackRegistryId: null,
+						}
+					: newApplication;
 			} catch (error: unknown) {
 				console.log("error", error);
 				if (error instanceof TRPCError) {
@@ -186,6 +222,12 @@ export const applicationRouter = createTRPCRouter({
 
 			return {
 				...application,
+				serverId: IS_MANAGED_PAAS ? null : application.serverId,
+				buildServerId: IS_MANAGED_PAAS ? null : application.buildServerId,
+				server: IS_MANAGED_PAAS ? null : application.server,
+				registry: IS_MANAGED_PAAS ? null : application.registry,
+				buildRegistry: IS_MANAGED_PAAS ? null : application.buildRegistry,
+				rollbackRegistry: IS_MANAGED_PAAS ? null : application.rollbackRegistry,
 				hasGitProviderAccess,
 				unauthorizedProvider,
 			};
@@ -400,6 +442,12 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});
+			if (IS_MANAGED_PAAS && input.buildType !== "railpack") {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Railpack is the managed platform build engine",
+				});
+			}
 			await updateApplication(input.applicationId, {
 				buildType: input.buildType,
 				dockerfile: input.dockerfile,
@@ -530,6 +578,12 @@ export const applicationRouter = createTRPCRouter({
 	saveDockerProvider: protectedProcedure
 		.input(apiSaveDockerProvider)
 		.mutation(async ({ input, ctx }) => {
+			if (IS_MANAGED_PAAS) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Managed applications are built from source with Railpack",
+				});
+			}
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});
@@ -650,7 +704,20 @@ export const applicationRouter = createTRPCRouter({
 				service: ["create"],
 			});
 
-			if (input.buildServerId) {
+			if (
+				IS_MANAGED_PAAS &&
+				(input.buildServerId !== undefined ||
+					input.buildRegistryId !== undefined ||
+					input.registryId !== undefined ||
+					input.rollbackRegistryId !== undefined)
+			) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Build compute and registries are managed by the platform",
+				});
+			}
+
+			if (!IS_MANAGED_PAAS && input.buildServerId) {
 				const accessibleIds = await getAccessibleServerIds(ctx.session);
 				if (!accessibleIds.has(input.buildServerId)) {
 					throw new TRPCError({
@@ -783,6 +850,12 @@ export const applicationRouter = createTRPCRouter({
 	readTraefikConfig: protectedProcedure
 		.input(apiFindOneApplication)
 		.query(async ({ input, ctx }) => {
+			if (IS_MANAGED_PAAS) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Routing configuration is managed by the platform",
+				});
+			}
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				traefikFiles: ["read"],
 			});
@@ -808,6 +881,12 @@ export const applicationRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
+			if (IS_MANAGED_PAAS) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Managed applications are built from a Git source",
+				});
+			}
 			const zipFile = input.zip;
 			const applicationId = input.applicationId;
 			const dropBuildPath = input.dropBuildPath ?? null;
@@ -858,6 +937,12 @@ export const applicationRouter = createTRPCRouter({
 	updateTraefikConfig: protectedProcedure
 		.input(z.object({ applicationId: z.string(), traefikConfig: z.string() }))
 		.mutation(async ({ input, ctx }) => {
+			if (IS_MANAGED_PAAS) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Routing configuration is managed by the platform",
+				});
+			}
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				traefikFiles: ["write"],
 			});
@@ -882,7 +967,7 @@ export const applicationRouter = createTRPCRouter({
 	readAppMonitoring: withPermission("monitoring", "read")
 		.input(apiFindMonitoringStats)
 		.query(async ({ input }) => {
-			if (IS_CLOUD) {
+			if (IS_CLOUD || IS_MANAGED_PAAS) {
 				throw new TRPCError({
 					code: "UNAUTHORIZED",
 					message: "Functionality not available in cloud version",

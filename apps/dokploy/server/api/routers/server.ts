@@ -9,6 +9,9 @@ import {
 	getPublicIpWithFallback,
 	haveActiveServices,
 	IS_CLOUD,
+	IS_HOSTED,
+	IS_MANAGED_PAAS,
+	isPlatformAdmin,
 	redactServerSshKey,
 	removeDeploymentsByServerId,
 	serverAudit,
@@ -26,6 +29,7 @@ import { z } from "zod";
 import { updateServersBasedOnQuantity } from "@/pages/api/stripe/webhook";
 import {
 	createTRPCRouter,
+	platformAdminProcedure,
 	protectedProcedure,
 	withPermission,
 } from "@/server/api/trpc";
@@ -50,13 +54,20 @@ import {
 import { applyDockerCleanupSchedule } from "@/server/utils/docker-cleanup";
 
 export const serverRouter = createTRPCRouter({
-	create: withPermission("server", "create")
+	create: (IS_MANAGED_PAAS
+		? platformAdminProcedure
+		: withPermission("server", "create")
+	)
 		.input(apiCreateServer)
 		.mutation(async ({ ctx, input }) => {
 			try {
 				const user = await findUserById(ctx.user.ownerId);
 				const servers = await findServersByUserId(user.id);
-				if (IS_CLOUD && servers.length >= user.serversQuantity) {
+				if (
+					IS_CLOUD &&
+					!IS_MANAGED_PAAS &&
+					servers.length >= user.serversQuantity
+				) {
 					throw new TRPCError({
 						code: "BAD_REQUEST",
 						message: "You cannot create more servers",
@@ -87,7 +98,10 @@ export const serverRouter = createTRPCRouter({
 			}
 		}),
 
-	one: withPermission("server", "read")
+	one: (IS_MANAGED_PAAS
+		? platformAdminProcedure
+		: withPermission("server", "read")
+	)
 		.input(apiFindOneServer)
 		.query(async ({ input, ctx }) => {
 			const server = await findServerById(input.serverId);
@@ -108,14 +122,20 @@ export const serverRouter = createTRPCRouter({
 
 			return redactServerSshKey(server);
 		}),
-	getDefaultCommand: withPermission("server", "read")
+	getDefaultCommand: (IS_MANAGED_PAAS
+		? platformAdminProcedure
+		: withPermission("server", "read")
+	)
 		.input(apiFindOneServer)
 		.query(async ({ input }) => {
 			const server = await findServerById(input.serverId);
 			const isBuildServer = server.serverType === "build";
 			return defaultCommand(isBuildServer);
 		}),
-	all: withPermission("server", "read").query(async ({ ctx }) => {
+	all: (IS_MANAGED_PAAS
+		? platformAdminProcedure
+		: withPermission("server", "read")
+	).query(async ({ ctx }) => {
 		const accessibleIds = await getAccessibleServerIds(ctx.session);
 
 		const result = await db
@@ -137,7 +157,10 @@ export const serverRouter = createTRPCRouter({
 
 		return result.filter((s) => accessibleIds.has(s.serverId));
 	}),
-	allForPermissions: withPermission("member", "update")
+	allForPermissions: (IS_MANAGED_PAAS
+		? platformAdminProcedure
+		: withPermission("member", "update")
+	)
 		.use(async ({ ctx, next }) => {
 			const licensed = await hasValidLicense(ctx.session.activeOrganizationId);
 			if (!licensed) {
@@ -161,6 +184,9 @@ export const serverRouter = createTRPCRouter({
 			});
 		}),
 	count: protectedProcedure.query(async ({ ctx }) => {
+		if (IS_MANAGED_PAAS && !(await isPlatformAdmin(ctx.user.id))) {
+			return 0;
+		}
 		const organizations = await db.query.organization.findMany({
 			where: eq(organization.ownerId, ctx.user.id),
 			with: {
@@ -172,7 +198,13 @@ export const serverRouter = createTRPCRouter({
 
 		return servers.length ?? 0;
 	}),
-	withSSHKey: withPermission("server", "read").query(async ({ ctx }) => {
+	withSSHKey: (IS_MANAGED_PAAS
+		? protectedProcedure
+		: withPermission("server", "read")
+	).query(async ({ ctx }) => {
+		if (IS_MANAGED_PAAS && !(await isPlatformAdmin(ctx.user.id))) {
+			return [];
+		}
 		const accessibleIds = await getAccessibleServerIds(ctx.session);
 
 		const result = await db.query.server.findMany({
@@ -192,7 +224,13 @@ export const serverRouter = createTRPCRouter({
 		});
 		return result.filter((s) => accessibleIds.has(s.serverId));
 	}),
-	buildServers: withPermission("server", "read").query(async ({ ctx }) => {
+	buildServers: (IS_MANAGED_PAAS
+		? protectedProcedure
+		: withPermission("server", "read")
+	).query(async ({ ctx }) => {
+		if (IS_MANAGED_PAAS && !(await isPlatformAdmin(ctx.user.id))) {
+			return [];
+		}
 		const accessibleIds = await getAccessibleServerIds(ctx.session);
 
 		const result = await db.query.server.findMany({
@@ -212,7 +250,10 @@ export const serverRouter = createTRPCRouter({
 		});
 		return result.filter((s) => accessibleIds.has(s.serverId));
 	}),
-	setup: withPermission("server", "create")
+	setup: (IS_MANAGED_PAAS
+		? platformAdminProcedure
+		: withPermission("server", "create")
+	)
 		.input(apiFindOneServer)
 		.mutation(async ({ input, ctx }) => {
 			try {
@@ -235,7 +276,10 @@ export const serverRouter = createTRPCRouter({
 				throw error;
 			}
 		}),
-	setupWithLogs: withPermission("server", "create")
+	setupWithLogs: (IS_MANAGED_PAAS
+		? platformAdminProcedure
+		: withPermission("server", "create")
+	)
 		.meta({
 			openapi: {
 				path: "/deploy/server-with-logs",
@@ -263,7 +307,10 @@ export const serverRouter = createTRPCRouter({
 				throw error;
 			}
 		}),
-	validate: withPermission("server", "read")
+	validate: (IS_MANAGED_PAAS
+		? platformAdminProcedure
+		: withPermission("server", "read")
+	)
 		.input(apiFindOneServer)
 		.query(async ({ input, ctx }) => {
 			try {
@@ -311,7 +358,10 @@ export const serverRouter = createTRPCRouter({
 			}
 		}),
 
-	security: withPermission("server", "read")
+	security: (IS_MANAGED_PAAS
+		? platformAdminProcedure
+		: withPermission("server", "read")
+	)
 		.input(apiFindOneServer)
 		.query(async ({ input, ctx }) => {
 			try {
@@ -361,7 +411,10 @@ export const serverRouter = createTRPCRouter({
 				});
 			}
 		}),
-	setupMonitoring: withPermission("server", "create")
+	setupMonitoring: (IS_MANAGED_PAAS
+		? platformAdminProcedure
+		: withPermission("server", "create")
+	)
 		.input(apiUpdateServerMonitoring)
 		.mutation(async ({ input, ctx }) => {
 			try {
@@ -409,7 +462,10 @@ export const serverRouter = createTRPCRouter({
 				throw error;
 			}
 		}),
-	remove: withPermission("server", "delete")
+	remove: (IS_MANAGED_PAAS
+		? platformAdminProcedure
+		: withPermission("server", "delete")
+	)
 		.input(apiRemoveServer)
 		.mutation(async ({ input, ctx }) => {
 			try {
@@ -438,7 +494,7 @@ export const serverRouter = createTRPCRouter({
 				await removeDeploymentsByServerId(currentServer);
 				await deleteServer(input.serverId);
 
-				if (IS_CLOUD) {
+				if (IS_CLOUD && !IS_MANAGED_PAAS) {
 					const admin = await findUserById(ctx.user.ownerId);
 
 					await updateServersBasedOnQuantity(admin.id, admin.serversQuantity);
@@ -449,7 +505,10 @@ export const serverRouter = createTRPCRouter({
 				throw error;
 			}
 		}),
-	update: withPermission("server", "create")
+	update: (IS_MANAGED_PAAS
+		? platformAdminProcedure
+		: withPermission("server", "create")
+	)
 		.input(apiUpdateServer)
 		.mutation(async ({ input, ctx }) => {
 			try {
@@ -488,7 +547,10 @@ export const serverRouter = createTRPCRouter({
 				throw error;
 			}
 		}),
-	updateBuildsConcurrency: withPermission("server", "create")
+	updateBuildsConcurrency: (IS_MANAGED_PAAS
+		? platformAdminProcedure
+		: withPermission("server", "create")
+	)
 		.input(apiUpdateServerBuildsConcurrency)
 		.mutation(async ({ input, ctx }) => {
 			const currentServer = await findServerById(input.serverId);
@@ -503,14 +565,14 @@ export const serverRouter = createTRPCRouter({
 			});
 		}),
 	publicIp: protectedProcedure.query(async () => {
-		if (IS_CLOUD) {
+		if (IS_HOSTED) {
 			return "";
 		}
 		const ip = await getPublicIpWithFallback();
 		return ip;
 	}),
 	getServerTime: protectedProcedure.query(() => {
-		if (IS_CLOUD) {
+		if (IS_HOSTED) {
 			return null;
 		}
 		return {
@@ -518,7 +580,10 @@ export const serverRouter = createTRPCRouter({
 			timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
 		};
 	}),
-	getServerMetrics: withPermission("monitoring", "read")
+	getServerMetrics: (IS_MANAGED_PAAS
+		? platformAdminProcedure
+		: withPermission("monitoring", "read")
+	)
 		.input(
 			z.object({
 				url: z.string(),

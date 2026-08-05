@@ -1,4 +1,4 @@
-import { IS_CLOUD } from "@dokploy/server/constants";
+import { IS_CLOUD, IS_MANAGED_PAAS } from "@dokploy/server/constants";
 import {
 	apiCreateAi,
 	apiSaveAiCustomProviders,
@@ -6,6 +6,7 @@ import {
 	deploySuggestionSchema,
 } from "@dokploy/server/db/schema/ai";
 import {
+	assertNoManagedServerSelection,
 	createDomain,
 	createMount,
 	findEnvironmentById,
@@ -24,6 +25,7 @@ import {
 	addNewService,
 	checkServiceAccess,
 } from "@dokploy/server/services/permission";
+import { isPlatformAdmin } from "@dokploy/server/services/platform";
 import { findProjectById } from "@dokploy/server/services/project";
 import {
 	getProviderHeaders,
@@ -36,11 +38,16 @@ import { generateText } from "ai";
 import { z } from "zod";
 import { slugify } from "@/lib/slug";
 import {
-	adminProcedure,
 	createTRPCRouter,
+	adminProcedure as organizationAdminProcedure,
+	platformAdminProcedure,
 	protectedProcedure,
 } from "@/server/api/trpc";
 import { generatePassword } from "@/templates/utils";
+
+const adminProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: organizationAdminProcedure;
 
 export const aiRouter = createTRPCRouter({
 	one: adminProcedure
@@ -49,7 +56,7 @@ export const aiRouter = createTRPCRouter({
 			return await getAiSettingById(input.aiId);
 		}),
 
-	getModels: protectedProcedure
+	getModels: adminProcedure
 		.input(z.object({ apiUrl: z.string().min(1), apiKey: z.string() }))
 		.query(async ({ input }) => {
 			try {
@@ -283,7 +290,7 @@ ${input.logs}`,
 			}
 		}),
 
-	testConnection: protectedProcedure
+	testConnection: adminProcedure
 		.input(
 			z.object({
 				apiUrl: z.string().min(1),
@@ -327,6 +334,7 @@ ${input.logs}`,
 		)
 		.mutation(async ({ ctx, input }) => {
 			try {
+				assertNoManagedServerSelection(input.serverId);
 				return await suggestVariants({
 					...input,
 					organizationId: ctx.session.activeOrganizationId,
@@ -341,11 +349,18 @@ ${input.logs}`,
 	deploy: protectedProcedure
 		.input(deploySuggestionSchema)
 		.mutation(async ({ ctx, input }) => {
+			if (IS_MANAGED_PAAS && !(await isPlatformAdmin(ctx.user.id))) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Compose deployments are managed by the platform",
+				});
+			}
 			const environment = await findEnvironmentById(input.environmentId);
 			const project = await findProjectById(environment.projectId);
 			await checkServiceAccess(ctx, environment.projectId, "create");
+			assertNoManagedServerSelection(input.serverId);
 
-			if (IS_CLOUD && !input.serverId) {
+			if (IS_CLOUD && !IS_MANAGED_PAAS && !input.serverId) {
 				throw new TRPCError({
 					code: "UNAUTHORIZED",
 					message: "You need to use a server to create a compose",

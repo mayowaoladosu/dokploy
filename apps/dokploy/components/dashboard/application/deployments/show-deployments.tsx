@@ -79,6 +79,9 @@ export const ShowDeployments = ({
 		);
 
 	const { data: isCloud } = api.settings.isCloud.useQuery();
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
+	const isManaged = platformCapabilities?.mode === "managed";
 
 	const { mutateAsync: rollback, isPending: isRollingBack } =
 		api.rollback.rollback.useMutation();
@@ -168,7 +171,7 @@ export const ShowDeployments = ({
 					{(type === "application" || type === "compose") && (
 						<CancelQueues id={id} type={type} />
 					)}
-					{type === "application" && (
+					{!isManaged && type === "application" && (
 						<ShowRollbackSettings applicationId={id}>
 							<Button variant="outline">
 								Configure Rollbacks <Settings className="size-4" />
@@ -501,6 +504,7 @@ export const ShowDeployments = ({
 					</div>
 				)}
 				<ShowDeployment
+					deploymentId={activeLog?.deploymentId}
 					serverId={activeLog?.buildServerId || serverId}
 					open={Boolean(activeLog && activeLog.logPath !== null)}
 					onClose={() => setActiveLog(null)}

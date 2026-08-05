@@ -4,6 +4,7 @@ import {
 	execFileAsync,
 	findRegistryById,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
 	removeRegistry,
 	safeDockerLoginCommand,
 	updateRegistry,
@@ -21,9 +22,23 @@ import {
 	apiUpdateRegistry,
 	registry,
 } from "@/server/db/schema";
-import { createTRPCRouter, withPermission } from "../trpc";
+import {
+	createTRPCRouter,
+	platformAdminProcedure,
+	withPermission,
+} from "../trpc";
+
+const registryCreateProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: withPermission("registry", "create");
+const registryReadProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: withPermission("registry", "read");
+const registryDeleteProcedure = IS_MANAGED_PAAS
+	? platformAdminProcedure
+	: withPermission("registry", "delete");
 export const registryRouter = createTRPCRouter({
-	create: withPermission("registry", "create")
+	create: registryCreateProcedure
 		.input(apiCreateRegistry)
 		.mutation(async ({ ctx, input }) => {
 			const reg = await createRegistry(input, ctx.session.activeOrganizationId);
@@ -35,7 +50,7 @@ export const registryRouter = createTRPCRouter({
 			});
 			return reg;
 		}),
-	remove: withPermission("registry", "delete")
+	remove: registryDeleteProcedure
 		.input(apiRemoveRegistry)
 		.mutation(async ({ ctx, input }) => {
 			const registry = await findRegistryById(input.registryId);
@@ -53,7 +68,7 @@ export const registryRouter = createTRPCRouter({
 			});
 			return await removeRegistry(input.registryId);
 		}),
-	update: withPermission("registry", "create")
+	update: registryCreateProcedure
 		.input(apiUpdateRegistry)
 		.mutation(async ({ input, ctx }) => {
 			const { registryId, ...rest } = input;
@@ -83,13 +98,13 @@ export const registryRouter = createTRPCRouter({
 			});
 			return true;
 		}),
-	all: withPermission("registry", "read").query(async ({ ctx }) => {
+	all: registryReadProcedure.query(async ({ ctx }) => {
 		const registryResponse = await db.query.registry.findMany({
 			where: eq(registry.organizationId, ctx.session.activeOrganizationId),
 		});
 		return registryResponse;
 	}),
-	one: withPermission("registry", "read")
+	one: registryReadProcedure
 		.input(apiFindOneRegistry)
 		.query(async ({ input, ctx }) => {
 			const registry = await findRegistryById(input.registryId);
@@ -101,7 +116,7 @@ export const registryRouter = createTRPCRouter({
 			}
 			return registry;
 		}),
-	testRegistry: withPermission("registry", "read")
+	testRegistry: registryReadProcedure
 		.input(apiTestRegistry)
 		.mutation(async ({ input }) => {
 			try {
@@ -147,7 +162,7 @@ export const registryRouter = createTRPCRouter({
 				});
 			}
 		}),
-	testRegistryById: withPermission("registry", "read")
+	testRegistryById: registryReadProcedure
 		.input(apiTestRegistryById)
 		.mutation(async ({ input, ctx }) => {
 			try {

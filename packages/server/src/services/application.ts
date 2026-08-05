@@ -1,4 +1,4 @@
-import { docker } from "@dokploy/server/constants";
+import { docker, IS_MANAGED_PAAS } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
 import {
 	type apiCreateApplication,
@@ -47,6 +47,11 @@ import {
 } from "./github";
 import { generateApplyPatchesCommand } from "./patch";
 import {
+	assertManagedResourceLimits,
+	getManagedResourceDefaults,
+	resolveManagedCompute,
+} from "./platform";
+import {
 	findPreviewDeploymentById,
 	updatePreviewDeployment,
 } from "./preview-deployment";
@@ -57,6 +62,10 @@ export const createApplication = async (
 	input: z.infer<typeof apiCreateApplication>,
 ) => {
 	const appName = buildAppName("app", input.appName);
+	const compute = await resolveManagedCompute({
+		kind: "application",
+		requestedServerId: input.serverId,
+	});
 
 	const valid = await validUniqueServerAppName(appName);
 	if (!valid) {
@@ -71,7 +80,10 @@ export const createApplication = async (
 			.insert(applications)
 			.values({
 				...input,
+				...compute,
+				...getManagedResourceDefaults(),
 				appName,
+				...(IS_MANAGED_PAAS ? { buildType: "railpack" as const } : {}),
 			})
 			.returning()
 			.then((value) => value[0]);
@@ -148,6 +160,7 @@ export const updateApplication = async (
 	applicationId: string,
 	applicationData: Partial<Application>,
 ) => {
+	assertManagedResourceLimits(applicationData);
 	const { appName, ...rest } = applicationData;
 	const application = await db
 		.update(applications)

@@ -24,13 +24,18 @@ const examples = [
 
 export const StepOne = ({ setTemplateInfo, templateInfo }: any) => {
 	// Get servers from the API
-	const { data: servers } = api.server.withSSHKey.useQuery();
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
+	const { data: servers } = api.server.withSSHKey.useQuery(undefined, {
+		enabled: platformCapabilities?.mode !== "managed",
+	});
 	const { data: isCloud } = api.settings.isCloud.useQuery();
 	const hasServers = servers && servers.length > 0;
 	// Show dropdown logic based on cloud environment
 	// Cloud: show only if there are remote servers (no Dokploy option)
 	// Self-hosted: show only if there are remote servers (Dokploy is default, hide if no remote servers)
-	const shouldShowServerDropdown = hasServers;
+	const shouldShowServerDropdown =
+		platformCapabilities?.mode !== "managed" && hasServers;
 
 	const handleExampleClick = (example: string) => {
 		setTemplateInfo({ ...templateInfo, userInput: example });

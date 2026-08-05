@@ -117,7 +117,12 @@ export const AddTemplate = ({ environmentId, baseUrl }: Props) => {
 		},
 	);
 	const { data: isCloud } = api.settings.isCloud.useQuery();
-	const { data: servers } = api.server.withSSHKey.useQuery();
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
+	const { data: servers } = api.server.withSSHKey.useQuery(undefined, {
+		enabled: platformCapabilities?.mode !== "managed",
+	});
+	const isManaged = platformCapabilities?.mode === "managed";
 	const { data: tags, isPending: isLoadingTags } = api.compose.getTags.useQuery(
 		{ baseUrl: customBaseUrl },
 		{
@@ -147,7 +152,7 @@ export const AddTemplate = ({ environmentId, baseUrl }: Props) => {
 
 				return { previousBookmarks };
 			},
-			onError: (err, variables, context) => {
+			onError: (_err, _variables, context) => {
 				if (context?.previousBookmarks) {
 					utils.user.getBookmarkedTemplates.setData(
 						undefined,
@@ -185,7 +190,7 @@ export const AddTemplate = ({ environmentId, baseUrl }: Props) => {
 	// Show dropdown logic based on cloud environment
 	// Cloud: show only if there are remote servers (no Dokploy option)
 	// Self-hosted: show only if there are remote servers (Dokploy is default, hide if no remote servers)
-	const shouldShowServerDropdown = hasServers;
+	const shouldShowServerDropdown = !isManaged && hasServers;
 
 	const handleToggleBookmark = async (
 		e: React.MouseEvent,

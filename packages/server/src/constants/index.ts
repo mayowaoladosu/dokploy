@@ -4,6 +4,22 @@ import Docker from "dockerode";
 
 export const IS_CLOUD = process.env.IS_CLOUD === "true";
 
+export type PlatformMode = "self-hosted" | "managed";
+
+/**
+ * Managed mode turns Dokploy into a PaaS control plane: customers deploy
+ * workloads but cannot provision or operate the underlying compute nodes.
+ * Self-hosted remains the default for contributors and upstream-compatible
+ * installations; the Vlyv container and environment examples enable managed
+ * mode explicitly.
+ */
+export const PLATFORM_MODE: PlatformMode =
+	process.env.PLATFORM_MODE?.toLowerCase() === "managed"
+		? "managed"
+		: "self-hosted";
+export const IS_MANAGED_PAAS = PLATFORM_MODE === "managed";
+export const IS_HOSTED = IS_CLOUD || IS_MANAGED_PAAS;
+
 export const DOKPLOY_DOCKER_API_VERSION =
 	process.env.DOKPLOY_DOCKER_API_VERSION;
 export const DOKPLOY_DOCKER_HOST = process.env.DOKPLOY_DOCKER_HOST;

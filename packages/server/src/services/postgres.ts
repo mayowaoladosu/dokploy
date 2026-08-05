@@ -13,6 +13,11 @@ import { TRPCError } from "@trpc/server";
 import { eq, getTableColumns } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
+import {
+	assertManagedResourceLimits,
+	getManagedResourceDefaults,
+	resolveManagedCompute,
+} from "./platform";
 import { validUniqueServerAppName } from "./project";
 
 export function getMountPath(dockerImage: string): string {
@@ -34,6 +39,10 @@ export const createPostgres = async (
 	input: z.infer<typeof apiCreatePostgres>,
 ) => {
 	const appName = buildAppName("postgres", input.appName);
+	const compute = await resolveManagedCompute({
+		kind: "service",
+		requestedServerId: input.serverId,
+	});
 
 	const valid = await validUniqueServerAppName(appName);
 	if (!valid) {
@@ -47,6 +56,8 @@ export const createPostgres = async (
 		.insert(postgres)
 		.values({
 			...input,
+			...compute,
+			...getManagedResourceDefaults(),
 			databasePassword: input.databasePassword
 				? input.databasePassword
 				: generatePassword(),
@@ -120,6 +131,7 @@ export const updatePostgresById = async (
 	postgresId: string,
 	postgresData: Partial<Postgres>,
 ) => {
+	assertManagedResourceLimits(postgresData);
 	const { appName, ...rest } = postgresData;
 	const result = await db
 		.update(postgres)

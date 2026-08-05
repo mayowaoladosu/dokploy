@@ -61,7 +61,7 @@ export const DockerLogsId: React.FC<Props> = ({
 			serverId: serverId ?? undefined,
 		},
 		{
-			enabled: !!containerId,
+			enabled: !!containerId && !serviceId,
 		},
 	);
 
@@ -241,7 +241,7 @@ export const DockerLogsId: React.FC<Props> = ({
 		const blob = new Blob([logContent], { type: "text/plain" });
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement("a");
-		const appName = data.Name.replace("/", "") || "app";
+		const appName = data?.Name?.replace("/", "") || "app";
 		const isoDate = new Date().toISOString();
 		a.href = url;
 		a.download = `${appName}-${isoDate.slice(0, 10).replace(/-/g, "")}_${isoDate

@@ -49,6 +49,7 @@ export const ShowDockerLogsCompose = ({
 			appName,
 			appType,
 			serverId,
+			serviceId,
 		},
 		{
 			enabled: !!appName,

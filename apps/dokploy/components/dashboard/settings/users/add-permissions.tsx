@@ -201,6 +201,9 @@ export const AddUserPermissions = ({ userId, role }: Props) => {
 	});
 	const { data: haveValidLicense } =
 		api.licenseKey.haveValidLicenseKey.useQuery();
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
+	const isManaged = platformCapabilities?.mode === "managed";
 
 	const { data: gitProviders } = api.gitProvider.allForPermissions.useQuery(
 		undefined,
@@ -210,7 +213,7 @@ export const AddUserPermissions = ({ userId, role }: Props) => {
 	);
 
 	const { data: servers } = api.server.allForPermissions.useQuery(undefined, {
-		enabled: isOpen && !!haveValidLicense,
+		enabled: isOpen && !!haveValidLicense && !isManaged,
 	});
 
 	const { data, refetch } = api.user.one.useQuery(
@@ -964,79 +967,80 @@ export const AddUserPermissions = ({ userId, role }: Props) => {
 								/>
 							</div>
 						)}
-						{haveValidLicense ? (
-							<FormField
-								control={form.control}
-								name="accessedServers"
-								render={() => (
-									<FormItem className="md:col-span-2">
-										<div className="mb-4">
-											<FormLabel className="text-base">Servers</FormLabel>
-											<FormDescription>
-												Select the Servers that the user can access
-											</FormDescription>
-										</div>
-										{servers?.length === 0 && (
-											<p className="text-sm text-muted-foreground">
-												No servers found
-											</p>
-										)}
-										<div className="grid md:grid-cols-1 gap-2">
-											{servers?.map((s) => (
-												<FormField
-													key={s.serverId}
-													control={form.control}
-													name="accessedServers"
-													render={({ field }) => (
-														<FormItem className="flex flex-row items-center space-x-3 space-y-0 rounded-lg border p-3">
-															<FormControl>
-																<Checkbox
-																	checked={field.value?.includes(s.serverId)}
-																	onCheckedChange={(checked) => {
-																		if (checked) {
-																			field.onChange([
-																				...(field.value || []),
-																				s.serverId,
-																			]);
-																		} else {
-																			field.onChange(
-																				field.value?.filter(
-																					(v) => v !== s.serverId,
-																				),
-																			);
-																		}
-																	}}
-																/>
-															</FormControl>
-															<div className="flex items-center gap-2">
-																<FormLabel className="text-sm cursor-pointer">
-																	{s.name}
-																</FormLabel>
-																<span className="text-xs text-muted-foreground">
-																	({s.ipAddress})
-																</span>
-																<span className="text-xs text-muted-foreground capitalize">
-																	{s.serverType}
-																</span>
-															</div>
-														</FormItem>
-													)}
-												/>
-											))}
-										</div>
-										<FormMessage />
-									</FormItem>
-								)}
-							/>
-						) : (
-							<div className="md:col-span-2">
-								<EnterpriseFeatureLocked
-									compact
-									title="Server Assignment"
-									description="Assign specific Servers to users with an Enterprise license."
+						{!isManaged &&
+							(haveValidLicense ? (
+								<FormField
+									control={form.control}
+									name="accessedServers"
+									render={() => (
+										<FormItem className="md:col-span-2">
+											<div className="mb-4">
+												<FormLabel className="text-base">Servers</FormLabel>
+												<FormDescription>
+													Select the Servers that the user can access
+												</FormDescription>
+											</div>
+											{servers?.length === 0 && (
+												<p className="text-sm text-muted-foreground">
+													No servers found
+												</p>
+											)}
+											<div className="grid md:grid-cols-1 gap-2">
+												{servers?.map((s) => (
+													<FormField
+														key={s.serverId}
+														control={form.control}
+														name="accessedServers"
+														render={({ field }) => (
+															<FormItem className="flex flex-row items-center space-x-3 space-y-0 rounded-lg border p-3">
+																<FormControl>
+																	<Checkbox
+																		checked={field.value?.includes(s.serverId)}
+																		onCheckedChange={(checked) => {
+																			if (checked) {
+																				field.onChange([
+																					...(field.value || []),
+																					s.serverId,
+																				]);
+																			} else {
+																				field.onChange(
+																					field.value?.filter(
+																						(v) => v !== s.serverId,
+																					),
+																				);
+																			}
+																		}}
+																	/>
+																</FormControl>
+																<div className="flex items-center gap-2">
+																	<FormLabel className="text-sm cursor-pointer">
+																		{s.name}
+																	</FormLabel>
+																	<span className="text-xs text-muted-foreground">
+																		({s.ipAddress})
+																	</span>
+																	<span className="text-xs text-muted-foreground capitalize">
+																		{s.serverType}
+																	</span>
+																</div>
+															</FormItem>
+														)}
+													/>
+												))}
+											</div>
+											<FormMessage />
+										</FormItem>
+									)}
 								/>
-							</div>
-						)}
+							) : (
+								<div className="md:col-span-2">
+									<EnterpriseFeatureLocked
+										compact
+										title="Server Assignment"
+										description="Assign specific Servers to users with an Enterprise license."
+									/>
+								</div>
+							))}
 						<DialogFooter className="flex w-full flex-row justify-end md:col-span-2">
 							<Button
 								isLoading={isPending}
