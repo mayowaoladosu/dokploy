@@ -59,6 +59,7 @@ export const createKubernetesEdgeRouter = ({
 	clusterMetadata,
 	pollIntervalMs = 1_000,
 	routeTimeoutMs = 120_000,
+	originProtection,
 	sleep = (durationMs: number) =>
 		new Promise<void>((resolve) => setTimeout(resolve, durationMs)),
 }: {
@@ -67,6 +68,7 @@ export const createKubernetesEdgeRouter = ({
 	clusterMetadata: PlatformClusterMetadata;
 	pollIntervalMs?: number;
 	routeTimeoutMs?: number;
+	originProtection?: { headerName: string; headerValue: string };
 	sleep?: (durationMs: number) => Promise<void>;
 }): EdgeRouter => {
 	const identityFor = (application: ReleaseApplication) =>
@@ -258,6 +260,11 @@ export const createKubernetesEdgeRouter = ({
 							target: clusterMetadata.externalDnsTarget,
 							ttl: clusterMetadata.externalDnsTtl,
 						},
+						requiredHeaders: originProtection
+							? {
+									[originProtection.headerName]: originProtection.headerValue,
+								}
+							: undefined,
 					},
 					domains,
 					port,

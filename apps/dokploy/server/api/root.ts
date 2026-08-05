@@ -26,6 +26,7 @@ import { networkRouter } from "./routers/network";
 import { notificationRouter } from "./routers/notification";
 import { organizationRouter } from "./routers/organization";
 import { patchRouter } from "./routers/patch";
+import { platformEdgeRouter } from "./routers/platform-edge";
 import { platformInfrastructureRouter } from "./routers/platform-infrastructure";
 import { portRouter } from "./routers/port";
 import { postgresRouter } from "./routers/postgres";
@@ -87,6 +88,7 @@ export const appRouter = createTRPCRouter({
 	postgres: postgresRouter,
 	previewDeployment: previewDeploymentRouter,
 	project: projectRouter,
+	platformEdge: platformEdgeRouter,
 	platformInfrastructure: platformInfrastructureRouter,
 	redirects: redirectsRouter,
 	redis: redisRouter,

@@ -4,6 +4,10 @@ import { createKubernetesEdgeRouter } from "./edge-router";
 import { createKubernetesBuildExecutor } from "./kubernetes/build-executor";
 import { createKubernetesControlPlane } from "./kubernetes/client";
 import { createKubernetesRuntimeScheduler } from "./kubernetes/runtime-scheduler";
+import {
+	createCloudflarePlatformEdgeRouter,
+	findDefaultPlatformEdgeProvider,
+} from "./platform-edge";
 import { findApplicationPlatformPlacement } from "./platform-infrastructure";
 import { createReleaseOrchestrator } from "./release-orchestrator";
 import { createApplicationSourcePreparer } from "./source-preparer";
@@ -50,6 +54,27 @@ export const createPlatformReleasePlan = async (
 			buildPool.runtimeRegistrySecretName ||
 			cluster.metadata.registrySecretName,
 	};
+	const edgeProvider = await findDefaultPlatformEdgeProvider();
+	if (IS_MANAGED_PAAS && !edgeProvider) {
+		throw new Error(
+			"Managed releases require an active platform edge provider",
+		);
+	}
+	const originRouter = createKubernetesEdgeRouter({
+		client,
+		placement,
+		clusterMetadata: edgeProvider
+			? { ...cluster.metadata, externalDnsEnabled: false }
+			: cluster.metadata,
+		originProtection:
+			edgeProvider?.metadata.originLockdownEnabled === true &&
+			edgeProvider.originTokenHash
+				? {
+						headerName: "x-vlyv-origin-token",
+						headerValue: edgeProvider.originTokenHash,
+					}
+				: undefined,
+	});
 
 	return {
 		orchestrator: createReleaseOrchestrator({
@@ -72,11 +97,12 @@ export const createPlatformReleasePlan = async (
 				nodePool: runtimeTarget.nodePool,
 				buildPool,
 			}),
-			edgeRouter: createKubernetesEdgeRouter({
-				client,
-				placement,
-				clusterMetadata: cluster.metadata,
-			}),
+			edgeRouter: edgeProvider
+				? createCloudflarePlatformEdgeRouter({
+						originRouter,
+						provider: edgeProvider,
+					})
+				: originRouter,
 		}),
 	};
 };

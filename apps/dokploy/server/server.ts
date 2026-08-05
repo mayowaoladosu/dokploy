@@ -15,6 +15,7 @@ import {
 	initializeNetwork,
 	initSchedules,
 	initVolumeBackupsCronJobs,
+	reconcileCloudflareEdgeUsage,
 	reconcileDomainVerifications,
 	reconcileKubernetesPlacements,
 	sendDokployRestartNotifications,
@@ -133,6 +134,33 @@ void app.prepare().then(async () => {
 		}, 60_000);
 		placementReconciliationTimer.unref();
 		timers.push(placementReconciliationTimer);
+		if (IS_MANAGED_PAAS) {
+			let edgeUsageReconciliationRunning = false;
+			const reconcileEdgeUsage = async () => {
+				if (edgeUsageReconciliationRunning) return;
+				edgeUsageReconciliationRunning = true;
+				try {
+					const reconciled = await reconcileCloudflareEdgeUsage();
+					if (reconciled > 0) {
+						console.log(
+							`Reconciled Cloudflare usage for ${reconciled} hostname(s)`,
+						);
+					}
+				} finally {
+					edgeUsageReconciliationRunning = false;
+				}
+			};
+			await reconcileEdgeUsage().catch((error) =>
+				console.error("Failed to reconcile Cloudflare usage", error),
+			);
+			const edgeUsageTimer = setInterval(() => {
+				void reconcileEdgeUsage().catch((error) =>
+					console.error("Failed to reconcile Cloudflare usage", error),
+				);
+			}, 5 * 60_000);
+			edgeUsageTimer.unref();
+			timers.push(edgeUsageTimer);
+		}
 		if (process.env.NODE_ENV === "production" && !IS_CLOUD) {
 			createDefaultMiddlewares();
 			await initializeNetwork();

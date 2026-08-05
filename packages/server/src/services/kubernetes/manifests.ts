@@ -77,6 +77,7 @@ export type KubernetesPlacementSpec = {
 			target?: string;
 			ttl?: number;
 		};
+		requiredHeaders?: Record<string, string>;
 	};
 	domains: KubernetesDomainRoute[];
 	allowedEgressCidrs?: string[];
@@ -428,6 +429,15 @@ export const buildKubernetesHttpRouteManifest = ({
 							type: "PathPrefix",
 							value: domain.path || "/",
 						},
+						headers: gateway.requiredHeaders
+							? Object.entries(gateway.requiredHeaders).map(
+									([name, value]) => ({
+										type: "Exact",
+										name,
+										value,
+									}),
+								)
+							: undefined,
 					},
 				],
 				backendRefs: [{ name, port }],
@@ -539,6 +549,7 @@ export const buildKubernetesRoutingManifests = ({
 				name: gatewayName,
 				sectionName: "https",
 				externalDns: gateway.externalDns,
+				requiredHeaders: gateway.requiredHeaders,
 			},
 			domains,
 			port,

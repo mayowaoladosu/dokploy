@@ -1,17 +1,21 @@
 import { db } from "@dokploy/server/db";
 import { platformPlacements } from "@dokploy/server/db/schema";
 import { eq } from "drizzle-orm";
-import {
-	findVerifiedDomainsByApplicationId,
-	isPlatformManagedHostname,
-} from "./domain-verification";
+import { findVerifiedDomainsByApplicationId } from "./domain-verification";
+import { createKubernetesEdgeRouter } from "./edge-router";
 import { createKubernetesControlPlane } from "./kubernetes/client";
 import {
 	buildKubernetesHpaManifest,
-	buildKubernetesRoutingManifests,
 	kubernetesApplicationResourceName,
 } from "./kubernetes/manifests";
+import {
+	createCloudflarePlatformEdgeRouter,
+	findDefaultPlatformEdgeProvider,
+	removeApplicationStaticAssets,
+	withdrawPlatformEdgePublications,
+} from "./platform-edge";
 import { findApplicationPlatformPlacement } from "./platform-infrastructure";
+import type { ReleaseApplication } from "./release-types";
 
 export interface PlatformRuntimeController {
 	restart(): Promise<void>;
@@ -91,6 +95,8 @@ export const resolvePlatformRuntimeController = async (
 			await updateStatus("pending");
 		},
 		delete: async () => {
+			await withdrawPlatformEdgePublications(applicationId);
+			await removeApplicationStaticAssets(applicationId);
 			const gatewayNamespace = cluster.metadata.gatewayNamespace;
 			if (
 				gatewayNamespace &&
@@ -136,73 +142,43 @@ export const reconcilePlatformDomainRoutes = async ({
 	});
 	const verifiedDomains =
 		await findVerifiedDomainsByApplicationId(applicationId);
-	const configuredGatewayMode = metadata.gatewayMode ?? "hybrid";
-	const gatewayMode =
-		configuredGatewayMode === "hybrid"
-			? verifiedDomains.every((domain) =>
-					isPlatformManagedHostname(domain.host),
-				)
-				? "shared"
-				: "dedicated"
-			: configuredGatewayMode;
-	const name = kubernetesApplicationResourceName(applicationId);
-	const routeIdentity = {
-		apiVersion: "gateway.networking.k8s.io/v1",
-		kind: "HTTPRoute",
-		metadata: { name, namespace: placement.namespace },
-	};
-	const gatewayIdentity = {
-		apiVersion: "gateway.networking.k8s.io/v1",
-		kind: "Gateway",
-		metadata: {
-			name: `${name}-gateway`,
-			namespace: metadata.gatewayNamespace,
-		},
-	};
-	const certificateIdentity = {
-		apiVersion: "cert-manager.io/v1",
-		kind: "Certificate",
-		metadata: {
-			name: `${name}-tls`,
-			namespace: metadata.gatewayNamespace,
-		},
-	};
-	const routing = buildKubernetesRoutingManifests({
-		applicationId,
-		organizationId: placement.organizationId,
-		appName,
-		namespace: placement.namespace,
-		gateway: {
-			namespace: metadata.gatewayNamespace,
-			name: metadata.gatewayName,
-			sectionName: metadata.gatewaySectionName,
-			className: metadata.gatewayClassName,
-			certIssuerName: metadata.certIssuerName,
-			mode: gatewayMode,
-			podSelector: metadata.gatewayPodSelector,
-			externalDns: {
-				enabled: metadata.externalDnsEnabled === true,
-				target: metadata.externalDnsTarget,
-				ttl: metadata.externalDnsTtl,
-			},
-		},
-		domains: verifiedDomains,
-		port,
+	const edgeProvider = await findDefaultPlatformEdgeProvider();
+	const originRouter = createKubernetesEdgeRouter({
+		client,
+		placement,
+		clusterMetadata: edgeProvider
+			? { ...metadata, externalDnsEnabled: false }
+			: metadata,
+		originProtection:
+			edgeProvider?.metadata.originLockdownEnabled === true &&
+			edgeProvider.originTokenHash
+				? {
+						headerName: "x-vlyv-origin-token",
+						headerValue: edgeProvider.originTokenHash,
+					}
+				: undefined,
 	});
-	if (routing.length > 0) {
-		await client.apply(routing);
-		if (gatewayMode === "shared") {
-			await Promise.all([
-				client.delete(gatewayIdentity),
-				client.delete(certificateIdentity),
-			]);
-		}
-	} else {
-		await Promise.all([
-			client.delete(routeIdentity),
-			client.delete(gatewayIdentity),
-			client.delete(certificateIdentity),
-		]);
-	}
+	const edgeRouter = edgeProvider
+		? createCloudflarePlatformEdgeRouter({
+				provider: edgeProvider,
+				originRouter,
+			})
+		: originRouter;
+	await edgeRouter.publish({
+		releaseId: "domain-reconciliation",
+		deploymentId: "",
+		application: {
+			applicationId,
+			appName,
+			ports: [{ targetPort: port, protocol: "tcp" }],
+			releaseDomains: verifiedDomains.map((domain) => ({
+				...domain,
+				https: true,
+			})),
+			environment: {
+				project: { organizationId: placement.organizationId },
+			},
+		} as unknown as ReleaseApplication,
+	});
 	return true;
 };

@@ -28,6 +28,7 @@ export * from "./mysql";
 export * from "./network";
 export * from "./notification";
 export * from "./patch";
+export * from "./platform-edge";
 export * from "./platform-infrastructure";
 export * from "./port";
 export * from "./postgres";

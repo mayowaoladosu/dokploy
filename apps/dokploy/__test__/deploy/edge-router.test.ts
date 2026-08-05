@@ -69,6 +69,10 @@ describe("Kubernetes edge router", () => {
 			client: controlPlane,
 			placement,
 			clusterMetadata: metadata,
+			originProtection: {
+				headerName: "x-vlyv-origin-token",
+				headerValue: "origin-secret",
+			},
 		});
 
 		const publication = await router.publish({
@@ -97,6 +101,11 @@ describe("Kubernetes edge router", () => {
 		);
 		expect(route?.metadata?.annotations).toMatchObject({
 			"external-dns.alpha.kubernetes.io/hostname": "preview.apps.vlyv.dev",
+		});
+		expect((route as any)?.spec.rules[0].matches[0].headers).toContainEqual({
+			type: "Exact",
+			name: "x-vlyv-origin-token",
+			value: "origin-secret",
 		});
 	});
 
