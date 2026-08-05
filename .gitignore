@@ -46,4 +46,4 @@ yarn-error.log*
 .db
 
 .playwright-*
-.credentials
+.credentialsdev-log.txt
