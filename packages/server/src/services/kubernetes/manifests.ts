@@ -14,6 +14,16 @@ export type KubernetesPort = {
 	protocol?: "tcp" | "udp";
 };
 
+export type KubernetesHealthCheck = {
+	protocol: "http" | "https" | "tcp";
+	port: number;
+	path?: string;
+	periodSeconds?: number;
+	timeoutSeconds?: number;
+	failureThreshold?: number;
+	startupFailureThreshold?: number;
+};
+
 export type KubernetesResourceSpec = {
 	memoryLimitBytes: number;
 	memoryRequestBytes: number;
@@ -45,12 +55,28 @@ export type KubernetesPlacementSpec = {
 		effect: "NoSchedule" | "PreferNoSchedule" | "NoExecute";
 	}>;
 	registrySecretName?: string;
+	registryCredentials?: {
+		server: string;
+		username: string;
+		password: string;
+	};
+	healthCheck?: KubernetesHealthCheck;
+	terminationGracePeriodSeconds?: number;
+	multiZone?: boolean;
+	readOnlyRootFilesystem?: boolean;
 	gateway?: {
 		namespace: string;
 		name: string;
 		sectionName?: string;
 		className?: string;
 		certIssuerName?: string;
+		mode?: "shared" | "dedicated";
+		podSelector?: Record<string, string>;
+		externalDns?: {
+			enabled: boolean;
+			target?: string;
+			ttl?: number;
+		};
 	};
 	domains: KubernetesDomainRoute[];
 	allowedEgressCidrs?: string[];
@@ -192,6 +218,53 @@ const secretData = (values: Record<string, string>) =>
 		]),
 	);
 
+const registryDockerConfig = ({
+	server,
+	username,
+	password,
+}: NonNullable<KubernetesPlacementSpec["registryCredentials"]>) =>
+	Buffer.from(
+		JSON.stringify({
+			auths: {
+				[server]: {
+					username,
+					password,
+					auth: Buffer.from(`${username}:${password}`, "utf8").toString(
+						"base64",
+					),
+				},
+			},
+		}),
+		"utf8",
+	).toString("base64");
+
+const probeFor = (
+	healthCheck: KubernetesHealthCheck,
+	kind: "startup" | "readiness" | "liveness",
+) => {
+	const periodSeconds = Math.max(healthCheck.periodSeconds ?? 5, 1);
+	const endpoint =
+		healthCheck.protocol === "tcp"
+			? { tcpSocket: { port: healthCheck.port } }
+			: {
+					httpGet: {
+						path: healthCheck.path || "/",
+						port: healthCheck.port,
+						scheme: healthCheck.protocol.toUpperCase(),
+					},
+				};
+	return {
+		...endpoint,
+		periodSeconds,
+		timeoutSeconds: Math.max(healthCheck.timeoutSeconds ?? 2, 1),
+		failureThreshold:
+			kind === "startup"
+				? Math.max(healthCheck.startupFailureThreshold ?? 60, 1)
+				: Math.max(healthCheck.failureThreshold ?? 3, 1),
+		...(kind === "readiness" ? { successThreshold: 1 } : {}),
+	};
+};
+
 const workloadResources = (resources: KubernetesResourceSpec) => ({
 	limits: {
 		memory: bytesToMi(resources.memoryLimitBytes),
@@ -310,6 +383,26 @@ export const buildKubernetesHttpRouteManifest = ({
 	port: number;
 }): KubernetesManifest => {
 	const name = kubernetesApplicationResourceName(applicationId);
+	const externalDnsAnnotations = gateway.externalDns?.enabled
+		? {
+				"external-dns.alpha.kubernetes.io/hostname": domains
+					.map((domain) => domain.host)
+					.join(","),
+				...(gateway.externalDns.target
+					? {
+							"external-dns.alpha.kubernetes.io/target":
+								gateway.externalDns.target,
+						}
+					: {}),
+				...(gateway.externalDns.ttl
+					? {
+							"external-dns.alpha.kubernetes.io/ttl": String(
+								gateway.externalDns.ttl,
+							),
+						}
+					: {}),
+			}
+		: undefined;
 	return {
 		apiVersion: "gateway.networking.k8s.io/v1",
 		kind: "HTTPRoute",
@@ -317,6 +410,7 @@ export const buildKubernetesHttpRouteManifest = ({
 			name,
 			namespace,
 			labels: labelsFor(applicationId, organizationId, "runtime"),
+			annotations: externalDnsAnnotations,
 		},
 		spec: {
 			parentRefs: [
@@ -362,7 +456,8 @@ export const buildKubernetesRoutingManifests = ({
 	if (domains.length === 0) return [];
 	const name = kubernetesApplicationResourceName(applicationId);
 	const labels = labelsFor(applicationId, organizationId, "routing");
-	if (!gateway.className || !gateway.certIssuerName) {
+	const gatewayMode = gateway.mode ?? "shared";
+	if (gatewayMode === "shared") {
 		return [
 			buildKubernetesHttpRouteManifest({
 				applicationId,
@@ -374,6 +469,11 @@ export const buildKubernetesRoutingManifests = ({
 				port,
 			}),
 		];
+	}
+	if (!gateway.className || !gateway.certIssuerName) {
+		throw new Error(
+			"Dedicated Gateways require a GatewayClass and cert-manager issuer",
+		);
 	}
 	const gatewayName = `${name}-gateway`;
 	const certificateName = `${name}-tls`;
@@ -438,6 +538,7 @@ export const buildKubernetesRoutingManifests = ({
 				namespace: gateway.namespace,
 				name: gatewayName,
 				sectionName: "https",
+				externalDns: gateway.externalDns,
 			},
 			domains,
 			port,
@@ -511,9 +612,12 @@ export const buildKubernetesRuntimeManifests = (
 	const name = kubernetesApplicationResourceName(spec.applicationId);
 	const labels = labelsFor(spec.applicationId, spec.organizationId, "runtime");
 	const secretName = `${name}-env`;
+	const registrySecretName = spec.registryCredentials
+		? spec.registrySecretName || `${name}-registry`
+		: spec.registrySecretName;
 	const ports = spec.ports.length > 0 ? spec.ports : [{ targetPort: 3000 }];
 	const maxReplicas = Math.max(spec.maxReplicas, spec.replicas);
-	const aggregateMultiplier = Math.max(maxReplicas, 1);
+	const aggregateMultiplier = Math.max(maxReplicas, 1) + 1;
 	const manifests: KubernetesManifest[] = [
 		{
 			apiVersion: "v1",
@@ -588,6 +692,25 @@ export const buildKubernetesRuntimeManifests = (
 			type: "Opaque",
 			data: secretData(environmentToStringData(spec.environment)),
 		},
+		...(spec.registryCredentials
+			? [
+					{
+						apiVersion: "v1",
+						kind: "Secret",
+						metadata: {
+							name: registrySecretName,
+							namespace: spec.namespace,
+							labels,
+						},
+						type: "kubernetes.io/dockerconfigjson",
+						data: {
+							".dockerconfigjson": registryDockerConfig(
+								spec.registryCredentials,
+							),
+						},
+					},
+				]
+			: []),
 		{
 			apiVersion: "v1",
 			kind: "ServiceAccount",
@@ -619,6 +742,13 @@ export const buildKubernetesRuntimeManifests = (
 													"kubernetes.io/metadata.name": spec.gateway.namespace,
 												},
 											},
+											...(spec.gateway.podSelector
+												? {
+														podSelector: {
+															matchLabels: spec.gateway.podSelector,
+														},
+													}
+												: {}),
 										},
 									],
 								},
@@ -634,6 +764,9 @@ export const buildKubernetesRuntimeManifests = (
 			metadata: { name, namespace: spec.namespace, labels },
 			spec: {
 				replicas: Math.max(spec.replicas, 1),
+				minReadySeconds: 5,
+				progressDeadlineSeconds: 300,
+				revisionHistoryLimit: 3,
 				strategy: {
 					type: "RollingUpdate",
 					rollingUpdate: { maxUnavailable: 0, maxSurge: 1 },
@@ -644,6 +777,10 @@ export const buildKubernetesRuntimeManifests = (
 					spec: {
 						serviceAccountName: name,
 						automountServiceAccountToken: false,
+						terminationGracePeriodSeconds: Math.max(
+							spec.terminationGracePeriodSeconds ?? 30,
+							1,
+						),
 						runtimeClassName: spec.runtimeClassName || undefined,
 						nodeSelector: spec.nodeSelector,
 						tolerations: spec.tolerations,
@@ -651,8 +788,8 @@ export const buildKubernetesRuntimeManifests = (
 							runAsNonRoot: true,
 							seccompProfile: { type: "RuntimeDefault" },
 						},
-						imagePullSecrets: spec.registrySecretName
-							? [{ name: spec.registrySecretName }]
+						imagePullSecrets: registrySecretName
+							? [{ name: registrySecretName }]
 							: undefined,
 						containers: [
 							{
@@ -668,10 +805,19 @@ export const buildKubernetesRuntimeManifests = (
 								command: spec.command,
 								args: spec.args ?? undefined,
 								resources: workloadResources(spec.resources),
+								startupProbe: spec.healthCheck
+									? probeFor(spec.healthCheck, "startup")
+									: undefined,
+								readinessProbe: spec.healthCheck
+									? probeFor(spec.healthCheck, "readiness")
+									: undefined,
+								livenessProbe: spec.healthCheck
+									? probeFor(spec.healthCheck, "liveness")
+									: undefined,
 								securityContext: {
 									allowPrivilegeEscalation: false,
 									capabilities: { drop: ["ALL"] },
-									readOnlyRootFilesystem: true,
+									readOnlyRootFilesystem: spec.readOnlyRootFilesystem ?? false,
 								},
 								volumeMounts: [{ name: "tmp", mountPath: "/tmp" }],
 							},
@@ -693,6 +839,16 @@ export const buildKubernetesRuntimeManifests = (
 								whenUnsatisfiable: "ScheduleAnyway",
 								labelSelector: { matchLabels: labels },
 							},
+							...(spec.multiZone
+								? [
+										{
+											maxSkew: 1,
+											topologyKey: "topology.kubernetes.io/zone",
+											whenUnsatisfiable: "ScheduleAnyway",
+											labelSelector: { matchLabels: labels },
+										},
+									]
+								: []),
 						],
 					},
 				},
@@ -718,7 +874,9 @@ export const buildKubernetesRuntimeManifests = (
 			kind: "PodDisruptionBudget",
 			metadata: { name, namespace: spec.namespace, labels },
 			spec: {
-				minAvailable: 1,
+				...(spec.replicas <= 1
+					? { maxUnavailable: 1 }
+					: { minAvailable: Math.max(spec.replicas - 1, 1) }),
 				selector: { matchLabels: labels },
 			},
 		},
@@ -734,6 +892,10 @@ export const buildKubernetesRuntimeManifests = (
 	];
 
 	if (spec.gateway && spec.domains.length > 0) {
+		const routePort = ports.find((port) => port.protocol !== "udp")?.targetPort;
+		if (!routePort) {
+			throw new Error("Gateway HTTP routing requires at least one TCP port");
+		}
 		manifests.push(
 			...buildKubernetesRoutingManifests({
 				applicationId: spec.applicationId,
@@ -742,7 +904,7 @@ export const buildKubernetesRuntimeManifests = (
 				namespace: spec.namespace,
 				gateway: spec.gateway,
 				domains: spec.domains,
-				port: ports[0]?.targetPort ?? 3000,
+				port: routePort,
 			}),
 		);
 	}
@@ -788,7 +950,7 @@ cat /artifacts/image.json >/dev/termination-log
 				name: spec.namespace,
 				labels: {
 					"app.kubernetes.io/managed-by": "vlyv",
-					"pod-security.kubernetes.io/enforce": "restricted",
+					"pod-security.kubernetes.io/enforce": "baseline",
 					"pod-security.kubernetes.io/audit": "restricted",
 					"pod-security.kubernetes.io/warn": "restricted",
 				},
@@ -819,7 +981,7 @@ cat /artifacts/image.json >/dev/termination-log
 							}
 						: {}),
 					pods: "2",
-					"count/jobs.batch": "2",
+					"count/jobs.batch": "3",
 					persistentvolumeclaims: "1",
 					"requests.storage": bytesToMi(
 						spec.resources.ephemeralStorageLimitBytes || 20 * 1024 ** 3,
@@ -932,8 +1094,11 @@ cat /artifacts/image.json >/dev/termination-log
 								],
 								resources: workloadResources(spec.resources),
 								securityContext: {
-									allowPrivilegeEscalation: false,
-									capabilities: { drop: ["ALL"] },
+									allowPrivilegeEscalation: true,
+									capabilities: {
+										drop: ["ALL"],
+										add: ["SETUID", "SETGID"],
+									},
 									readOnlyRootFilesystem: true,
 								},
 								terminationMessagePath: "/dev/termination-log",

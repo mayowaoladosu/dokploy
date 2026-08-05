@@ -32,6 +32,8 @@ const clusterMetadataSchema = z.object({
 	gatewayName: z.string().min(1).optional(),
 	gatewaySectionName: z.string().min(1).optional(),
 	gatewayClassName: z.string().min(1).optional(),
+	gatewayMode: z.enum(["shared", "dedicated", "hybrid"]).optional(),
+	gatewayPodSelector: z.record(z.string().min(1), z.string().min(1)).optional(),
 	registrySecretName: z.string().min(1).optional(),
 	secretsEncryptionEnabled: z.boolean().optional(),
 	networkPolicyEnabled: z.boolean().optional(),
@@ -39,6 +41,15 @@ const clusterMetadataSchema = z.object({
 	gatewayApiEnabled: z.boolean().optional(),
 	certManagerEnabled: z.boolean().optional(),
 	certIssuerName: z.string().min(1).optional(),
+	externalDnsEnabled: z.boolean().optional(),
+	externalDnsNamespace: z.string().min(1).optional(),
+	externalDnsDeploymentName: z.string().min(1).optional(),
+	externalDnsTarget: z.string().min(1).optional(),
+	externalDnsTtl: z.number().int().min(1).max(86_400).optional(),
+	metricsServerNamespace: z.string().min(1).optional(),
+	metricsServerDeploymentName: z.string().min(1).optional(),
+	multiZoneEnabled: z.boolean().optional(),
+	readOnlyRootFilesystem: z.boolean().optional(),
 	allowedEgressCidrs: z.array(cidrSchema).max(50).optional(),
 });
 const targetStatusSchema = z.enum([
@@ -114,6 +125,7 @@ const buildPoolChangesSchema = z.object({
 		.object({
 			registryCredentialHelperConfigured: z.boolean().optional(),
 			runtimeImagePullIdentityConfigured: z.boolean().optional(),
+			rootlessBuilderValidated: z.boolean().optional(),
 			supplyChain: supplyChainPolicySchema.optional(),
 		})
 		.optional(),

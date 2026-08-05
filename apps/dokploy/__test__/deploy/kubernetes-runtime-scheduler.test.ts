@@ -4,11 +4,37 @@ import type {
 } from "@dokploy/server/db/schema";
 import type { KubernetesControlPlane } from "@dokploy/server/services/kubernetes/client";
 import { kubernetesReleaseNamespace } from "@dokploy/server/services/kubernetes/manifests";
-import { createKubernetesRuntimeScheduler } from "@dokploy/server/services/kubernetes/runtime-scheduler";
+import {
+	classifyKubernetesRuntimeDeployment,
+	createKubernetesRuntimeScheduler,
+} from "@dokploy/server/services/kubernetes/runtime-scheduler";
 import type { ApplicationNested } from "@dokploy/server/utils/builders";
 import { describe, expect, it, vi } from "vitest";
 
 describe("Kubernetes runtime scheduler", () => {
+	it("does not accept stale ready replicas from the previous image", () => {
+		expect(
+			classifyKubernetesRuntimeDeployment(
+				{
+					metadata: { generation: 2 },
+					spec: {
+						replicas: 1,
+						template: {
+							spec: { containers: [{ image: "registry/app@sha256:old" }] },
+						},
+					},
+					status: {
+						observedGeneration: 1,
+						updatedReplicas: 1,
+						readyReplicas: 1,
+						availableReplicas: 1,
+					},
+				} as never,
+				"registry/app@sha256:new",
+			),
+		).toBe("pending");
+	});
+
 	it("applies an immutable release and waits for ready replicas", async () => {
 		const releaseImage = `registry.example.com/app@sha256:${"a".repeat(64)}`;
 		const previewImage = `registry.example.com/app@sha256:${"b".repeat(64)}`;
@@ -30,28 +56,41 @@ describe("Kubernetes runtime scheduler", () => {
 			},
 		});
 		const appliedManifests: Array<{ kind?: string }> = [];
+		let currentImage = releaseImage;
 		const apply = vi.fn<KubernetesControlPlane["apply"]>(async (manifests) => {
 			appliedManifests.push(...manifests);
+			const deployment = manifests.find(
+				(manifest) => manifest.kind === "Deployment",
+			) as any;
+			if (deployment)
+				currentImage = deployment.spec.template.spec.containers[0].image;
 		});
 		const client: KubernetesControlPlane = {
 			apply,
+			read: vi.fn(async () => null),
 			delete: vi.fn(async () => undefined),
 			readDeployment: vi.fn(
 				async () =>
 					({
+						metadata: { generation: 1 },
 						spec: {
 							replicas: 1,
 							template: {
 								spec: {
 									containers: [
 										{
-											image: releaseImage,
+											image: currentImage,
 										},
 									],
 								},
 							},
 						},
-						status: { readyReplicas: 1 },
+						status: {
+							observedGeneration: 1,
+							updatedReplicas: 1,
+							readyReplicas: 1,
+							availableReplicas: 1,
+						},
 					}) as never,
 			),
 			readJob: vi.fn(async () => null),
@@ -87,6 +126,13 @@ describe("Kubernetes runtime scheduler", () => {
 			cpuReservation: "250000000",
 			command: null,
 			args: [],
+			healthCheckSwarm: {
+				Test: ["CMD-SHELL", "curl -f http://localhost:3000/ready"],
+				Interval: 5_000_000_000,
+				Timeout: 2_000_000_000,
+				StartPeriod: 60_000_000_000,
+				Retries: 4,
+			},
 			ports: [{ targetPort: 3000, protocol: "tcp" }],
 			environmentId: "environment-1",
 			environment: {
@@ -103,6 +149,13 @@ describe("Kubernetes runtime scheduler", () => {
 			placement,
 			clusterMetadata: {},
 			nodePool,
+			buildPool: {
+				registryAuthMode: "basic",
+				registryHost: "registry.example.com",
+				registryUsername: "robot",
+				registryPassword: "secret",
+				runtimeRegistrySecretName: "runtime-registry",
+			} as never,
 			pollIntervalMs: 1,
 			sleep: async () => undefined,
 		});
@@ -124,6 +177,23 @@ describe("Kubernetes runtime scheduler", () => {
 		expect(deployment.spec.template.spec.containers[0].image).toBe(
 			releaseImage,
 		);
+		expect(
+			deployment.spec.template.spec.containers[0].readinessProbe.httpGet,
+		).toMatchObject({ path: "/ready", port: 3000 });
+		expect(
+			deployment.spec.template.spec.containers[0].securityContext
+				.readOnlyRootFilesystem,
+		).toBe(false);
+		expect(deployment.spec.template.spec.imagePullSecrets).toEqual([
+			{ name: "runtime-registry" },
+		]);
+		expect(
+			appliedManifests.some(
+				(manifest: any) =>
+					manifest.kind === "Secret" &&
+					manifest.metadata?.name === "runtime-registry",
+			),
+		).toBe(true);
 		expect(
 			appliedManifests.some((manifest) => manifest.kind === "HTTPRoute"),
 		).toBe(false);

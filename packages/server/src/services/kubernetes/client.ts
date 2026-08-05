@@ -18,6 +18,7 @@ export type KubernetesClientConfig = {
 
 export interface KubernetesControlPlane {
 	apply(manifests: KubernetesObject[]): Promise<void>;
+	read(manifest: KubernetesObject): Promise<KubernetesObject | null>;
 	delete(manifest: KubernetesObject): Promise<void>;
 	readDeployment(namespace: string, name: string): Promise<V1Deployment | null>;
 	readJob(namespace: string, name: string): Promise<V1Job | null>;
@@ -135,6 +136,14 @@ export const createKubernetesControlPlane = (
 						`Kubernetes ${manifest.kind || "resource"} ${manifest.metadata?.name || "unknown"} could not be applied`,
 					);
 				}
+			}
+		},
+		read: async (manifest) => {
+			try {
+				return await objects.read(manifestIdentity(manifest));
+			} catch (error) {
+				if (isNotFound(error)) return null;
+				throw error;
 			}
 		},
 		delete: async (manifest) => {

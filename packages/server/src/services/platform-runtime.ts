@@ -1,7 +1,10 @@
 import { db } from "@dokploy/server/db";
 import { platformPlacements } from "@dokploy/server/db/schema";
 import { eq } from "drizzle-orm";
-import { findVerifiedDomainsByApplicationId } from "./domain-verification";
+import {
+	findVerifiedDomainsByApplicationId,
+	isPlatformManagedHostname,
+} from "./domain-verification";
 import { createKubernetesControlPlane } from "./kubernetes/client";
 import {
 	buildKubernetesHpaManifest,
@@ -89,7 +92,12 @@ export const resolvePlatformRuntimeController = async (
 		},
 		delete: async () => {
 			const gatewayNamespace = cluster.metadata.gatewayNamespace;
-			if (gatewayNamespace) {
+			if (
+				gatewayNamespace &&
+				(cluster.metadata.gatewayMode === "dedicated" ||
+					cluster.metadata.gatewayMode === "hybrid" ||
+					cluster.metadata.gatewayMode === undefined)
+			) {
 				await Promise.all([
 					client.delete({
 						apiVersion: "gateway.networking.k8s.io/v1",
@@ -128,6 +136,15 @@ export const reconcilePlatformDomainRoutes = async ({
 	});
 	const verifiedDomains =
 		await findVerifiedDomainsByApplicationId(applicationId);
+	const configuredGatewayMode = metadata.gatewayMode ?? "hybrid";
+	const gatewayMode =
+		configuredGatewayMode === "hybrid"
+			? verifiedDomains.every((domain) =>
+					isPlatformManagedHostname(domain.host),
+				)
+				? "shared"
+				: "dedicated"
+			: configuredGatewayMode;
 	const name = kubernetesApplicationResourceName(applicationId);
 	const routeIdentity = {
 		apiVersion: "gateway.networking.k8s.io/v1",
@@ -161,13 +178,20 @@ export const reconcilePlatformDomainRoutes = async ({
 			sectionName: metadata.gatewaySectionName,
 			className: metadata.gatewayClassName,
 			certIssuerName: metadata.certIssuerName,
+			mode: gatewayMode,
+			podSelector: metadata.gatewayPodSelector,
+			externalDns: {
+				enabled: metadata.externalDnsEnabled === true,
+				target: metadata.externalDnsTarget,
+				ttl: metadata.externalDnsTtl,
+			},
 		},
 		domains: verifiedDomains,
 		port,
 	});
 	if (routing.length > 0) {
 		await client.apply(routing);
-		if (!metadata.gatewayClassName || !metadata.certIssuerName) {
+		if (gatewayMode === "shared") {
 			await Promise.all([
 				client.delete(gatewayIdentity),
 				client.delete(certificateIdentity),

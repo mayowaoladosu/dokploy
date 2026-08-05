@@ -17,6 +17,10 @@ import {
 } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
 import { and, count, eq } from "drizzle-orm";
+import {
+	createKubernetesControlPlane,
+	type KubernetesControlPlane,
+} from "./kubernetes/client";
 
 export type KubernetesPlacementCandidate = {
 	runtimeTargetId: string;
@@ -386,6 +390,13 @@ const assertRuntimeTargetReadiness = ({
 				"Active Kubernetes runtime targets require a sandbox RuntimeClass",
 		});
 	}
+	if (Object.keys(nodePool.labels).length === 0) {
+		throw new TRPCError({
+			code: "PRECONDITION_FAILED",
+			message:
+				"Active Kubernetes runtime targets require node-pool selector labels",
+		});
+	}
 };
 
 export const assertBuildPoolReadiness = (
@@ -420,6 +431,9 @@ export const assertBuildPoolReadiness = (
 		!pool.runtimeClassName && !pool.nodePool?.runtimeClassName
 			? "sandbox runtimeClassName"
 			: null,
+		!pool.nodePool || Object.keys(pool.nodePool.labels).length === 0
+			? "build node-pool selector labels"
+			: null,
 		!pool.registryHost || !registryHostPattern.test(pool.registryHost)
 			? "valid registryHost"
 			: null,
@@ -443,6 +457,9 @@ export const assertBuildPoolReadiness = (
 		pool.registryAuthMode === "workload_identity" &&
 		!pool.metadata.runtimeImagePullIdentityConfigured
 			? "runtimeImagePullIdentityConfigured attestation"
+			: null,
+		!pool.metadata.rootlessBuilderValidated
+			? "rootlessBuilderValidated attestation"
 			: null,
 		!supplyChain ? "supplyChain policy" : null,
 		supplyChain && !immutableImagePattern.test(supplyChain.verifierImage)
@@ -709,6 +726,23 @@ export const updatePlatformCluster = async (
 			});
 		}
 		for (const pool of buildPools) assertBuildPoolReadiness(pool);
+		const kubeconfig =
+			input.kubeconfig === undefined ? current.kubeconfig : input.kubeconfig;
+		await verifyKubernetesClusterCapabilities({
+			client: createKubernetesControlPlane({
+				kubeconfig,
+				inCluster: mergedMetadata.inCluster,
+			}),
+			metadata: mergedMetadata,
+			runtimeClassNames: [
+				mergedMetadata.runtimeClassName,
+				mergedMetadata.buildRuntimeClassName,
+				...targets.map((target) => target.nodePool?.runtimeClassName),
+				...buildPools.map(
+					(pool) => pool.runtimeClassName || pool.nodePool?.runtimeClassName,
+				),
+			].filter((value): value is string => Boolean(value)),
+		});
 	}
 	const [cluster] = await db
 		.update(platformClusters)
@@ -723,6 +757,109 @@ export const updatePlatformCluster = async (
 		throw new TRPCError({ code: "NOT_FOUND", message: "Cluster not found" });
 	}
 	return redactPlatformCluster(cluster);
+};
+
+export const verifyKubernetesClusterCapabilities = async ({
+	client,
+	metadata,
+	runtimeClassNames = [],
+}: {
+	client: KubernetesControlPlane;
+	metadata: PlatformClusterMetadata;
+	runtimeClassNames?: string[];
+}) => {
+	const gatewayMode = metadata.gatewayMode ?? "hybrid";
+	const required = [
+		{
+			apiVersion: "v1",
+			kind: "Namespace",
+			metadata: { name: metadata.gatewayNamespace },
+		},
+		...(metadata.gatewayClassName
+			? [
+					{
+						apiVersion: "gateway.networking.k8s.io/v1",
+						kind: "GatewayClass",
+						metadata: { name: metadata.gatewayClassName },
+					},
+				]
+			: []),
+		...(gatewayMode !== "dedicated"
+			? [
+					{
+						apiVersion: "gateway.networking.k8s.io/v1",
+						kind: "Gateway",
+						metadata: {
+							name: metadata.gatewayName,
+							namespace: metadata.gatewayNamespace,
+						},
+					},
+				]
+			: []),
+		{
+			apiVersion: "cert-manager.io/v1",
+			kind: "ClusterIssuer",
+			metadata: { name: metadata.certIssuerName },
+		},
+		{
+			apiVersion: "apps/v1",
+			kind: "Deployment",
+			metadata: {
+				name: metadata.metricsServerDeploymentName || "metrics-server",
+				namespace: metadata.metricsServerNamespace || "kube-system",
+			},
+		},
+		{
+			apiVersion: "apps/v1",
+			kind: "Deployment",
+			metadata: {
+				name: metadata.externalDnsDeploymentName || "external-dns",
+				namespace: metadata.externalDnsNamespace || "external-dns",
+			},
+		},
+		...Array.from(new Set(runtimeClassNames)).map((name) => ({
+			apiVersion: "node.k8s.io/v1",
+			kind: "RuntimeClass",
+			metadata: { name },
+		})),
+	].filter((resource) => resource.metadata.name);
+	const missing: string[] = [];
+	for (const resource of required) {
+		const found = (await client.read(resource)) as {
+			status?: {
+				availableReplicas?: number;
+				conditions?: Array<{ type?: string; status?: string }>;
+			};
+		} | null;
+		const requiredCondition =
+			resource.kind === "Gateway"
+				? "Programmed"
+				: resource.kind === "GatewayClass"
+					? "Accepted"
+					: resource.kind === "ClusterIssuer"
+						? "Ready"
+						: null;
+		const unavailable =
+			!found ||
+			(resource.kind === "Deployment" &&
+				(found.status?.availableReplicas ?? 0) < 1) ||
+			(Boolean(requiredCondition) &&
+				!found.status?.conditions?.some(
+					(condition) =>
+						condition.type === requiredCondition && condition.status === "True",
+				));
+		if (unavailable) {
+			missing.push(
+				`${resource.kind}/${resource.metadata.namespace ? `${resource.metadata.namespace}/` : ""}${resource.metadata.name}`,
+			);
+		}
+	}
+	if (missing.length > 0) {
+		throw new TRPCError({
+			code: "PRECONDITION_FAILED",
+			message: `Kubernetes cluster capabilities are unavailable: ${missing.join(", ")}`,
+		});
+	}
 };
 
 export const assertKubernetesClusterReadiness = (cluster: {
@@ -747,6 +884,7 @@ export const assertKubernetesClusterReadiness = (cluster: {
 		!cluster.metadata.gatewayClassName ? "gatewayClassName" : null,
 		!cluster.metadata.certManagerEnabled ? "certManagerEnabled" : null,
 		!cluster.metadata.certIssuerName ? "certIssuerName" : null,
+		!cluster.metadata.externalDnsEnabled ? "externalDnsEnabled" : null,
 	].filter((value): value is string => Boolean(value));
 	if (missing.length > 0) {
 		throw new TRPCError({

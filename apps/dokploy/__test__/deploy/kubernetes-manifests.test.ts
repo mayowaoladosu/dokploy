@@ -36,8 +36,26 @@ describe("Kubernetes runtime manifests", () => {
 		},
 		runtimeClassName: "gvisor",
 		nodeSelector: { "vlyv.dev/pool": "runtime" },
+		healthCheck: {
+			protocol: "http",
+			port: 3000,
+			path: "/healthz",
+		},
+		registrySecretName: "runtime-registry",
+		registryCredentials: {
+			server: "registry.example.com",
+			username: "robot",
+			password: "pull-secret",
+		},
+		readOnlyRootFilesystem: true,
+		multiZone: true,
 		domains: [{ host: "example.com", path: "/" }],
-		gateway: { namespace: "gateway-system", name: "public" },
+		gateway: {
+			namespace: "gateway-system",
+			name: "public",
+			mode: "shared",
+			externalDns: { enabled: true, ttl: 60 },
+		},
 	});
 
 	it("generates isolated, quota-bound, autoscaled resources", () => {
@@ -45,8 +63,8 @@ describe("Kubernetes runtime manifests", () => {
 			"pod-security.kubernetes.io/enforce": "restricted",
 		});
 		expect(findManifest(manifests, "ResourceQuota").spec.hard).toMatchObject({
-			"limits.cpu": "5000m",
-			"limits.memory": "2560Mi",
+			"limits.cpu": "6000m",
+			"limits.memory": "3072Mi",
 		});
 		expect(
 			findManifest(manifests, "HorizontalPodAutoscaler").spec,
@@ -91,11 +109,33 @@ describe("Kubernetes runtime manifests", () => {
 		expect(podSpec).toMatchObject({
 			automountServiceAccountToken: false,
 			runtimeClassName: "gvisor",
+			imagePullSecrets: [{ name: "runtime-registry" }],
 		});
+		expect(container.startupProbe.httpGet).toMatchObject({
+			path: "/healthz",
+			port: 3000,
+			scheme: "HTTP",
+		});
+		expect(container.readinessProbe).toBeDefined();
+		expect(container.livenessProbe).toBeDefined();
+		expect(podSpec.topologySpreadConstraints).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					topologyKey: "topology.kubernetes.io/zone",
+				}),
+			]),
+		);
 		expect(findManifest(manifests, "Secret").data).toEqual({
 			NODE_ENV: Buffer.from("production").toString("base64"),
 			TOKEN: Buffer.from("a=b").toString("base64"),
 		});
+		const pullSecret = manifests.find(
+			(manifest: any) => manifest.metadata?.name === "runtime-registry",
+		) as any;
+		expect(pullSecret.type).toBe("kubernetes.io/dockerconfigjson");
+		expect(
+			Buffer.from(pullSecret.data[".dockerconfigjson"], "base64").toString(),
+		).toContain("registry.example.com");
 	});
 
 	it("publishes only the supplied verified domains through Gateway API", () => {
@@ -103,6 +143,38 @@ describe("Kubernetes runtime manifests", () => {
 			hostnames: ["example.com"],
 			parentRefs: [{ namespace: "gateway-system", name: "public" }],
 		});
+		expect(
+			findManifest(manifests, "HTTPRoute").metadata.annotations,
+		).toMatchObject({
+			"external-dns.alpha.kubernetes.io/hostname": "example.com",
+			"external-dns.alpha.kubernetes.io/ttl": "60",
+		});
+	});
+
+	it("allows a single replica to drain during node maintenance", () => {
+		const singleReplica = buildKubernetesRuntimeManifests({
+			...({} as any),
+			applicationId: "single-app",
+			organizationId: "organization-1",
+			appName: "single-app",
+			namespace: "single-app",
+			imageRef: "registry.example.com/app@sha256:abc",
+			replicas: 1,
+			maxReplicas: 1,
+			targetCpuUtilization: 70,
+			environment: [],
+			ports: [{ targetPort: 3000 }],
+			resources: {
+				memoryLimitBytes: 1,
+				memoryRequestBytes: 1,
+				cpuLimitNano: 1,
+				cpuRequestNano: 1,
+			},
+			domains: [],
+		});
+		expect(
+			findManifest(singleReplica, "PodDisruptionBudget").spec,
+		).toMatchObject({ maxUnavailable: 1 });
 	});
 });
 
@@ -178,9 +250,18 @@ describe("Kubernetes build manifests", () => {
 			NODE_ENV: Buffer.from("production").toString("base64"),
 		});
 		expect(builder.securityContext.capabilities.drop).toEqual(["ALL"]);
+		expect(builder.securityContext.capabilities.add).toEqual([
+			"SETUID",
+			"SETGID",
+		]);
+		expect(builder.securityContext.allowPrivilegeEscalation).toBe(true);
+		expect(findManifest(manifests, "Namespace").metadata.labels).toMatchObject({
+			"pod-security.kubernetes.io/enforce": "baseline",
+			"pod-security.kubernetes.io/audit": "restricted",
+		});
 		expect(findManifest(manifests, "ResourceQuota").spec.hard).toHaveProperty(
 			"count/jobs.batch",
-			"2",
+			"3",
 		);
 		const jobIndex = manifests.findIndex((manifest) => manifest.kind === "Job");
 		expect(
@@ -366,6 +447,7 @@ describe("Kubernetes TLS routing manifests", () => {
 				name: "shared",
 				className: "cilium",
 				certIssuerName: "letsencrypt-production",
+				mode: "dedicated",
 			},
 			domains: [{ host: "example.com", path: "/" }],
 			port: 3000,

@@ -70,6 +70,7 @@ export const createPlatformReleasePlan = async (
 				placement,
 				clusterMetadata: runtimeMetadata,
 				nodePool: runtimeTarget.nodePool,
+				buildPool,
 			}),
 			edgeRouter: createKubernetesEdgeRouter({
 				client,

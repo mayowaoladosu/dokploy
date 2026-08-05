@@ -64,6 +64,7 @@ describe("Kubernetes build executor", () => {
 		const apply = vi.fn<KubernetesControlPlane["apply"]>(async () => undefined);
 		const client: KubernetesControlPlane = {
 			apply,
+			read: vi.fn(async () => null),
 			delete: vi.fn(async () => undefined),
 			readDeployment: vi.fn(async () => null),
 			readJob: vi.fn(async () => ({ status: { succeeded: 1 } }) as never),
@@ -167,6 +168,7 @@ describe("Kubernetes build executor", () => {
 			metadata: {
 				registryCredentialHelperConfigured: true,
 				runtimeImagePullIdentityConfigured: true,
+				rootlessBuilderValidated: true,
 				supplyChain: {
 					verifierImage: `registry.example.com/platform/verifier@sha256:${"f".repeat(64)}`,
 					signingKeyRef: "awskms:///alias/vlyv-image-signing",
@@ -182,7 +184,10 @@ describe("Kubernetes build executor", () => {
 			placement,
 			clusterMetadata: {},
 			buildPool,
-			nodePool: null,
+			nodePool: {
+				labels: { "vlyv.dev/pool": "build" },
+				runtimeClassName: "gvisor",
+			} as never,
 		});
 		const application = {
 			applicationId: "application-1",

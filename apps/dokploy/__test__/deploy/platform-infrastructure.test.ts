@@ -1,12 +1,16 @@
-import { createKubernetesControlPlane } from "@dokploy/server/services/kubernetes/client";
+import {
+	createKubernetesControlPlane,
+	type KubernetesControlPlane,
+} from "@dokploy/server/services/kubernetes/client";
 import {
 	assertBuildPoolReadiness,
 	assertKubernetesClusterReadiness,
 	buildApplicationNamespace,
 	selectKubernetesPlacementCandidate,
+	verifyKubernetesClusterCapabilities,
 } from "@dokploy/server/services/platform-infrastructure";
 import { classifyKubernetesDeployment } from "@dokploy/server/services/platform-reconciler";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 describe("platform infrastructure placement", () => {
 	const candidates = [
@@ -112,6 +116,7 @@ describe("Kubernetes cluster readiness", () => {
 					gatewayClassName: "cilium",
 					certManagerEnabled: true,
 					certIssuerName: "letsencrypt-production",
+					externalDnsEnabled: true,
 				},
 			}),
 		).not.toThrow();
@@ -151,6 +156,7 @@ describe("Kubernetes cluster readiness", () => {
 				metadata: {
 					registryCredentialHelperConfigured: true,
 					runtimeImagePullIdentityConfigured: true,
+					rootlessBuilderValidated: true,
 				},
 			}),
 		).toThrow("supplyChain policy");
@@ -172,6 +178,7 @@ describe("Kubernetes cluster readiness", () => {
 				metadata: {
 					registryCredentialHelperConfigured: true,
 					runtimeImagePullIdentityConfigured: true,
+					rootlessBuilderValidated: true,
 					supplyChain: {
 						verifierImage: `registry.example.com/verifier@sha256:${"c".repeat(64)}`,
 						signingKeyRef: "awskms:///alias/vlyv-image-signing",
@@ -181,8 +188,76 @@ describe("Kubernetes cluster readiness", () => {
 						artifactStorageClassName: "encrypted-ephemeral",
 					},
 				},
+				nodePool: {
+					runtimeClassName: "gvisor",
+					labels: { "vlyv.dev/pool": "build" },
+				} as never,
 			}),
 		).not.toThrow();
+	});
+
+	it("probes required controllers and RuntimeClasses before activation", async () => {
+		const controlPlane = {
+			read: vi.fn(async (resource: { kind?: string }) => ({
+				metadata: { name: "present" },
+				status:
+					resource.kind === "Deployment"
+						? { availableReplicas: 1 }
+						: {
+								conditions: [
+									{
+										type:
+											resource.kind === "Gateway"
+												? "Programmed"
+												: resource.kind === "GatewayClass"
+													? "Accepted"
+													: "Ready",
+										status: "True",
+									},
+								],
+							},
+			})),
+		} as unknown as KubernetesControlPlane;
+
+		await expect(
+			verifyKubernetesClusterCapabilities({
+				client: controlPlane,
+				metadata: {
+					gatewayMode: "shared",
+					gatewayNamespace: "gateway-system",
+					gatewayName: "public",
+					gatewayClassName: "cilium",
+					certIssuerName: "letsencrypt-production",
+					externalDnsEnabled: true,
+				},
+				runtimeClassNames: ["gvisor"],
+			}),
+		).resolves.toBeUndefined();
+		expect(controlPlane.read).toHaveBeenCalledWith(
+			expect.objectContaining({ kind: "RuntimeClass" }),
+		);
+	});
+
+	it("rejects an operator attestation when a controller is absent", async () => {
+		const controlPlane = {
+			read: vi.fn(async (resource: { kind?: string }) =>
+				resource.kind === "Deployment" ? null : ({ metadata: {} } as never),
+			),
+		} as unknown as KubernetesControlPlane;
+
+		await expect(
+			verifyKubernetesClusterCapabilities({
+				client: controlPlane,
+				metadata: {
+					gatewayMode: "dedicated",
+					gatewayNamespace: "gateway-system",
+					gatewayName: "public",
+					gatewayClassName: "cilium",
+					certIssuerName: "letsencrypt-production",
+					externalDnsEnabled: true,
+				},
+			}),
+		).rejects.toThrow("capabilities are unavailable");
 	});
 });
 

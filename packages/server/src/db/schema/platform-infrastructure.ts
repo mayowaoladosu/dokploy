@@ -100,6 +100,8 @@ export type PlatformClusterMetadata = {
 	gatewayName?: string;
 	gatewaySectionName?: string;
 	gatewayClassName?: string;
+	gatewayMode?: "shared" | "dedicated" | "hybrid";
+	gatewayPodSelector?: Record<string, string>;
 	registrySecretName?: string;
 	secretsEncryptionEnabled?: boolean;
 	networkPolicyEnabled?: boolean;
@@ -107,6 +109,15 @@ export type PlatformClusterMetadata = {
 	gatewayApiEnabled?: boolean;
 	certManagerEnabled?: boolean;
 	certIssuerName?: string;
+	externalDnsEnabled?: boolean;
+	externalDnsNamespace?: string;
+	externalDnsDeploymentName?: string;
+	externalDnsTarget?: string;
+	externalDnsTtl?: number;
+	metricsServerNamespace?: string;
+	metricsServerDeploymentName?: string;
+	multiZoneEnabled?: boolean;
+	readOnlyRootFilesystem?: boolean;
 	allowedEgressCidrs?: string[];
 };
 
@@ -149,6 +160,7 @@ export type PlatformNodeTaint = {
 export type PlatformBuildPoolMetadata = {
 	registryCredentialHelperConfigured?: boolean;
 	runtimeImagePullIdentityConfigured?: boolean;
+	rootlessBuilderValidated?: boolean;
 	supplyChain?: {
 		verifierImage: string;
 		signingKeyRef: string;

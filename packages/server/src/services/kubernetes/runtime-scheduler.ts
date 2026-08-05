@@ -1,4 +1,5 @@
 import type {
+	PlatformBuildPool,
 	PlatformClusterMetadata,
 	PlatformNodePool,
 	PlatformPlacement,
@@ -16,6 +17,7 @@ import type { KubernetesControlPlane } from "./client";
 import {
 	buildKubernetesRuntimeManifests,
 	type KubernetesDomainRoute,
+	type KubernetesHealthCheck,
 	type KubernetesResourceSpec,
 	kubernetesApplicationResourceName,
 	kubernetesReleaseNamespace,
@@ -26,6 +28,7 @@ type KubernetesRuntimeSchedulerInput = {
 	placement: PlatformPlacement;
 	clusterMetadata: PlatformClusterMetadata;
 	nodePool: PlatformNodePool | null;
+	buildPool: PlatformBuildPool;
 	pollIntervalMs?: number;
 	sleep?: (durationMs: number) => Promise<void>;
 	fetcher?: typeof fetch;
@@ -40,6 +43,51 @@ const positiveInteger = (
 ) => {
 	const parsed = Number.parseInt(value ?? "", 10);
 	return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const boundedSeconds = (
+	nanoseconds: number | undefined,
+	fallback: number,
+	maximum: number,
+) => {
+	if (!nanoseconds || !Number.isFinite(nanoseconds) || nanoseconds <= 0) {
+		return fallback;
+	}
+	return Math.min(Math.max(Math.ceil(nanoseconds / 1_000_000_000), 1), maximum);
+};
+
+export const kubernetesHealthCheckForApplication = (
+	application: RuntimeApplication,
+): KubernetesHealthCheck | undefined => {
+	const port =
+		application.ports.find((candidate) => candidate.protocol !== "udp")
+			?.targetPort ?? (application.ports.length === 0 ? 3000 : undefined);
+	if (!port) return undefined;
+	const health = application.healthCheckSwarm;
+	const command = health?.Test?.join(" ") ?? "";
+	const urlMatch = command.match(
+		/https?:\/\/(?:localhost|127(?:\.\d{1,3}){3}|\[?::1\]?)(?::(\d{1,5}))?(\/[^\s'"]*)?/i,
+	);
+	const protocol = urlMatch?.[0]?.toLowerCase().startsWith("https://")
+		? "https"
+		: urlMatch
+			? "http"
+			: "tcp";
+	const probePort = urlMatch?.[1] ? Number.parseInt(urlMatch[1], 10) : port;
+	const periodSeconds = boundedSeconds(health?.Interval, 5, 60);
+	const startPeriodSeconds = boundedSeconds(health?.StartPeriod, 120, 600);
+	return {
+		protocol,
+		port: probePort,
+		...(protocol === "tcp" ? {} : { path: urlMatch?.[2] || "/" }),
+		periodSeconds,
+		timeoutSeconds: boundedSeconds(health?.Timeout, 2, 30),
+		failureThreshold: Math.max(health?.Retries ?? 3, 1),
+		startupFailureThreshold: Math.max(
+			Math.ceil(startPeriodSeconds / periodSeconds),
+			30,
+		),
+	};
 };
 
 const resourcesFor = (
@@ -68,8 +116,9 @@ const verifiedRoutesForApplication = async (
 	return findVerifiedDomainsByApplicationId(applicationId);
 };
 
-const runtimeState = (
+export const classifyKubernetesRuntimeDeployment = (
 	deployment: Awaited<ReturnType<KubernetesControlPlane["readDeployment"]>>,
+	expectedImageRef?: string,
 ): RuntimeStatus["state"] => {
 	if (!deployment) return "missing";
 	const failed = deployment.status?.conditions?.find(
@@ -80,7 +129,18 @@ const runtimeState = (
 	);
 	if (failed) return "failed";
 	const desired = deployment.spec?.replicas ?? 1;
-	return (deployment.status?.readyReplicas ?? 0) >= desired
+	const deployedImage = deployment.spec?.template.spec?.containers[0]?.image;
+	if (expectedImageRef && deployedImage !== expectedImageRef) return "pending";
+	if (
+		expectedImageRef &&
+		((deployment.status?.observedGeneration ?? 0) <
+			(deployment.metadata?.generation ?? 1) ||
+			(deployment.status?.updatedReplicas ?? 0) < desired)
+	) {
+		return "pending";
+	}
+	return (deployment.status?.readyReplicas ?? 0) >= desired &&
+		(deployment.status?.availableReplicas ?? 0) >= desired
 		? "ready"
 		: "pending";
 };
@@ -118,12 +178,14 @@ export const createKubernetesRuntimeScheduler = ({
 	placement,
 	clusterMetadata,
 	nodePool,
+	buildPool,
 	pollIntervalMs = 2_000,
 	sleep = defaultSleep,
 	fetcher = fetch,
 }: KubernetesRuntimeSchedulerInput): RuntimeScheduler => {
 	const getStatus = async (
 		application: RuntimeApplication,
+		expectedImageRef?: string,
 	): Promise<RuntimeStatus> => {
 		const releaseIdentity =
 			application.releaseIdentity || application.applicationId;
@@ -136,7 +198,10 @@ export const createKubernetesRuntimeScheduler = ({
 			namespace,
 			kubernetesApplicationResourceName(releaseIdentity),
 		);
-		const state = runtimeState(deployment);
+		const state = classifyKubernetesRuntimeDeployment(
+			deployment,
+			expectedImageRef,
+		);
 		const desiredReplicas =
 			deployment?.spec?.replicas ?? application.replicas ?? 1;
 		return {
@@ -157,11 +222,12 @@ export const createKubernetesRuntimeScheduler = ({
 	const waitUntilReady = async (
 		application: RuntimeApplication,
 		timeoutMs: number,
+		expectedImageRef?: string,
 	) => {
 		const deadline = Date.now() + timeoutMs;
 		let latest: RuntimeStatus | null = null;
 		while (Date.now() < deadline) {
-			latest = await getStatus(application);
+			latest = await getStatus(application, expectedImageRef);
 			if (latest.state === "ready") return latest;
 			if (latest.state === "failed") {
 				throw new Error(latest.message || "Kubernetes rollout failed");
@@ -199,6 +265,35 @@ export const createKubernetesRuntimeScheduler = ({
 				? {
 						namespace: clusterMetadata.gatewayNamespace,
 						name: clusterMetadata.gatewayName,
+						sectionName: clusterMetadata.gatewaySectionName,
+						className: clusterMetadata.gatewayClassName,
+						certIssuerName: clusterMetadata.certIssuerName,
+						mode:
+							clusterMetadata.gatewayMode === "dedicated"
+								? "dedicated"
+								: ("shared" as "shared" | "dedicated"),
+						podSelector: clusterMetadata.gatewayPodSelector,
+						externalDns: {
+							enabled: clusterMetadata.externalDnsEnabled === true,
+							target: clusterMetadata.externalDnsTarget,
+							ttl: clusterMetadata.externalDnsTtl,
+						},
+					}
+				: undefined;
+		const registrySecretName =
+			buildPool.registryAuthMode === "basic"
+				? buildPool.runtimeRegistrySecretName ||
+					clusterMetadata.registrySecretName
+				: undefined;
+		const registryCredentials =
+			buildPool.registryAuthMode === "basic" &&
+			buildPool.registryHost &&
+			buildPool.registryUsername &&
+			buildPool.registryPassword
+				? {
+						server: buildPool.registryHost,
+						username: buildPool.registryUsername,
+						password: buildPool.registryPassword,
 					}
 				: undefined;
 		try {
@@ -229,13 +324,19 @@ export const createKubernetesRuntimeScheduler = ({
 						nodePool?.runtimeClassName || clusterMetadata.runtimeClassName,
 					nodeSelector: nodePool?.labels,
 					tolerations: nodePool?.taints,
-					registrySecretName: clusterMetadata.registrySecretName,
+					registrySecretName,
+					registryCredentials,
+					healthCheck: kubernetesHealthCheckForApplication(application),
+					terminationGracePeriodSeconds: 30,
+					multiZone: clusterMetadata.multiZoneEnabled === true,
+					readOnlyRootFilesystem:
+						clusterMetadata.readOnlyRootFilesystem === true,
 					gateway: networkGateway,
 					domains: [],
 					allowedEgressCidrs: clusterMetadata.allowedEgressCidrs,
 				}),
 			);
-			const status = await waitUntilReady(application, timeoutMs);
+			const status = await waitUntilReady(application, timeoutMs, imageRef);
 			await markPlatformPlacementReconciled(placement.placementId, "active", {
 				imageRef,
 				readyReplicas: status.readyReplicas,
@@ -293,25 +394,57 @@ export const createKubernetesRuntimeScheduler = ({
 				return;
 			}
 			const name = kubernetesApplicationResourceName(releaseIdentity);
+			const registrySecretName =
+				buildPool.registryAuthMode === "basic"
+					? buildPool.runtimeRegistrySecretName ||
+						clusterMetadata.registrySecretName
+					: undefined;
 			await Promise.all(
 				[
+					["gateway.networking.k8s.io/v1", "HTTPRoute", name],
 					["autoscaling/v2", "HorizontalPodAutoscaler"],
 					["policy/v1", "PodDisruptionBudget"],
 					["apps/v1", "Deployment"],
 					["v1", "Service"],
 					["v1", "Secret"],
 					["v1", "ServiceAccount"],
-				].map(([apiVersion, kind]) =>
+					...(registrySecretName ? [["v1", "Secret", registrySecretName]] : []),
+				].map(([apiVersion, kind, resourceName]) =>
 					client.delete({
 						apiVersion,
 						kind,
 						metadata: {
-							name: kind === "Secret" ? `${name}-env` : name,
+							name: resourceName || (kind === "Secret" ? `${name}-env` : name),
 							namespace,
 						},
 					}),
 				),
 			);
+			if (
+				clusterMetadata.gatewayNamespace &&
+				(clusterMetadata.gatewayMode === "dedicated" ||
+					clusterMetadata.gatewayMode === "hybrid" ||
+					clusterMetadata.gatewayMode === undefined)
+			) {
+				await Promise.all([
+					client.delete({
+						apiVersion: "gateway.networking.k8s.io/v1",
+						kind: "Gateway",
+						metadata: {
+							name: `${name}-gateway`,
+							namespace: clusterMetadata.gatewayNamespace,
+						},
+					}),
+					client.delete({
+						apiVersion: "cert-manager.io/v1",
+						kind: "Certificate",
+						metadata: {
+							name: `${name}-tls`,
+							namespace: clusterMetadata.gatewayNamespace,
+						},
+					}),
+				]);
+			}
 		},
 	};
 };
