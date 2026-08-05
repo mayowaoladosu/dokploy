@@ -15,10 +15,14 @@ import { and, eq } from "drizzle-orm";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { applications, compose, github } from "@/server/db/schema";
 import type { DeploymentJob } from "@/server/queues/queue-types";
-import { myQueue } from "@/server/queues/queueSetup";
+import {
+	cleanQueuesByPreviewDeployment,
+	myQueue,
+} from "@/server/queues/queueSetup";
 import { deploy } from "@/server/utils/deploy";
 import {
 	extractCommitMessage,
+	extractDeliveryId,
 	extractHash,
 	logWebhookError,
 } from "./[refreshToken]";
@@ -69,6 +73,7 @@ export default async function handler(
 		res.status(401).json({ message: "Unauthorized" });
 		return;
 	}
+	const deliveryId = extractDeliveryId(req.headers);
 
 	if (req.headers["x-github-event"] === "ping") {
 		res.status(200).json({ message: "Ping received, webhook is active" });
@@ -151,6 +156,7 @@ export default async function handler(
 					{
 						removeOnComplete: true,
 						removeOnFail: true,
+						jobId: deliveryId,
 					},
 				);
 			}
@@ -191,6 +197,7 @@ export default async function handler(
 					{
 						removeOnComplete: true,
 						removeOnFail: true,
+						jobId: deliveryId,
 					},
 				);
 			}
@@ -271,6 +278,7 @@ export default async function handler(
 					{
 						removeOnComplete: true,
 						removeOnFail: true,
+						jobId: deliveryId,
 					},
 				);
 			}
@@ -319,6 +327,7 @@ export default async function handler(
 					{
 						removeOnComplete: true,
 						removeOnFail: true,
+						jobId: deliveryId,
 					},
 				);
 			}
@@ -346,6 +355,10 @@ export default async function handler(
 			if (previewDeploymentResult.length > 0) {
 				for (const previewDeployment of previewDeploymentResult) {
 					try {
+						await cleanQueuesByPreviewDeployment(
+							previewDeployment.previewDeploymentId,
+							{ waitForCompletion: true },
+						);
 						await removePreviewDeployment(
 							previewDeployment.previewDeploymentId,
 						);
@@ -528,6 +541,7 @@ export default async function handler(
 						{
 							removeOnComplete: true,
 							removeOnFail: true,
+							jobId: deliveryId,
 						},
 					);
 				}

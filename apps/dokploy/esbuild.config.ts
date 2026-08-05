@@ -1,3 +1,6 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { bundleWorkflowCode } from "@temporalio/worker";
 import dotenv, { type DotenvParseOutput } from "dotenv";
 import esbuild from "esbuild";
 
@@ -7,8 +10,8 @@ function prepareDefine(config: DotenvParseOutput | undefined) {
 	const define = {};
 	// @ts-ignore
 	for (const [key, value] of Object.entries(config)) {
-		// Skip DATABASE_URL to allow runtime environment variable override
-		if (key === "DATABASE_URL") {
+		// Infrastructure endpoints and credentials must remain runtime-only.
+		if (key === "DATABASE_URL" || key.startsWith("TEMPORAL_")) {
 			continue;
 		}
 		// @ts-ignore
@@ -20,8 +23,9 @@ function prepareDefine(config: DotenvParseOutput | undefined) {
 const define = prepareDefine(result.parsed);
 
 try {
-	esbuild
-		.build({
+	await mkdir(path.resolve("dist"), { recursive: true });
+	await Promise.all([
+		esbuild.build({
 			entryPoints: {
 				server: "server/server.ts",
 				migration: "migration.ts",
@@ -41,10 +45,14 @@ try {
 			tsconfig: "tsconfig.server.json",
 			define,
 			packages: "external",
-		})
-		.catch(() => {
-			return process.exit(1);
-		});
+		}),
+		bundleWorkflowCode({
+			workflowsPath: path.resolve("server/temporal/workflows.ts"),
+		}).then((bundle) =>
+			writeFile(path.resolve("dist/temporal-workflows.js"), bundle.code),
+		),
+	]);
 } catch (error) {
-	console.log(error);
+	console.error(error);
+	process.exitCode = 1;
 }

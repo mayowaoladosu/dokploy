@@ -8,6 +8,7 @@ import {
 	createReleaseStateMachine,
 	IS_CLOUD,
 	IS_HOSTED,
+	IS_MANAGED_PAAS,
 	initCancelDeployments,
 	initCronJobs,
 	initEnterpriseBackupCronJobs,
@@ -22,6 +23,9 @@ import {
 import { config } from "dotenv";
 import next from "next";
 import packageInfo from "../package.json";
+import { closeTemporalClient } from "./temporal/client";
+import { temporalConfiguration } from "./temporal/config";
+import { startTemporalWorker, stopTemporalWorker } from "./temporal/worker";
 import { setupDockerContainerLogsWebSocketServer } from "./wss/docker-container-logs";
 import { setupDockerContainerTerminalWebSocketServer } from "./wss/docker-container-terminal";
 import { setupDockerStatsMonitoringSocketServer } from "./wss/docker-stats";
@@ -31,6 +35,11 @@ import { setupTerminalWebSocketServer } from "./wss/terminal";
 
 config({ path: ".env" });
 assertManagedPlatformConfiguration();
+if (IS_MANAGED_PAAS && !temporalConfiguration().enabled) {
+	throw new Error(
+		"Managed mode requires TEMPORAL_ENABLED=true and a configured Temporal service",
+	);
+}
 configureManagedDataProviderFromEnvironment();
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -53,6 +62,40 @@ void app.prepare().then(async () => {
 		const server = http.createServer((req, res) => {
 			handle(req, res);
 		});
+		const timers: NodeJS.Timeout[] = [];
+		let shuttingDown = false;
+		const shutdown = async (signal: NodeJS.Signals) => {
+			if (shuttingDown) return;
+			shuttingDown = true;
+			console.log(`Received ${signal}; shutting down gracefully`);
+			for (const timer of timers) clearInterval(timer);
+
+			const httpClosed = new Promise<void>((resolve, reject) => {
+				server.close((error) => (error ? reject(error) : resolve()));
+			});
+			const queueClosed = !IS_CLOUD
+				? import("./queues/queueSetup").then(({ closeDeploymentQueue }) =>
+						closeDeploymentQueue(),
+					)
+				: Promise.resolve();
+			const results = await Promise.allSettled([
+				httpClosed,
+				queueClosed,
+				stopTemporalWorker(),
+				closeTemporalClient(),
+				app.close(),
+			]);
+			const failures = results.filter(
+				(result): result is PromiseRejectedResult =>
+					result.status === "rejected",
+			);
+			for (const failure of failures) {
+				console.error("Graceful shutdown step failed", failure.reason);
+			}
+			process.exitCode = failures.length > 0 ? 1 : 0;
+		};
+		process.once("SIGTERM", () => void shutdown("SIGTERM"));
+		process.once("SIGINT", () => void shutdown("SIGINT"));
 
 		// WEBSOCKET
 		setupDrawerLogsWebSocketServer(server);
@@ -64,6 +107,10 @@ void app.prepare().then(async () => {
 			setupDockerStatsMonitoringSocketServer(server);
 		}
 
+		if (temporalConfiguration().enabled) {
+			await startTemporalWorker();
+			console.log("Temporal deployment worker started");
+		}
 		server.listen(PORT, HOST);
 		console.log(`Server Started on: http://${HOST}:${PORT}`);
 		const reconciledDomains = await reconcileDomainVerifications();
@@ -85,6 +132,7 @@ void app.prepare().then(async () => {
 			);
 		}, 60_000);
 		placementReconciliationTimer.unref();
+		timers.push(placementReconciliationTimer);
 		if (process.env.NODE_ENV === "production" && !IS_CLOUD) {
 			createDefaultMiddlewares();
 			await initializeNetwork();
@@ -94,15 +142,20 @@ void app.prepare().then(async () => {
 			await initVolumeBackupsCronJobs();
 			await sendDokployRestartNotifications();
 		}
+		const temporalEnabled = temporalConfiguration().enabled;
+		const defaultStaleReleaseTimeoutMs = temporalEnabled
+			? 4 * 60 * 60 * 1_000
+			: 600_000;
 		const configuredStaleReleaseTimeoutMs = Number.parseInt(
-			process.env.RELEASE_STALE_TIMEOUT_MS || "600000",
+			process.env.RELEASE_STALE_TIMEOUT_MS ||
+				String(defaultStaleReleaseTimeoutMs),
 			10,
 		);
 		const staleReleaseTimeoutMs =
 			Number.isFinite(configuredStaleReleaseTimeoutMs) &&
 			configuredStaleReleaseTimeoutMs > 0
 				? configuredStaleReleaseTimeoutMs
-				: 600_000;
+				: defaultStaleReleaseTimeoutMs;
 		const releaseStateMachine = createReleaseStateMachine();
 		const reconcileStaleReleases = async () => {
 			const reconciledReleaseCount = await releaseStateMachine.reconcileStale(
@@ -119,6 +172,7 @@ void app.prepare().then(async () => {
 			);
 		}, 60_000);
 		releaseReconciliationTimer.unref();
+		timers.push(releaseReconciliationTimer);
 		await initEnterpriseBackupCronJobs();
 
 		if (!IS_CLOUD) {

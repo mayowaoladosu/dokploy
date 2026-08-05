@@ -21,6 +21,16 @@ export const logWebhookError = (context: string, error: unknown) => {
 	console.error(context, error);
 };
 
+export const extractDeliveryId = (headers: NextApiRequest["headers"]) => {
+	const value =
+		headers["idempotency-key"] ??
+		headers["x-github-delivery"] ??
+		headers["x-gitlab-event-uuid"] ??
+		headers["x-gitea-delivery"] ??
+		headers["x-request-uuid"];
+	return Array.isArray(value) ? value[0] : value;
+};
+
 /**
  * Helper function to get package_version from registry_package events
  */
@@ -37,6 +47,7 @@ export default async function handler(
 	res: NextApiResponse,
 ) {
 	const { refreshToken } = req.query;
+	const deliveryId = extractDeliveryId(req.headers);
 	try {
 		if (req.headers["x-github-event"] === "ping") {
 			res.status(200).json({ message: "Ping received, webhook is active" });
@@ -249,7 +260,7 @@ export default async function handler(
 			const jobData: DeploymentJob = {
 				applicationId: application.applicationId as string,
 				titleLog: deploymentTitle,
-				...(deploymentHash && { descriptionLog: `Hash: ${deploymentHash}` }),
+				descriptionLog: deploymentHash ? `Hash: ${deploymentHash}` : "",
 				type: "deploy",
 				applicationType: "application",
 				server: !!application.serverId,
@@ -267,6 +278,7 @@ export default async function handler(
 					{
 						removeOnComplete: true,
 						removeOnFail: true,
+						jobId: deliveryId,
 					},
 				);
 			}

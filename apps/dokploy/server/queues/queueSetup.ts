@@ -1,8 +1,9 @@
-import { IS_CLOUD } from "@dokploy/server";
+import { IS_CLOUD, IS_MANAGED_PAAS } from "@dokploy/server";
 import {
 	execAsync,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
+import { TemporalDeploymentQueue } from "../temporal/queue-adapter";
 import { resolveBuildsConcurrency } from "./concurrency";
 import { processDeploymentJob } from "./deployments-queue";
 import { type InMemoryJob, InMemoryQueue } from "./in-memory-queue";
@@ -16,7 +17,7 @@ import type { DeploymentJob } from "./queue-types";
  * run directly in the background — so we expose a no-op.
  */
 
-interface DeploymentQueue {
+export interface DeploymentQueue {
 	add: (
 		name: string,
 		data: DeploymentJob,
@@ -26,9 +27,14 @@ interface DeploymentQueue {
 	close: () => Promise<void>;
 	on: (...args: unknown[]) => void;
 	run: () => Promise<void>;
-	removeWaiting: (predicate: (data: DeploymentJob) => boolean) => number;
-	clearWaiting: () => number;
+	removeWaiting: (
+		predicate: (data: DeploymentJob) => boolean,
+		options?: { waitForCompletion?: boolean },
+	) => number | Promise<number>;
+	clearWaiting: () => number | Promise<number>;
 }
+
+export const shouldUseTemporalQueue = () => IS_MANAGED_PAAS;
 
 const createNoopQueue = (): DeploymentQueue => ({
 	add: () => Promise.resolve({ id: "noop" }),
@@ -66,9 +72,11 @@ const globalForQueue = globalThis as unknown as {
 };
 
 if (!globalForQueue.__dokployDeploymentQueue) {
-	globalForQueue.__dokployDeploymentQueue = !IS_CLOUD
-		? createInMemoryQueue()
-		: createNoopQueue();
+	globalForQueue.__dokployDeploymentQueue = shouldUseTemporalQueue()
+		? (new TemporalDeploymentQueue() as DeploymentQueue)
+		: !IS_CLOUD
+			? createInMemoryQueue()
+			: createNoopQueue();
 }
 
 const myQueue: DeploymentQueue = globalForQueue.__dokployDeploymentQueue;
@@ -88,35 +96,56 @@ export const getJobsByComposeId = async (composeId: string) => {
 	return jobs.filter((job) => (job.data as any)?.composeId === composeId);
 };
 
-if (!IS_CLOUD) {
-	process.on("SIGTERM", () => {
-		myQueue.close();
-		process.exit(0);
-	});
-}
+export const closeDeploymentQueue = () => myQueue.close();
 
-export const cleanQueuesByApplication = async (applicationId: string) => {
-	const removed = myQueue.removeWaiting(
+export const cleanQueuesByApplication = async (
+	applicationId: string,
+	options: { waitForCompletion?: boolean } = {},
+) => {
+	const removed = await myQueue.removeWaiting(
 		(data) => (data as any)?.applicationId === applicationId,
+		options,
 	);
 	if (removed > 0) {
 		console.log(
-			`Removed ${removed} waiting job(s) for application ${applicationId}`,
+			`Cancelled ${removed} queued deployment(s) for application ${applicationId}`,
 		);
 	}
+	return removed;
 };
 
 export const cleanQueuesByCompose = async (composeId: string) => {
-	const removed = myQueue.removeWaiting(
+	const removed = await myQueue.removeWaiting(
 		(data) => (data as any)?.composeId === composeId,
 	);
 	if (removed > 0) {
-		console.log(`Removed ${removed} waiting job(s) for compose ${composeId}`);
+		console.log(
+			`Cancelled ${removed} queued deployment(s) for compose ${composeId}`,
+		);
 	}
+	return removed;
+};
+
+export const cleanQueuesByPreviewDeployment = async (
+	previewDeploymentId: string,
+	options: { waitForCompletion?: boolean } = {},
+) => {
+	const removed = await myQueue.removeWaiting(
+		(data) =>
+			data.applicationType === "application-preview" &&
+			data.previewDeploymentId === previewDeploymentId,
+		options,
+	);
+	if (removed > 0) {
+		console.log(
+			`Cancelled ${removed} deployment workflow(s) for preview ${previewDeploymentId}`,
+		);
+	}
+	return removed;
 };
 
 export const cleanAllDeploymentQueue = async () => {
-	myQueue.clearWaiting();
+	await myQueue.clearWaiting();
 	return true;
 };
 

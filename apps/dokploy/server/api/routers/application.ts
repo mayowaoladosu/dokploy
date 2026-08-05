@@ -290,6 +290,11 @@ export const applicationRouter = createTRPCRouter({
 					message: "You are not authorized to delete this application",
 				});
 			}
+			if (IS_MANAGED_PAAS || !IS_CLOUD) {
+				await cleanQueuesByApplication(input.applicationId, {
+					waitForCompletion: IS_MANAGED_PAAS,
+				});
+			}
 			const platformRuntime = await resolvePlatformRuntimeController(
 				application.applicationId,
 				application.appName,
@@ -311,10 +316,6 @@ export const applicationRouter = createTRPCRouter({
 				.delete(applications)
 				.where(eq(applications.applicationId, input.applicationId))
 				.returning();
-
-			if (!IS_CLOUD) {
-				await cleanQueuesByApplication(input.applicationId);
-			}
 
 			const cleanupOperations = [
 				async () => await deleteAllMiddlewares(application),
@@ -880,7 +881,11 @@ export const applicationRouter = createTRPCRouter({
 				deployment: ["cancel"],
 			});
 			const application = await findApplicationById(input.applicationId);
-			await killDockerBuild("application", application.serverId);
+			if (IS_MANAGED_PAAS) {
+				await cleanQueuesByApplication(input.applicationId);
+			} else {
+				await killDockerBuild("application", application.serverId);
+			}
 			await audit(ctx, {
 				action: "stop",
 				resourceType: "application",
@@ -1061,6 +1066,19 @@ export const applicationRouter = createTRPCRouter({
 				deployment: ["cancel"],
 			});
 			const application = await findApplicationById(input.applicationId);
+			if (IS_MANAGED_PAAS) {
+				await cleanQueuesByApplication(input.applicationId);
+				await audit(ctx, {
+					action: "stop",
+					resourceType: "application",
+					resourceId: application.applicationId,
+					resourceName: application.appName,
+				});
+				return {
+					success: true,
+					message: "Deployment cancellation requested",
+				};
+			}
 
 			if (IS_CLOUD && application.serverId) {
 				try {

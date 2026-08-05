@@ -44,6 +44,7 @@ import {
 	updatePreviewDeployment,
 } from "./preview-deployment";
 import { validUniqueServerAppName } from "./project";
+import { ReleaseConflictError } from "./release-state-machine";
 export type Application = typeof applications.$inferSelect;
 
 export const createApplication = async (
@@ -213,28 +214,37 @@ export const deployApplication = async ({
 	applicationId,
 	titleLog = "Manual deployment",
 	descriptionLog = "",
+	deploymentId,
+	signal,
 }: {
 	applicationId: string;
 	titleLog: string;
 	descriptionLog: string;
+	deploymentId?: string;
+	signal?: AbortSignal;
 }) => {
 	const application = await findApplicationById(applicationId);
 	const serverId = application.buildServerId || application.serverId;
 	const releasePlan = await createPlatformReleasePlan(application);
 
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${application.environment.projectId}/environment/${application.environmentId}/services/application/${application.applicationId}?tab=deployments`;
-	const deployment = await createDeployment({
-		applicationId: applicationId,
-		title: titleLog,
-		description: descriptionLog,
-	});
+	const deployment = await createDeployment(
+		{
+			applicationId: applicationId,
+			title: titleLog,
+			description: descriptionLog,
+		},
+		{ deploymentId },
+	);
 
 	try {
 		await releasePlan.orchestrator.execute({
 			application,
 			deployment,
 			intent: { kind: "deploy" },
+			signal,
 		});
+		signal?.throwIfAborted();
 		await updateDeploymentStatus(deployment.deploymentId, "done");
 		await updateApplicationStatus(applicationId, "done");
 
@@ -248,6 +258,8 @@ export const deployApplication = async ({
 			environmentName: application.environment.name,
 		});
 	} catch (error) {
+		if (signal?.aborted) throw error;
+		if (error instanceof ReleaseConflictError) throw error;
 		await appendDeploymentFailureLog({
 			error,
 			logPath: deployment.logPath,
@@ -269,7 +281,7 @@ export const deployApplication = async ({
 		throw error;
 	} finally {
 		// Only extract commit info for non-docker sources
-		if (application.sourceType !== "docker") {
+		if (!signal?.aborted && application.sourceType !== "docker") {
 			const commitInfo = await getGitCommitInfo({
 				appName: application.appName,
 				type: "application",
@@ -290,20 +302,27 @@ export const rebuildApplication = async ({
 	applicationId,
 	titleLog = "Rebuild deployment",
 	descriptionLog = "",
+	deploymentId,
+	signal,
 }: {
 	applicationId: string;
 	titleLog: string;
 	descriptionLog: string;
+	deploymentId?: string;
+	signal?: AbortSignal;
 }) => {
 	const application = await findApplicationById(applicationId);
 	const serverId = application.buildServerId || application.serverId;
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${application.environment.projectId}/environment/${application.environmentId}/services/application/${application.applicationId}?tab=deployments`;
 
-	const deployment = await createDeployment({
-		applicationId: applicationId,
-		title: titleLog,
-		description: descriptionLog,
-	});
+	const deployment = await createDeployment(
+		{
+			applicationId: applicationId,
+			title: titleLog,
+			description: descriptionLog,
+		},
+		{ deploymentId },
+	);
 
 	try {
 		const releasePlan = await createPlatformReleasePlan(application);
@@ -311,7 +330,9 @@ export const rebuildApplication = async ({
 			application,
 			deployment,
 			intent: { kind: "rebuild" },
+			signal,
 		});
+		signal?.throwIfAborted();
 		await updateDeploymentStatus(deployment.deploymentId, "done");
 		await updateApplicationStatus(applicationId, "done");
 
@@ -325,6 +346,8 @@ export const rebuildApplication = async ({
 			environmentName: application.environment.name,
 		});
 	} catch (error) {
+		if (signal?.aborted) throw error;
+		if (error instanceof ReleaseConflictError) throw error;
 		await appendDeploymentFailureLog({
 			error,
 			logPath: deployment.logPath,
@@ -343,11 +366,15 @@ export const deployPreviewApplication = async ({
 	titleLog = "Preview Deployment",
 	descriptionLog = "",
 	previewDeploymentId,
+	deploymentId,
+	signal,
 }: {
 	applicationId: string;
 	titleLog: string;
 	descriptionLog: string;
 	previewDeploymentId: string;
+	deploymentId?: string;
+	signal?: AbortSignal;
 }) => {
 	const application = await findApplicationById(applicationId);
 	const previewDeployment =
@@ -358,11 +385,14 @@ export const deployPreviewApplication = async ({
 			message: "Preview domain is not ready",
 		});
 	}
-	const deployment = await createDeploymentPreview({
-		title: titleLog,
-		description: descriptionLog,
-		previewDeploymentId: previewDeploymentId,
-	});
+	const deployment = await createDeploymentPreview(
+		{
+			title: titleLog,
+			description: descriptionLog,
+			previewDeploymentId: previewDeploymentId,
+		},
+		{ deploymentId },
+	);
 
 	await updatePreviewDeployment(previewDeploymentId, {
 		createdAt: new Date().toISOString(),
@@ -434,7 +464,9 @@ export const deployPreviewApplication = async ({
 				kind: "preview-deploy",
 				sourceApplicationId: applicationId,
 			},
+			signal,
 		});
+		signal?.throwIfAborted();
 		const successComment = getIssueComment(
 			application.name,
 			"success",
@@ -449,6 +481,8 @@ export const deployPreviewApplication = async ({
 			previewStatus: "done",
 		});
 	} catch (error) {
+		if (signal?.aborted) throw error;
+		if (error instanceof ReleaseConflictError) throw error;
 		const comment = getIssueComment(application.name, "error", previewDomain);
 		await updateIssueComment({
 			...issueParams,
@@ -469,11 +503,15 @@ export const rebuildPreviewApplication = async ({
 	titleLog = "Rebuild Preview Deployment",
 	descriptionLog = "",
 	previewDeploymentId,
+	deploymentId,
+	signal,
 }: {
 	applicationId: string;
 	titleLog: string;
 	descriptionLog: string;
 	previewDeploymentId: string;
+	deploymentId?: string;
+	signal?: AbortSignal;
 }) => {
 	const application = await findApplicationById(applicationId);
 	const previewDeployment =
@@ -485,11 +523,14 @@ export const rebuildPreviewApplication = async ({
 		});
 	}
 
-	const deployment = await createDeploymentPreview({
-		title: titleLog,
-		description: descriptionLog,
-		previewDeploymentId: previewDeploymentId,
-	});
+	const deployment = await createDeploymentPreview(
+		{
+			title: titleLog,
+			description: descriptionLog,
+			previewDeploymentId: previewDeploymentId,
+		},
+		{ deploymentId },
+	);
 
 	const previewDomain = getDomainHost(previewDeployment?.domain as Domain);
 	const issueParams = {
@@ -562,7 +603,9 @@ export const rebuildPreviewApplication = async ({
 				kind: "preview-rebuild",
 				sourceApplicationId: applicationId,
 			},
+			signal,
 		});
+		signal?.throwIfAborted();
 
 		const successComment = getIssueComment(
 			application.name,
@@ -578,6 +621,8 @@ export const rebuildPreviewApplication = async ({
 			previewStatus: "done",
 		});
 	} catch (error) {
+		if (signal?.aborted) throw error;
+		if (error instanceof ReleaseConflictError) throw error;
 		const serverId = application.buildServerId || application.serverId;
 		await appendDeploymentFailureLog({
 			error,

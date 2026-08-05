@@ -10,7 +10,10 @@ import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
 import { apiFindAllByApplication } from "@/server/db/schema";
 import type { DeploymentJob } from "@/server/queues/queue-types";
-import { myQueue } from "@/server/queues/queueSetup";
+import {
+	cleanQueuesByPreviewDeployment,
+	myQueue,
+} from "@/server/queues/queueSetup";
 import { deploy } from "@/server/utils/deploy";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 
@@ -49,6 +52,9 @@ export const previewDeploymentRouter = createTRPCRouter({
 				previewDeployment.applicationId,
 				{ deployment: ["cancel"] },
 			);
+			await cleanQueuesByPreviewDeployment(input.previewDeploymentId, {
+				waitForCompletion: true,
+			});
 			await removePreviewDeployment(input.previewDeploymentId);
 			await audit(ctx, {
 				action: "delete",

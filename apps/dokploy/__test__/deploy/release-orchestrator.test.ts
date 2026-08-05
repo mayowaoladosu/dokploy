@@ -1,4 +1,4 @@
-import type { Release } from "@dokploy/server/db/schema";
+import type { Release, ReleaseEvent } from "@dokploy/server/db/schema";
 import type {
 	BuildExecutionArtifact,
 	BuildExecutor,
@@ -54,6 +54,7 @@ const release = {
 	applicationId: application.applicationId,
 	state: "queued",
 	stateVersion: 0,
+	previousImageRef: null,
 } as Release;
 
 const readyHealth: RuntimeHealthResult = {
@@ -64,6 +65,9 @@ const readyHealth: RuntimeHealthResult = {
 };
 
 const createHarness = (health: RuntimeHealthResult = readyHealth) => {
+	let currentRelease = { ...release };
+	let storedArtifact: BuildExecutionArtifact | null = null;
+	const events: ReleaseEvent[] = [];
 	const buildExecutor: BuildExecutor = {
 		name: "test-executor",
 		isolation: "ephemeral",
@@ -96,29 +100,37 @@ const createHarness = (health: RuntimeHealthResult = readyHealth) => {
 		),
 		remove: vi.fn(async () => undefined),
 	};
-	const transition = vi.fn(async (_releaseId, state) => ({
-		...release,
-		state,
-	}));
+	const transition = vi.fn(async (_releaseId, state) => {
+		const fromState = currentRelease.state;
+		currentRelease = {
+			...currentRelease,
+			state,
+			stateVersion: currentRelease.stateVersion + 1,
+		};
+		events.push({ fromState, toState: state } as ReleaseEvent);
+		return currentRelease;
+	});
 	const stateMachine: ReleaseStateMachine = {
-		create: vi.fn(async () => release),
+		create: vi.fn(async () => currentRelease),
 		transition,
 		heartbeat: vi.fn(async () => undefined),
-		attachArtifact: vi.fn(async () => ({
-			...release,
-			artifactId: "artifact-1",
-		})),
-		setPreviousImageRef: vi.fn(async () => undefined),
+		attachArtifact: vi.fn(async (_releaseId, value) => {
+			storedArtifact = value;
+			currentRelease = { ...currentRelease, artifactId: "artifact-1" };
+			return currentRelease;
+		}),
+		setPreviousImageRef: vi.fn(async (_releaseId, imageRef) => {
+			currentRelease = { ...currentRelease, previousImageRef: imageRef };
+		}),
 		recordHealth: vi.fn(async () => undefined),
-		fail: vi.fn(
-			async (): Promise<Release> => ({
-				...release,
-				state: "failed",
-			}),
-		),
-		get: vi.fn(async () => release),
-		getByDeployment: vi.fn(async () => release),
-		getEvents: vi.fn(async () => []),
+		getArtifact: vi.fn(async () => storedArtifact),
+		fail: vi.fn(async (): Promise<Release> => {
+			currentRelease = { ...currentRelease, state: "failed" };
+			return currentRelease;
+		}),
+		get: vi.fn(async () => currentRelease),
+		getByDeployment: vi.fn(async () => currentRelease),
+		getEvents: vi.fn(async () => events),
 		reconcileStale: vi.fn(async () => 0),
 	};
 	const sourcePreparer: SourcePreparer = {
@@ -172,6 +184,22 @@ const createHarness = (health: RuntimeHealthResult = readyHealth) => {
 		telemetrySink,
 		usageMeter,
 		transition,
+		recoverAt: (
+			state: Release["state"],
+			options: {
+				artifact?: BuildExecutionArtifact | null;
+				previousImageRef?: string | null;
+			} = {},
+		) => {
+			currentRelease = {
+				...currentRelease,
+				state,
+				previousImageRef:
+					options.previousImageRef ?? currentRelease.previousImageRef,
+				artifactId: options.artifact ? "artifact-1" : currentRelease.artifactId,
+			};
+			if (options.artifact !== undefined) storedArtifact = options.artifact;
+		},
 	};
 };
 
@@ -320,6 +348,174 @@ describe("release orchestrator", () => {
 		expect(harness.runtimeScheduler.remove).toHaveBeenCalledWith({
 			application,
 		});
+	});
+
+	it("fences cancellation and restores the previous runtime", async () => {
+		const harness = createHarness();
+		harness.recoverAt("scheduling", {
+			artifact,
+			previousImageRef: "registry.example.com/team/app@sha256:previous",
+		});
+
+		await harness.orchestrator.cancel({
+			application,
+			deploymentId: deployment.deploymentId,
+		});
+
+		expect(harness.transition).toHaveBeenCalledWith("release-1", "cancelled", {
+			reason: "Release cancelled",
+		});
+		expect(harness.buildExecutor.cancel).toHaveBeenCalledTimes(1);
+		expect(harness.runtimeScheduler.rollback).toHaveBeenCalledWith({
+			application,
+			imageRef: "registry.example.com/team/app@sha256:previous",
+		});
+		expect(harness.runtimeScheduler.remove).not.toHaveBeenCalled();
+	});
+
+	it("repeats cleanup safely after cancellation acknowledgement loss", async () => {
+		const harness = createHarness();
+		harness.recoverAt("cancelled", {
+			artifact,
+			previousImageRef: "registry.example.com/team/app@sha256:previous",
+		});
+
+		await harness.orchestrator.cancel({
+			application,
+			deploymentId: deployment.deploymentId,
+		});
+
+		expect(harness.transition).not.toHaveBeenCalled();
+		expect(harness.buildExecutor.cancel).toHaveBeenCalledTimes(1);
+		expect(harness.runtimeScheduler.rollback).toHaveBeenCalledTimes(1);
+	});
+
+	it("removes a partial first release when it is cancelled", async () => {
+		const harness = createHarness();
+		harness.recoverAt("verifying", { artifact });
+
+		await harness.orchestrator.cancel({
+			application,
+			deploymentId: deployment.deploymentId,
+		});
+
+		expect(harness.edgeRouter.withdraw).toHaveBeenCalledWith({ application });
+		expect(harness.runtimeScheduler.remove).toHaveBeenCalledWith({
+			application,
+		});
+		expect(harness.runtimeScheduler.rollback).not.toHaveBeenCalled();
+	});
+
+	it("fences an interrupted build without failing or mutating runtime", async () => {
+		const harness = createHarness();
+		const controller = new AbortController();
+		vi.mocked(harness.buildExecutor.execute).mockImplementationOnce(
+			async () => {
+				controller.abort();
+				throw new Error("build interrupted");
+			},
+		);
+
+		await expect(
+			harness.orchestrator.execute({
+				application,
+				deployment,
+				intent: { kind: "deploy" },
+				signal: controller.signal,
+			}),
+		).rejects.toThrow("build interrupted");
+
+		expect(harness.transition.mock.calls.map((call) => call[1])).toEqual([
+			"preparing",
+			"building",
+			"cancelled",
+		]);
+		expect(harness.stateMachine.fail).not.toHaveBeenCalled();
+
+		expect(
+			await harness.orchestrator.cancel({
+				application,
+				deploymentId: deployment.deploymentId,
+			}),
+		).toBe("cancelled");
+		expect(harness.buildExecutor.cancel).toHaveBeenCalledTimes(1);
+		expect(harness.runtimeScheduler.rollback).not.toHaveBeenCalled();
+		expect(harness.runtimeScheduler.remove).not.toHaveBeenCalled();
+	});
+
+	it("resumes from an artifact checkpoint without rebuilding", async () => {
+		const harness = createHarness();
+		harness.recoverAt("artifact_ready", {
+			artifact,
+			previousImageRef: "registry.example.com/team/app@sha256:previous",
+		});
+
+		await harness.orchestrator.execute({
+			application,
+			deployment,
+			intent: { kind: "deploy" },
+		});
+
+		expect(harness.buildExecutor.execute).not.toHaveBeenCalled();
+		expect(harness.runtimeScheduler.schedule).toHaveBeenCalledTimes(1);
+		expect(harness.transition.mock.calls.map((call) => call[1])).toEqual([
+			"scheduling",
+			"verifying",
+			"ready",
+		]);
+	});
+
+	it("re-applies an idempotent schedule after a scheduling crash", async () => {
+		const harness = createHarness();
+		harness.recoverAt("scheduling", {
+			artifact,
+			previousImageRef: "registry.example.com/team/app@sha256:previous",
+		});
+
+		await harness.orchestrator.execute({
+			application,
+			deployment,
+			intent: { kind: "deploy" },
+		});
+
+		expect(harness.buildExecutor.execute).not.toHaveBeenCalled();
+		expect(harness.runtimeScheduler.schedule).toHaveBeenCalledTimes(1);
+		expect(harness.transition.mock.calls.map((call) => call[1])).toEqual([
+			"verifying",
+			"ready",
+		]);
+	});
+
+	it("returns an already-ready release after acknowledgement loss", async () => {
+		const harness = createHarness();
+		harness.recoverAt("ready", { artifact });
+
+		const result = await harness.orchestrator.execute({
+			application,
+			deployment,
+			intent: { kind: "deploy" },
+		});
+
+		expect(result.artifact).toEqual(artifact);
+		expect(harness.buildExecutor.execute).not.toHaveBeenCalled();
+		expect(harness.runtimeScheduler.schedule).not.toHaveBeenCalled();
+		expect(harness.edgeRouter.publish).not.toHaveBeenCalled();
+	});
+
+	it("does not tear down a release that won a late cancellation race", async () => {
+		const harness = createHarness();
+		harness.recoverAt("ready", { artifact });
+
+		await expect(
+			harness.orchestrator.cancel({
+				application,
+				deploymentId: deployment.deploymentId,
+			}),
+		).resolves.toBe("ready");
+
+		expect(harness.buildExecutor.cancel).not.toHaveBeenCalled();
+		expect(harness.runtimeScheduler.rollback).not.toHaveBeenCalled();
+		expect(harness.runtimeScheduler.remove).not.toHaveBeenCalled();
 	});
 
 	it("retries transient artifact persistence failures", async () => {

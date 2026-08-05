@@ -128,7 +128,28 @@ export const createDeployment = async (
 		z.infer<typeof apiCreateDeployment>,
 		"deploymentId" | "createdAt" | "status" | "logPath"
 	>,
+	options: { deploymentId?: string } = {},
 ) => {
+	if (options.deploymentId) {
+		const existing = await db.query.deployments.findFirst({
+			where: eq(deployments.deploymentId, options.deploymentId),
+		});
+		if (existing) {
+			if (existing.applicationId !== deployment.applicationId) {
+				throw new TRPCError({
+					code: "CONFLICT",
+					message: "Deployment idempotency key belongs to another application",
+				});
+			}
+			if (!existing.logPath) {
+				throw new TRPCError({
+					code: "PRECONDITION_FAILED",
+					message: "The deterministic deployment failed during initialization",
+				});
+			}
+			return existing;
+		}
+	}
 	const application = await findApplicationById(deployment.applicationId);
 	await removeLastTenDeployments(
 		deployment.applicationId,
@@ -163,6 +184,7 @@ export const createDeployment = async (
 		const deploymentCreate = await db
 			.insert(deployments)
 			.values({
+				...(options.deploymentId ? { deploymentId: options.deploymentId } : {}),
 				applicationId: deployment.applicationId,
 				title: deployment.title || "Deployment",
 				status: "running",
@@ -173,18 +195,27 @@ export const createDeployment = async (
 					buildServerId: application.buildServerId,
 				}),
 			})
+			.onConflictDoNothing({ target: deployments.deploymentId })
 			.returning();
-		if (deploymentCreate.length === 0 || !deploymentCreate[0]) {
-			throw new TRPCError({
-				code: "BAD_REQUEST",
-				message: "Error creating the deployment",
+		const created = deploymentCreate[0];
+		if (created) return created;
+		if (options.deploymentId) {
+			const concurrent = await db.query.deployments.findFirst({
+				where: eq(deployments.deploymentId, options.deploymentId),
 			});
+			if (concurrent?.applicationId === deployment.applicationId) {
+				return concurrent;
+			}
 		}
-		return deploymentCreate[0];
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Error creating the deployment",
+		});
 	} catch (error) {
 		await db
 			.insert(deployments)
 			.values({
+				...(options.deploymentId ? { deploymentId: options.deploymentId } : {}),
 				applicationId: deployment.applicationId,
 				title: deployment.title || "Deployment",
 				status: "error",
@@ -194,6 +225,7 @@ export const createDeployment = async (
 				startedAt: new Date().toISOString(),
 				finishedAt: new Date().toISOString(),
 			})
+			.onConflictDoNothing({ target: deployments.deploymentId })
 			.returning();
 		await updateApplicationStatus(application.applicationId, "error");
 		console.log(error);
@@ -209,7 +241,29 @@ export const createDeploymentPreview = async (
 		z.infer<typeof apiCreateDeploymentPreview>,
 		"deploymentId" | "createdAt" | "status" | "logPath"
 	>,
+	options: { deploymentId?: string } = {},
 ) => {
+	if (options.deploymentId) {
+		const existing = await db.query.deployments.findFirst({
+			where: eq(deployments.deploymentId, options.deploymentId),
+		});
+		if (existing) {
+			if (existing.previewDeploymentId !== deployment.previewDeploymentId) {
+				throw new TRPCError({
+					code: "CONFLICT",
+					message: "Deployment idempotency key belongs to another preview",
+				});
+			}
+			if (!existing.logPath) {
+				throw new TRPCError({
+					code: "PRECONDITION_FAILED",
+					message:
+						"The deterministic preview deployment failed during initialization",
+				});
+			}
+			return existing;
+		}
+	}
 	const previewDeployment = await findPreviewDeploymentById(
 		deployment.previewDeploymentId,
 	);
@@ -246,6 +300,7 @@ export const createDeploymentPreview = async (
 		const deploymentCreate = await db
 			.insert(deployments)
 			.values({
+				...(options.deploymentId ? { deploymentId: options.deploymentId } : {}),
 				title: deployment.title || "Deployment",
 				status: "running",
 				logPath: logFilePath,
@@ -253,18 +308,27 @@ export const createDeploymentPreview = async (
 				previewDeploymentId: deployment.previewDeploymentId,
 				startedAt: new Date().toISOString(),
 			})
+			.onConflictDoNothing({ target: deployments.deploymentId })
 			.returning();
-		if (deploymentCreate.length === 0 || !deploymentCreate[0]) {
-			throw new TRPCError({
-				code: "BAD_REQUEST",
-				message: "Error creating the deployment",
+		const created = deploymentCreate[0];
+		if (created) return created;
+		if (options.deploymentId) {
+			const concurrent = await db.query.deployments.findFirst({
+				where: eq(deployments.deploymentId, options.deploymentId),
 			});
+			if (concurrent?.previewDeploymentId === deployment.previewDeploymentId) {
+				return concurrent;
+			}
 		}
-		return deploymentCreate[0];
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Error creating the deployment",
+		});
 	} catch (error) {
 		await db
 			.insert(deployments)
 			.values({
+				...(options.deploymentId ? { deploymentId: options.deploymentId } : {}),
 				previewDeploymentId: deployment.previewDeploymentId,
 				title: deployment.title || "Deployment",
 				status: "error",
@@ -274,6 +338,7 @@ export const createDeploymentPreview = async (
 				startedAt: new Date().toISOString(),
 				finishedAt: new Date().toISOString(),
 			})
+			.onConflictDoNothing({ target: deployments.deploymentId })
 			.returning();
 		await updatePreviewDeployment(deployment.previewDeploymentId, {
 			previewStatus: "error",
@@ -956,7 +1021,9 @@ export const updateDeploymentStatus = async (
 		.set({
 			status: deploymentStatus,
 			finishedAt:
-				deploymentStatus === "done" || deploymentStatus === "error"
+				deploymentStatus === "done" ||
+				deploymentStatus === "error" ||
+				deploymentStatus === "cancelled"
 					? new Date().toISOString()
 					: null,
 		})

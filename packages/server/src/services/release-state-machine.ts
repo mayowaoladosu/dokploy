@@ -3,6 +3,7 @@ import {
 	applications,
 	buildArtifacts,
 	deployments,
+	previewDeployments,
 	type Release,
 	type ReleaseEvent,
 	type ReleaseState,
@@ -10,7 +11,7 @@ import {
 	releases,
 } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
-import { and, desc, eq, inArray, lt } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import type { BuildExecutionArtifact } from "./build-executor";
 import type { RuntimeHealthResult } from "./runtime-scheduler";
 
@@ -43,6 +44,13 @@ const detailsForError = (error: unknown) => ({
 	name: error instanceof Error ? error.name : "Error",
 });
 
+export class ReleaseConflictError extends Error {
+	constructor(message = "Another release is active for this application") {
+		super(message);
+		this.name = "ReleaseConflictError";
+	}
+}
+
 export interface ReleaseStateMachine {
 	create(input: {
 		deploymentId: string;
@@ -65,6 +73,7 @@ export interface ReleaseStateMachine {
 		imageRef: string | null,
 	): Promise<void>;
 	recordHealth(releaseId: string, result: RuntimeHealthResult): Promise<void>;
+	getArtifact(releaseId: string): Promise<BuildExecutionArtifact | null>;
 	fail(releaseId: string, error: unknown): Promise<Release>;
 	get(releaseId: string): Promise<Release>;
 	getByDeployment(deploymentId: string): Promise<Release | null>;
@@ -94,15 +103,37 @@ export const createReleaseStateMachine = (): ReleaseStateMachine => ({
 		});
 		if (existing) return existing;
 
-		const previous = await db.query.releases.findFirst({
-			where: and(
-				eq(releases.applicationId, applicationId),
-				eq(releases.state, "ready"),
-			),
-			orderBy: [desc(releases.finishedAt)],
-		});
-
 		return db.transaction(async (tx) => {
+			const lockKey = `vlyv-release:${applicationId}`;
+			await tx.execute(
+				sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`,
+			);
+			const concurrent = await tx.query.releases.findFirst({
+				where: eq(releases.deploymentId, deploymentId),
+			});
+			if (concurrent) return concurrent;
+			const active = await tx.query.releases.findFirst({
+				where: and(
+					eq(releases.applicationId, applicationId),
+					inArray(releases.state, [
+						"queued",
+						"preparing",
+						"building",
+						"artifact_ready",
+						"scheduling",
+						"verifying",
+						"rolling_back",
+					]),
+				),
+			});
+			if (active) throw new ReleaseConflictError();
+			const previous = await tx.query.releases.findFirst({
+				where: and(
+					eq(releases.applicationId, applicationId),
+					eq(releases.state, "ready"),
+				),
+				orderBy: [desc(releases.finishedAt)],
+			});
 			const [release] = await tx
 				.insert(releases)
 				.values({
@@ -116,10 +147,10 @@ export const createReleaseStateMachine = (): ReleaseStateMachine => ({
 				.returning();
 
 			if (!release) {
-				const concurrent = await tx.query.releases.findFirst({
+				const raced = await tx.query.releases.findFirst({
 					where: eq(releases.deploymentId, deploymentId),
 				});
-				if (concurrent) return concurrent;
+				if (raced) return raced;
 				throw new Error("Failed to create durable release");
 			}
 
@@ -222,7 +253,10 @@ export const createReleaseStateMachine = (): ReleaseStateMachine => ({
 					imageSizeBytes: artifact.imageSizeBytes,
 					builder: artifact.builder,
 					executor: artifact.executor,
-					metadata: artifact.metadata,
+					metadata: {
+						...artifact.metadata,
+						durationMs: artifact.durationMs,
+					},
 				})
 				.onConflictDoNothing({ target: buildArtifacts.deploymentId })
 				.returning();
@@ -282,6 +316,28 @@ export const createReleaseStateMachine = (): ReleaseStateMachine => ({
 		});
 	},
 
+	getArtifact: async (releaseId) => {
+		const release = await db.query.releases.findFirst({
+			where: eq(releases.releaseId, releaseId),
+			with: { artifact: true },
+		});
+		if (!release?.artifact) return null;
+		const durationMs = release.artifact.metadata.durationMs;
+		return {
+			imageId: release.artifact.imageId,
+			imageDigest: release.artifact.imageDigest,
+			imageRef: release.artifact.imageRef,
+			imageSizeBytes: release.artifact.imageSizeBytes,
+			builder: release.artifact.builder,
+			executor: release.artifact.executor,
+			durationMs:
+				typeof durationMs === "number" && Number.isFinite(durationMs)
+					? durationMs
+					: 0,
+			metadata: release.artifact.metadata,
+		};
+	},
+
 	fail: async (releaseId, error) => {
 		const release = await findRelease(releaseId);
 		if (terminalStates.has(release.state)) return release;
@@ -314,6 +370,7 @@ export const createReleaseStateMachine = (): ReleaseStateMachine => ({
 					"artifact_ready",
 					"scheduling",
 					"verifying",
+					"rolling_back",
 				]),
 				lt(releases.heartbeatAt, staleBefore),
 			),
@@ -357,6 +414,20 @@ export const createReleaseStateMachine = (): ReleaseStateMachine => ({
 							finishedAt: now.toISOString(),
 						})
 						.where(eq(deployments.deploymentId, release.deploymentId));
+					const deployment = await tx.query.deployments.findFirst({
+						where: eq(deployments.deploymentId, release.deploymentId),
+					});
+					if (deployment?.previewDeploymentId) {
+						await tx
+							.update(previewDeployments)
+							.set({ previewStatus: "error" })
+							.where(
+								eq(
+									previewDeployments.previewDeploymentId,
+									deployment.previewDeploymentId,
+								),
+							);
+					}
 					await tx
 						.update(applications)
 						.set({ applicationStatus: "error" })

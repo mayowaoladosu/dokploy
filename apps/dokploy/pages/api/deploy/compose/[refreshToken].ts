@@ -10,6 +10,7 @@ import {
 	extractBranchName,
 	extractCommitMessage,
 	extractCommittedPaths,
+	extractDeliveryId,
 	extractHash,
 	getProviderByHeader,
 	logWebhookError,
@@ -20,6 +21,7 @@ export default async function handler(
 	res: NextApiResponse,
 ) {
 	const { refreshToken } = req.query;
+	const deliveryId = extractDeliveryId(req.headers);
 	try {
 		if (req.headers["x-github-event"] === "ping") {
 			res.status(200).json({ message: "Ping received, webhook is active" });
@@ -192,6 +194,7 @@ export default async function handler(
 					{
 						removeOnComplete: true,
 						removeOnFail: true,
+						jobId: deliveryId,
 					},
 				);
 			}
