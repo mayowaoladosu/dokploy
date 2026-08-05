@@ -116,6 +116,8 @@ export type PlatformClusterMetadata = {
 	externalDnsTtl?: number;
 	metricsServerNamespace?: string;
 	metricsServerDeploymentName?: string;
+	observabilityCollectorImage?: string;
+	observabilityNamespace?: string;
 	multiZoneEnabled?: boolean;
 	readOnlyRootFilesystem?: boolean;
 	allowedEgressCidrs?: string[];

@@ -9,11 +9,13 @@ import {
 	type S3ClientConfig,
 } from "@aws-sdk/client-s3";
 import { db } from "@dokploy/server/db";
+import { dbUrl } from "@dokploy/server/db/constants";
 import {
 	type PlatformObjectStorage,
 	platformStaticAssetPublications,
 } from "@dokploy/server/db/schema";
-import { eq } from "drizzle-orm";
+import { and, asc, eq, lte } from "drizzle-orm";
+import postgres from "postgres";
 import { recordUsageEvent } from "./usage-metering";
 
 const OBJECT_KEY_PATTERN = /^[a-zA-Z0-9._~!$&'()+,;=:@/-]{1,1024}$/;
@@ -250,6 +252,7 @@ export const recordStaticAssetPublication = async ({
 	totalBytes: number;
 	metadata?: Record<string, unknown>;
 }) => {
+	const observedAt = new Date();
 	const [publication] = await db
 		.insert(platformStaticAssetPublications)
 		.values({
@@ -262,6 +265,7 @@ export const recordStaticAssetPublication = async ({
 			manifestDigest,
 			fileCount,
 			totalBytes,
+			lastMeteredAt: new Date(observedAt.getTime() + 60 * 60 * 1_000),
 			metadata,
 		})
 		.onConflictDoUpdate({
@@ -281,7 +285,6 @@ export const recordStaticAssetPublication = async ({
 		})
 		.returning();
 	if (!publication) throw new Error("Failed to persist static publication");
-	const observedAt = new Date();
 	await recordUsageEvent({
 		idempotencyKey: `${deploymentId}:static-storage-bytes`,
 		organizationId,
@@ -296,6 +299,106 @@ export const recordStaticAssetPublication = async ({
 		metadata: { objectStorageId: storage.objectStorageId, objectPrefix },
 	});
 	return publication;
+};
+
+export const reconcileStaticStorageUsage = async (
+	now = new Date(),
+	maxPublications = 100,
+) => {
+	if (
+		!Number.isSafeInteger(maxPublications) ||
+		maxPublications < 1 ||
+		maxPublications > 1_000
+	) {
+		throw new Error("Static storage reconciliation limit is invalid");
+	}
+	const lockClient = postgres(dbUrl, {
+		max: 1,
+		idle_timeout: 0,
+		connect_timeout: 10,
+	});
+	const [lock] = await lockClient<{ acquired: boolean }[]>`
+		select pg_try_advisory_lock(hashtextextended('vlyv:static-storage-usage', 0)) as acquired
+	`;
+	if (!lock?.acquired) {
+		await lockClient.end();
+		return 0;
+	}
+	try {
+		const publications =
+			await db.query.platformStaticAssetPublications.findMany({
+				where: and(
+					eq(platformStaticAssetPublications.status, "active"),
+					lte(
+						platformStaticAssetPublications.lastMeteredAt,
+						new Date(now.getTime() - 60 * 60 * 1_000),
+					),
+				),
+				with: {
+					application: {
+						with: { environment: { with: { project: true } } },
+					},
+				},
+				orderBy: [asc(platformStaticAssetPublications.lastMeteredAt)],
+				limit: maxPublications,
+			});
+		let reconciled = 0;
+		for (const publication of publications) {
+			const hours = Math.floor(
+				(now.getTime() - publication.lastMeteredAt.getTime()) /
+					(60 * 60 * 1_000),
+			);
+			if (hours < 1 || !publication.application) continue;
+			const periodEnd = new Date(
+				publication.lastMeteredAt.getTime() + hours * 60 * 60 * 1_000,
+			);
+			await recordUsageEvent({
+				idempotencyKey: `${publication.staticAssetPublicationId}:${periodEnd.toISOString()}:storage-retention`,
+				organizationId:
+					publication.application.environment.project.organizationId,
+				projectId: publication.application.environment.project.projectId,
+				environmentId: publication.application.environmentId,
+				applicationId: publication.applicationId,
+				deploymentId: publication.deploymentId,
+				metric: "storage_byte_hours",
+				source: "storage",
+				quantity: BigInt(publication.totalBytes) * BigInt(hours),
+				unit: "byte_hours",
+				periodStart: publication.lastMeteredAt,
+				periodEnd,
+				metadata: {
+					objectStorageId: publication.objectStorageId,
+					objectPrefix: publication.objectPrefix,
+					hours,
+				},
+			});
+			await db
+				.update(platformStaticAssetPublications)
+				.set({ lastMeteredAt: periodEnd, updatedAt: new Date() })
+				.where(
+					and(
+						eq(
+							platformStaticAssetPublications.staticAssetPublicationId,
+							publication.staticAssetPublicationId,
+						),
+						eq(
+							platformStaticAssetPublications.lastMeteredAt,
+							publication.lastMeteredAt,
+						),
+					),
+				);
+			reconciled += 1;
+		}
+		return reconciled;
+	} finally {
+		try {
+			await lockClient`
+				select pg_advisory_unlock(hashtextextended('vlyv:static-storage-usage', 0))
+			`;
+		} finally {
+			await lockClient.end();
+		}
+	}
 };
 
 export const removeStaticAssetPublicationRecord = async (

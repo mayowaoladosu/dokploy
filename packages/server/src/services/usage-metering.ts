@@ -15,7 +15,7 @@ export type UsageEventInput = {
 	applicationId?: string | null;
 	deploymentId?: string | null;
 	metric: UsageMetric;
-	source: "build" | "runtime" | "edge" | "storage" | "manual";
+	source: "build" | "runtime" | "edge" | "storage" | "database" | "manual";
 	quantity: bigint | number | string;
 	unit: string;
 	periodStart: Date;
@@ -160,6 +160,61 @@ export const upsertUsageQuota = async (input: {
 	return quota;
 };
 
+export const databaseByteSeconds = (
+	consumedBytes: bigint | number | string,
+	durationMs: number,
+) => {
+	if (!Number.isSafeInteger(durationMs) || durationMs <= 0) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Database usage duration is invalid",
+		});
+	}
+	return (
+		exactBigInt(consumedBytes, "consumedBytes") *
+		BigInt(Math.max(Math.ceil(durationMs / 1_000), 1))
+	);
+};
+
+export const recordDatabaseUsage = async (input: {
+	managedDataResourceId: string;
+	organizationId: string;
+	projectId: string;
+	environmentId: string;
+	consumedBytes: bigint | number | string;
+	periodStart: Date;
+	periodEnd: Date;
+	provider: string;
+}) => {
+	if (input.periodEnd <= input.periodStart) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Database usage period is invalid",
+		});
+	}
+	const bytes = exactBigInt(input.consumedBytes, "consumedBytes");
+	return recordUsageEvent({
+		idempotencyKey: `${input.managedDataResourceId}:${input.periodEnd.toISOString()}:database-bytes`,
+		organizationId: input.organizationId,
+		projectId: input.projectId,
+		environmentId: input.environmentId,
+		metric: "database_byte_seconds",
+		source: "database",
+		quantity: databaseByteSeconds(
+			bytes,
+			input.periodEnd.getTime() - input.periodStart.getTime(),
+		),
+		unit: "byte_seconds",
+		periodStart: input.periodStart,
+		periodEnd: input.periodEnd,
+		metadata: {
+			managedDataResourceId: input.managedDataResourceId,
+			provider: input.provider,
+			consumedBytes: bytes.toString(),
+		},
+	});
+};
+
 export interface UsageMeter {
 	assertBuildAllowed(organizationId: string): Promise<void>;
 	recordBuild(input: {
@@ -174,8 +229,15 @@ export interface UsageMeter {
 }
 
 export const createUsageMeter = (): UsageMeter => ({
-	assertBuildAllowed: async (organizationId) =>
-		assertUsageWithinQuota(organizationId, "build_seconds"),
+	assertBuildAllowed: async (organizationId) => {
+		await Promise.all([
+			assertUsageWithinQuota(organizationId, "build_seconds"),
+			assertUsageWithinQuota(organizationId, "cpu_milliseconds"),
+			assertUsageWithinQuota(organizationId, "memory_byte_seconds"),
+			assertUsageWithinQuota(organizationId, "storage_byte_hours"),
+			assertUsageWithinQuota(organizationId, "database_byte_seconds"),
+		]);
+	},
 	recordBuild: async (input) => {
 		const observedAt = new Date();
 		await recordUsageEvent({

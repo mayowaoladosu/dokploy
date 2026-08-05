@@ -36,6 +36,7 @@ export type KubernetesResourceSpec = {
 
 export type KubernetesPlacementSpec = {
 	applicationId: string;
+	billingApplicationId?: string;
 	organizationId: string;
 	appName: string;
 	namespace: string;
@@ -82,6 +83,13 @@ export type KubernetesPlacementSpec = {
 	};
 	domains: KubernetesDomainRoute[];
 	allowedEgressCidrs?: string[];
+	observability?: {
+		endpoint: string;
+		namespace: string;
+		organizationId: string;
+		applicationId: string;
+		serviceName: string;
+	};
 };
 
 export type KubernetesBuildJobSpec = {
@@ -323,6 +331,7 @@ const workloadResources = (resources: KubernetesResourceSpec) => ({
 const buildEgressPolicyManifests = (
 	namespace: string,
 	allowedEgressCidrs: string[] = [],
+	observabilityNamespace?: string,
 ): KubernetesManifest[] => [
 	{
 		apiVersion: "networking.k8s.io/v1",
@@ -392,6 +401,30 @@ const buildEgressPolicyManifests = (
 				...allowedEgressCidrs.map((cidr) => ({
 					to: [{ ipBlock: { cidr } }],
 				})),
+				...(observabilityNamespace
+					? [
+							{
+								to: [
+									{
+										namespaceSelector: {
+											matchLabels: {
+												"kubernetes.io/metadata.name": observabilityNamespace,
+											},
+										},
+										podSelector: {
+											matchLabels: {
+												"app.kubernetes.io/name": "vlyv-otel-collector",
+											},
+										},
+									},
+								],
+								ports: [
+									{ protocol: "TCP", port: 4317 },
+									{ protocol: "TCP", port: 4318 },
+								],
+							},
+						]
+					: []),
 			],
 		},
 	},
@@ -651,8 +684,26 @@ export const buildKubernetesHpaManifest = ({
 export const buildKubernetesRuntimeManifests = (
 	spec: KubernetesPlacementSpec,
 ): KubernetesManifest[] => {
+	if (
+		spec.observability &&
+		(!/^[a-f0-9]{32}$/.test(spec.observability.organizationId) ||
+			!/^[a-f0-9]{32}$/.test(spec.observability.applicationId))
+	) {
+		throw new Error("Observability resource identities must be opaque hashes");
+	}
 	const name = kubernetesApplicationResourceName(spec.applicationId);
-	const labels = labelsFor(spec.applicationId, spec.organizationId, "runtime");
+	const labels = {
+		...labelsFor(spec.applicationId, spec.organizationId, "runtime"),
+		"vlyv.dev/billing-application": createHash("sha256")
+			.update(spec.billingApplicationId || spec.applicationId)
+			.digest("hex")
+			.slice(0, 16),
+		...(spec.observability
+			? {
+					"vlyv.dev/observability-app": spec.observability.applicationId,
+				}
+			: {}),
+	};
 	const secretName = `${name}-env`;
 	const registrySecretName = spec.registryCredentials
 		? spec.registrySecretName || `${name}-registry`
@@ -660,6 +711,17 @@ export const buildKubernetesRuntimeManifests = (
 	const ports = spec.ports.length > 0 ? spec.ports : [{ targetPort: 3000 }];
 	const maxReplicas = Math.max(spec.maxReplicas, spec.replicas);
 	const aggregateMultiplier = Math.max(maxReplicas, 1) + 1;
+	const runtimeEnvironment = {
+		...environmentToStringData(spec.environment),
+		...(spec.observability
+			? {
+					OTEL_EXPORTER_OTLP_ENDPOINT: spec.observability.endpoint,
+					OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf",
+					OTEL_SERVICE_NAME: spec.observability.serviceName,
+					OTEL_RESOURCE_ATTRIBUTES: `vlyv.organization.id=${spec.observability.organizationId},vlyv.application.id=${spec.observability.applicationId}`,
+				}
+			: {}),
+	};
 	const manifests: KubernetesManifest[] = [
 		{
 			apiVersion: "v1",
@@ -669,6 +731,13 @@ export const buildKubernetesRuntimeManifests = (
 				labels: {
 					...labels,
 					"app.kubernetes.io/managed-by": "vlyv",
+					"vlyv.dev/managed": "true",
+					...(spec.observability
+						? {
+								"vlyv.dev/observability-tenant":
+									spec.observability.organizationId,
+							}
+						: {}),
 					"pod-security.kubernetes.io/enforce": "restricted",
 					"pod-security.kubernetes.io/audit": "restricted",
 					"pod-security.kubernetes.io/warn": "restricted",
@@ -732,7 +801,7 @@ export const buildKubernetesRuntimeManifests = (
 			kind: "Secret",
 			metadata: { name: secretName, namespace: spec.namespace, labels },
 			type: "Opaque",
-			data: secretData(environmentToStringData(spec.environment)),
+			data: secretData(runtimeEnvironment),
 		},
 		...(spec.registryCredentials
 			? [
@@ -799,7 +868,11 @@ export const buildKubernetesRuntimeManifests = (
 				],
 			},
 		},
-		...buildEgressPolicyManifests(spec.namespace, spec.allowedEgressCidrs),
+		...buildEgressPolicyManifests(
+			spec.namespace,
+			spec.allowedEgressCidrs,
+			spec.observability?.namespace,
+		),
 		{
 			apiVersion: "apps/v1",
 			kind: "Deployment",
@@ -1006,6 +1079,7 @@ cat /artifacts/image.json >/dev/termination-log
 				name: spec.namespace,
 				labels: {
 					"app.kubernetes.io/managed-by": "vlyv",
+					"vlyv.dev/managed": "true",
 					"pod-security.kubernetes.io/enforce": "baseline",
 					"pod-security.kubernetes.io/audit": "restricted",
 					"pod-security.kubernetes.io/warn": "restricted",

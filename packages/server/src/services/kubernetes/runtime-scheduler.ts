@@ -6,6 +6,10 @@ import type {
 } from "@dokploy/server/db/schema";
 import { prepareEnvironmentVariables } from "@dokploy/server/utils/docker/utils";
 import { findVerifiedDomainsByApplicationId } from "../domain-verification";
+import {
+	observabilityResourceId,
+	observabilityTenantId,
+} from "../observability";
 import { markPlatformPlacementReconciled } from "../platform-infrastructure";
 import {
 	type RuntimeApplication,
@@ -296,10 +300,27 @@ export const createKubernetesRuntimeScheduler = ({
 						password: buildPool.registryPassword,
 					}
 				: undefined;
+		const observabilityNamespace =
+			clusterMetadata.observabilityNamespace || "vlyv-observability";
+		const observability = clusterMetadata.observabilityCollectorImage
+			? {
+					endpoint: `http://vlyv-otel-collector.${observabilityNamespace}.svc.cluster.local:4318`,
+					namespace: observabilityNamespace,
+					organizationId: observabilityTenantId(
+						application.environment.project.organizationId,
+					),
+					applicationId: observabilityResourceId(
+						"application",
+						application.applicationId,
+					),
+					serviceName: application.appName,
+				}
+			: undefined;
 		try {
 			await client.apply(
 				buildKubernetesRuntimeManifests({
 					applicationId: releaseIdentity,
+					billingApplicationId: application.applicationId,
 					organizationId: application.environment.project.organizationId,
 					appName: application.appName,
 					namespace,
@@ -334,6 +355,7 @@ export const createKubernetesRuntimeScheduler = ({
 					gateway: networkGateway,
 					domains: [],
 					allowedEgressCidrs: clusterMetadata.allowedEgressCidrs,
+					observability,
 				}),
 			);
 			const status = await waitUntilReady(application, timeoutMs, imageRef);

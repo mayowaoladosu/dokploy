@@ -27,6 +27,7 @@ export * from "./mount";
 export * from "./mysql";
 export * from "./network";
 export * from "./notification";
+export * from "./observability";
 export * from "./patch";
 export * from "./platform-edge";
 export * from "./platform-infrastructure";

@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { createKubernetesControlPlane } from "./kubernetes/client";
 import { kubernetesApplicationResourceName } from "./kubernetes/manifests";
 import { reconcilePlatformDomainRoutes } from "./platform-runtime";
+import { reconcileKubernetesRuntimeUsage } from "./runtime-usage-metering";
 
 export const classifyKubernetesDeployment = (
 	deployment: V1Deployment | null,
@@ -31,7 +32,9 @@ export const reconcileKubernetesPlacements = async () => {
 		with: {
 			runtimeTarget: { with: { cluster: { with: { region: true } } } },
 			buildPool: true,
-			application: { with: { ports: true } },
+			application: {
+				with: { ports: true, environment: { with: { project: true } } },
+			},
 		},
 	});
 	const summary = { active: 0, pending: 0, failed: 0, skipped: 0 };
@@ -89,6 +92,22 @@ export const reconcileKubernetesPlacements = async () => {
 				appName: placement.application.appName,
 				port: placement.application.ports[0]?.targetPort ?? 3000,
 			});
+			if (cluster.metadata.metricsServerEnabled) {
+				await reconcileKubernetesRuntimeUsage({
+					client,
+					placementId: placement.placementId,
+					clusterId: cluster.clusterId,
+					organizationId: placement.organizationId,
+					projectId: placement.application.environment.project.projectId,
+					environmentId: placement.application.environmentId,
+					applicationId: placement.applicationId,
+				}).catch((error) =>
+					console.error(
+						`Failed to meter Kubernetes runtime ${placement.placementId}`,
+						error,
+					),
+				);
+			}
 			if (placementStatus === "failed") {
 				await db
 					.update(applications)

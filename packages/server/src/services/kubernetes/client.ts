@@ -2,6 +2,7 @@ import {
 	AppsV1Api,
 	BatchV1Api,
 	CoreV1Api,
+	CustomObjectsApi,
 	KubeConfig,
 	type KubernetesObject,
 	KubernetesObjectApi,
@@ -16,6 +17,16 @@ export type KubernetesClientConfig = {
 	inCluster?: boolean;
 };
 
+export type KubernetesPodMetric = {
+	name: string;
+	timestamp: string;
+	window: string;
+	containers: Array<{
+		name: string;
+		usage: { cpu?: string; memory?: string };
+	}>;
+};
+
 export interface KubernetesControlPlane {
 	apply(manifests: KubernetesObject[]): Promise<void>;
 	read(manifest: KubernetesObject): Promise<KubernetesObject | null>;
@@ -23,6 +34,10 @@ export interface KubernetesControlPlane {
 	readDeployment(namespace: string, name: string): Promise<V1Deployment | null>;
 	readJob(namespace: string, name: string): Promise<V1Job | null>;
 	listPods(namespace: string, labelSelector: string): Promise<V1Pod[]>;
+	listPodMetrics(
+		namespace: string | null,
+		labelSelector: string,
+	): Promise<KubernetesPodMetric[]>;
 	readPodLogs(
 		namespace: string,
 		name: string,
@@ -92,6 +107,7 @@ export const createKubernetesControlPlane = (
 	const apps = kubeConfig.makeApiClient(AppsV1Api);
 	const batch = kubeConfig.makeApiClient(BatchV1Api);
 	const core = kubeConfig.makeApiClient(CoreV1Api);
+	const custom = kubeConfig.makeApiClient(CustomObjectsApi);
 
 	const applyOne = async (manifest: KubernetesObject) => {
 		try {
@@ -181,6 +197,22 @@ export const createKubernetesControlPlane = (
 					labelSelector,
 				})
 			).items,
+		listPodMetrics: async (namespace, labelSelector) => {
+			const request = {
+				group: "metrics.k8s.io",
+				version: "v1beta1",
+				plural: "pods",
+				labelSelector,
+			};
+			const response = (
+				namespace
+					? await custom.listNamespacedCustomObject({ ...request, namespace })
+					: await custom.listCustomObjectForAllNamespaces(request)
+			) as {
+				items?: KubernetesPodMetric[];
+			};
+			return response.items ?? [];
+		},
 		readPodLogs: async (namespace, name, container) =>
 			core.readNamespacedPodLog({
 				namespace,

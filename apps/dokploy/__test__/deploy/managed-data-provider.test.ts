@@ -87,4 +87,36 @@ describe("HTTP managed data provider", () => {
 
 		await expect(provider.getStatus("provider-resource-1")).rejects.toThrow();
 	});
+
+	it("retrieves exact database usage samples for the billing reconciler", async () => {
+		const fetcher = vi.fn(
+			async () =>
+				new Response(
+					JSON.stringify({
+						consumedBytes: "1099511627776",
+						observedAt: "2026-08-05T12:00:00.000Z",
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				),
+		);
+		const provider = createHttpManagedDataProvider({
+			name: "test",
+			baseUrl: "https://data.example.com/",
+			token: "provider-token",
+			kinds: ["postgres"],
+			fetcher,
+			validateEndpoint: async () => undefined,
+		});
+
+		await expect(provider.getUsage("provider-resource-1")).resolves.toEqual({
+			consumedBytes: 1_099_511_627_776n,
+			observedAt: new Date("2026-08-05T12:00:00.000Z"),
+		});
+		expect(fetcher).toHaveBeenCalledWith(
+			new URL(
+				"https://data.example.com/v1/resources/provider-resource-1/usage",
+			),
+			expect.objectContaining({ method: "GET" }),
+		);
+	});
 });

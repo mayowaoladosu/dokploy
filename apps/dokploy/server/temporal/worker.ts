@@ -1,4 +1,8 @@
 import path from "node:path";
+import {
+	OpenTelemetryActivityInboundInterceptor,
+	OpenTelemetryActivityOutboundInterceptor,
+} from "@temporalio/interceptors-opentelemetry";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import * as activities from "./activities";
 import { assertTemporalConfiguration } from "./config";
@@ -26,6 +30,21 @@ export const startTemporalWorker = async () => {
 				}
 			: { workflowsPath: path.join(import.meta.dirname, "workflows.ts") }),
 		activities,
+		interceptors: {
+			activity: [
+				(context) => ({
+					inbound: new OpenTelemetryActivityInboundInterceptor(context),
+					outbound: new OpenTelemetryActivityOutboundInterceptor(context),
+				}),
+			],
+			...(process.env.NODE_ENV === "production"
+				? {}
+				: {
+						workflowModules: [
+							path.join(import.meta.dirname, "otel-workflow-interceptors.ts"),
+						],
+					}),
+		},
 		shutdownGraceTime: "30 seconds",
 		shutdownForceTime: "2 minutes",
 		maxConcurrentActivityTaskExecutions: config.maxConcurrentActivities,

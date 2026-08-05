@@ -38,6 +38,10 @@ export interface ManagedDataProvider {
 		request: ManagedDataProvisionRequest,
 	): Promise<ManagedDataProviderResult>;
 	getStatus(providerResourceId: string): Promise<ManagedDataProviderResult>;
+	getUsage(providerResourceId: string): Promise<{
+		consumedBytes: bigint;
+		observedAt: Date;
+	}>;
 	rotateCredentials(
 		providerResourceId: string,
 	): Promise<{ connectionUri: string }>;
@@ -69,6 +73,10 @@ const providerResponse = z.object({
 	status: z.enum(["provisioning", "ready"]),
 	connectionUri: z.string().min(1).optional(),
 	metadata: z.record(z.string(), z.unknown()).optional(),
+});
+const providerUsageResponse = z.object({
+	consumedBytes: z.union([z.string().regex(/^\d+$/), z.number().int().min(0)]),
+	observedAt: z.string().datetime(),
 });
 
 export const createHttpManagedDataProvider = ({
@@ -127,6 +135,17 @@ export const createHttpManagedDataProvider = ({
 				{ method: "GET" },
 				providerResponse,
 			),
+		getUsage: async (providerResourceId) => {
+			const usage = await request(
+				`/v1/resources/${encodeURIComponent(providerResourceId)}/usage`,
+				{ method: "GET" },
+				providerUsageResponse,
+			);
+			return {
+				consumedBytes: BigInt(usage.consumedBytes),
+				observedAt: new Date(usage.observedAt),
+			};
+		},
 		rotateCredentials: async (providerResourceId) =>
 			request(
 				`/v1/resources/${encodeURIComponent(providerResourceId)}/credentials/rotate`,

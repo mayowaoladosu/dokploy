@@ -215,6 +215,7 @@ export const platformStaticAssetPublications = pgTable(
 		manifestDigest: text("manifest_digest").notNull(),
 		fileCount: integer("file_count").notNull(),
 		totalBytes: bigint("total_bytes", { mode: "number" }).notNull(),
+		lastMeteredAt: timestamp("last_metered_at").defaultNow().notNull(),
 		errorMessage: text("error_message"),
 		metadata: jsonb("metadata")
 			.$type<Record<string, unknown>>()
@@ -230,6 +231,10 @@ export const platformStaticAssetPublications = pgTable(
 		index("platformStaticAssetPublication_application_idx").on(
 			table.applicationId,
 			table.createdAt,
+		),
+		index("platformStaticAssetPublication_metering_idx").on(
+			table.status,
+			table.lastMeteredAt,
 		),
 	],
 );

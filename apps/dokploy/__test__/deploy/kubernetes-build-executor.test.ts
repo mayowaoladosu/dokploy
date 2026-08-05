@@ -200,6 +200,7 @@ describe("Kubernetes build executor", () => {
 					},
 				] as never;
 			}),
+			listPodMetrics: vi.fn(async () => []),
 			readPodLogs: vi.fn(
 				async (_namespace, _pod, container) => `${container} output`,
 			),

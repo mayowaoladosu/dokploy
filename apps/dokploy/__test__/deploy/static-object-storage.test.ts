@@ -119,6 +119,14 @@ describe("platform static object storage", () => {
 				Buffer.byteLength("console.log('vlyv')"),
 			manifestDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
 		});
+		expect(persistedValues).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					deploymentId: "deployment-1",
+					lastMeteredAt: expect.any(Date),
+				}),
+			]),
+		);
 		expect(publication.publicBaseUrl).toContain(
 			"https://assets.vlyv.dev/releases/",
 		);

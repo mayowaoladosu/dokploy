@@ -49,6 +49,14 @@ describe("Kubernetes runtime manifests", () => {
 			password: "pull-secret",
 		},
 		readOnlyRootFilesystem: true,
+		observability: {
+			endpoint:
+				"http://vlyv-otel-collector.vlyv-observability.svc.cluster.local:4318",
+			namespace: "vlyv-observability",
+			organizationId: "b".repeat(32),
+			applicationId: "a".repeat(32),
+			serviceName: "example-app",
+		},
 		multiZone: true,
 		domains: [{ host: "example.com", path: "/" }],
 		gateway: {
@@ -57,6 +65,36 @@ describe("Kubernetes runtime manifests", () => {
 			mode: "shared",
 			externalDns: { enabled: true, ttl: 60 },
 		},
+	});
+
+	it("injects tenant-scoped OTLP defaults and collector-only private egress", () => {
+		const secret = findManifest(manifests, "Secret");
+		const decode = (name: string) =>
+			Buffer.from(secret.data[name], "base64").toString("utf8");
+		expect(decode("OTEL_EXPORTER_OTLP_ENDPOINT")).toContain(
+			"vlyv-otel-collector.vlyv-observability.svc.cluster.local:4318",
+		);
+		expect(decode("OTEL_RESOURCE_ATTRIBUTES")).toBe(
+			`vlyv.organization.id=${"b".repeat(32)},vlyv.application.id=${"a".repeat(32)}`,
+		);
+		const egress = manifests.find(
+			(manifest: any) =>
+				manifest.kind === "NetworkPolicy" &&
+				manifest.metadata?.name === "allow-dns-and-public-egress",
+		) as any;
+		expect(egress.spec.egress).toContainEqual(
+			expect.objectContaining({
+				to: [
+					expect.objectContaining({
+						namespaceSelector: {
+							matchLabels: {
+								"kubernetes.io/metadata.name": "vlyv-observability",
+							},
+						},
+					}),
+				],
+			}),
+		);
 	});
 
 	it("generates isolated, quota-bound, autoscaled resources", () => {
@@ -126,7 +164,7 @@ describe("Kubernetes runtime manifests", () => {
 				}),
 			]),
 		);
-		expect(findManifest(manifests, "Secret").data).toEqual({
+		expect(findManifest(manifests, "Secret").data).toMatchObject({
 			NODE_ENV: Buffer.from("production").toString("base64"),
 			TOKEN: Buffer.from("a=b").toString("base64"),
 		});

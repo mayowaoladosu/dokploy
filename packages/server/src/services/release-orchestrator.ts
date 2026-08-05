@@ -23,7 +23,9 @@ import {
 	type SourcePreparer,
 } from "./source-preparer";
 import {
+	createCompositeTelemetrySink,
 	createDatabaseTelemetrySink,
+	createOpenTelemetrySink,
 	recordReleaseTelemetryBestEffort,
 	type TelemetrySink,
 } from "./telemetry-sink";
@@ -97,7 +99,10 @@ export const createReleaseOrchestrator = (
 			uploadApplicationRegistries: true,
 		}),
 		edgeRouter: createSwarmEdgeRouter(),
-		telemetrySink: createDatabaseTelemetrySink(),
+		telemetrySink: createCompositeTelemetrySink([
+			createDatabaseTelemetrySink(),
+			createOpenTelemetrySink(),
+		]),
 		usageMeter: createUsageMeter(),
 		heartbeatIntervalMs: 30_000,
 		...overrides,
@@ -216,6 +221,7 @@ export const createReleaseOrchestrator = (
 		},
 		execute: async ({ application, deployment, intent, signal }) => {
 			const organizationId = application.environment.project.organizationId;
+			const projectId = application.environment.project.projectId;
 			let release = await dependencies.stateMachine.create({
 				deploymentId: deployment.deploymentId,
 				applicationId: application.applicationId,
@@ -228,6 +234,14 @@ export const createReleaseOrchestrator = (
 			let artifact = await dependencies.stateMachine.getArtifact(
 				release.releaseId,
 			);
+			const telemetryContext = () => ({
+				organizationId,
+				projectId,
+				environmentId: application.environmentId,
+				applicationId: application.applicationId,
+				deploymentId: deployment.deploymentId,
+				releaseId: release.releaseId,
+			});
 			const recoveredHealth = (): RuntimeHealthResult => ({
 				passed: true,
 				latencyMs: 0,
@@ -253,9 +267,8 @@ export const createReleaseOrchestrator = (
 			await dependencies.usageMeter.assertBuildAllowed(organizationId);
 			await recordReleaseTelemetryBestEffort(() =>
 				dependencies.telemetrySink.record({
+					...telemetryContext(),
 					type: "release.initialized",
-					deploymentId: deployment.deploymentId,
-					applicationId: application.applicationId,
 				}),
 			);
 
@@ -325,8 +338,8 @@ export const createReleaseOrchestrator = (
 					signal?.throwIfAborted();
 					await recordReleaseTelemetryBestEffort(() =>
 						dependencies.telemetrySink.record({
+							...telemetryContext(),
 							type: "build.completed",
-							deploymentId: deployment.deploymentId,
 							durationMs: artifact?.durationMs ?? 0,
 							imageSizeBytes: artifact?.imageSizeBytes ?? null,
 						}),
@@ -368,8 +381,8 @@ export const createReleaseOrchestrator = (
 					const readinessDurationMs = Date.now() - runtimeStartedAt;
 					await recordReleaseTelemetryBestEffort(() =>
 						dependencies.telemetrySink.record({
+							...telemetryContext(),
 							type: "runtime.ready",
-							deploymentId: deployment.deploymentId,
 							runtimeDurationMs: readinessDurationMs,
 							readinessDurationMs,
 						}),
@@ -387,8 +400,8 @@ export const createReleaseOrchestrator = (
 					);
 					await recordReleaseTelemetryBestEffort(() =>
 						dependencies.telemetrySink.record({
+							...telemetryContext(),
 							type: "health.completed",
-							deploymentId: deployment.deploymentId,
 							result: health,
 						}),
 					);
@@ -406,8 +419,8 @@ export const createReleaseOrchestrator = (
 					});
 					await recordReleaseTelemetryBestEffort(() =>
 						dependencies.telemetrySink.record({
+							...telemetryContext(),
 							type: "edge.published",
-							deploymentId: deployment.deploymentId,
 							publication,
 						}),
 					);
@@ -481,8 +494,8 @@ export const createReleaseOrchestrator = (
 						await transition("rolled_back", { imageRef: rollbackImageRef });
 						await recordReleaseTelemetryBestEffort(() =>
 							dependencies.telemetrySink.record({
+								...telemetryContext(),
 								type: "rollback.completed",
-								deploymentId: deployment.deploymentId,
 								imageRef: rollbackImageRef,
 							}),
 						);

@@ -24,6 +24,7 @@ export const usageMetric = pgEnum("usageMetric", [
 	"request_count",
 	"egress_bytes",
 	"storage_byte_hours",
+	"database_byte_seconds",
 ]);
 
 export const usageSource = pgEnum("usageSource", [
@@ -31,6 +32,7 @@ export const usageSource = pgEnum("usageSource", [
 	"runtime",
 	"edge",
 	"storage",
+	"database",
 	"manual",
 ]);
 

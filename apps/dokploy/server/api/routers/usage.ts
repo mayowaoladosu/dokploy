@@ -1,4 +1,8 @@
 import {
+	listStripeUsageMeters,
+	upsertStripeUsageMeter,
+} from "@dokploy/server/services/stripe-usage-metering";
+import {
 	getUsageTotal,
 	upsertUsageQuota,
 	usageWindowStart,
@@ -17,6 +21,7 @@ const metric = z.enum([
 	"request_count",
 	"egress_bytes",
 	"storage_byte_hours",
+	"database_byte_seconds",
 ]);
 
 export const usageRouter = createTRPCRouter({
@@ -51,4 +56,19 @@ export const usageRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(({ input }) => upsertUsageQuota(input)),
+	configureStripeMeter: platformAdminProcedure
+		.input(
+			z.object({
+				organizationId: z.string().min(1),
+				metric,
+				stripeCustomerId: z.string().min(1).max(200),
+				stripeEventName: z.string().min(1).max(100),
+				enabled: z.boolean().optional(),
+				metadata: z.record(z.string(), z.unknown()).optional(),
+			}),
+		)
+		.mutation(({ input }) => upsertStripeUsageMeter(input)),
+	listStripeMeters: platformAdminProcedure
+		.input(z.object({ organizationId: z.string().min(1).optional() }))
+		.query(({ input }) => listStripeUsageMeters(input.organizationId)),
 });

@@ -2,6 +2,7 @@ import {
 	findServersByUserId,
 	findUserById,
 	IS_CLOUD,
+	IS_MANAGED_PAAS,
 	updateUser,
 } from "@dokploy/server";
 import { TRPCError } from "@trpc/server";
@@ -134,10 +135,16 @@ export const stripeRouter = createTRPCRouter({
 					serverQuantity: z.number().min(1),
 					isAnnual: z.boolean(),
 				})
-				.refine((data) => data.tier !== "startup" || data.serverQuantity >= 3, {
-					message: "Startup plan requires at least 3 servers",
-					path: ["serverQuantity"],
-				}),
+				.refine(
+					(data) =>
+						IS_MANAGED_PAAS ||
+						data.tier !== "startup" ||
+						data.serverQuantity >= 3,
+					{
+						message: "Startup plan requires at least 3 servers",
+						path: ["serverQuantity"],
+					},
+				),
 		)
 		.mutation(async ({ ctx, input }) => {
 			const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
@@ -146,7 +153,7 @@ export const stripeRouter = createTRPCRouter({
 
 			const items = getStripeItems(
 				input.tier as BillingTier,
-				input.serverQuantity,
+				IS_MANAGED_PAAS ? 1 : input.serverQuantity,
 				input.isAnnual,
 			);
 			// Always operate on the organization owner's Stripe customer
@@ -180,7 +187,7 @@ export const stripeRouter = createTRPCRouter({
 				billing_address_collection: "required",
 				tax_id_collection: { enabled: true },
 				allow_promotion_codes: true,
-				success_url: `${WEBSITE_URL}/dashboard/settings/servers?success=true`,
+				success_url: `${WEBSITE_URL}/dashboard/settings/billing?success=true`,
 				cancel_url: `${WEBSITE_URL}/dashboard/settings/billing`,
 			});
 
@@ -224,10 +231,16 @@ export const stripeRouter = createTRPCRouter({
 					serverQuantity: z.number().min(1),
 					isAnnual: z.boolean(),
 				})
-				.refine((data) => data.tier !== "startup" || data.serverQuantity >= 3, {
-					message: "Startup plan requires at least 3 servers",
-					path: ["serverQuantity"],
-				}),
+				.refine(
+					(data) =>
+						IS_MANAGED_PAAS ||
+						data.tier !== "startup" ||
+						data.serverQuantity >= 3,
+					{
+						message: "Startup plan requires at least 3 servers",
+						path: ["serverQuantity"],
+					},
+				),
 		)
 		.mutation(async ({ ctx, input }) => {
 			const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
@@ -256,7 +269,7 @@ export const stripeRouter = createTRPCRouter({
 
 			const newItems = getStripeItems(
 				input.tier as BillingTier,
-				input.serverQuantity,
+				IS_MANAGED_PAAS ? 1 : input.serverQuantity,
 				input.isAnnual,
 			);
 			const currentItems = subscription.items.data;

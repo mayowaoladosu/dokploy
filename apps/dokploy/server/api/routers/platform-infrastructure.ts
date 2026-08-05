@@ -48,6 +48,14 @@ const clusterMetadataSchema = z.object({
 	externalDnsTtl: z.number().int().min(1).max(86_400).optional(),
 	metricsServerNamespace: z.string().min(1).optional(),
 	metricsServerDeploymentName: z.string().min(1).optional(),
+	observabilityCollectorImage: z
+		.string()
+		.regex(
+			/^[^\s@]+@sha256:[a-f0-9]{64}$/,
+			"Observability collector image must use a digest",
+		)
+		.optional(),
+	observabilityNamespace: z.string().min(1).max(63).optional(),
 	multiZoneEnabled: z.boolean().optional(),
 	readOnlyRootFilesystem: z.boolean().optional(),
 	allowedEgressCidrs: z.array(cidrSchema).max(50).optional(),

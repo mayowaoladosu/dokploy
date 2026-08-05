@@ -35,6 +35,7 @@ const client = (): KubernetesControlPlane => ({
 	readDeployment: vi.fn(async () => null),
 	readJob: vi.fn(async () => null),
 	listPods: vi.fn(async () => []),
+	listPodMetrics: vi.fn(async () => []),
 	readPodLogs: vi.fn(async () => ""),
 	setDeploymentReplicas: vi.fn(async () => undefined),
 	restartDeployment: vi.fn(async () => undefined),

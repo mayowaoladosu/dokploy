@@ -6,6 +6,8 @@ import {
 	createDefaultServerTraefikConfig,
 	createDefaultTraefikConfig,
 	createReleaseStateMachine,
+	createStripeMeterEventClient,
+	handleHttpRequestWithTelemetry,
 	IS_CLOUD,
 	IS_HOSTED,
 	IS_MANAGED_PAAS,
@@ -13,13 +15,19 @@ import {
 	initCronJobs,
 	initEnterpriseBackupCronJobs,
 	initializeNetwork,
+	initializeOpenTelemetry,
 	initSchedules,
 	initVolumeBackupsCronJobs,
 	reconcileCloudflareEdgeUsage,
 	reconcileDomainVerifications,
 	reconcileKubernetesPlacements,
+	reconcileManagedDataUsage,
+	reconcilePlatformObservabilityCollectors,
+	reconcileStaticStorageUsage,
 	sendDokployRestartNotifications,
 	setupDirectories,
+	shutdownOpenTelemetry,
+	synchronizeStripeUsage,
 } from "@dokploy/server";
 import { config } from "dotenv";
 import next from "next";
@@ -35,6 +43,12 @@ import { setupDeploymentLogsWebSocketServer } from "./wss/listen-deployment";
 import { setupTerminalWebSocketServer } from "./wss/terminal";
 
 config({ path: ".env" });
+const telemetry = initializeOpenTelemetry();
+if (telemetry.enabled) {
+	console.log(
+		`OpenTelemetry initialized for ${telemetry.configuration.serviceName}`,
+	);
+}
 assertManagedPlatformConfiguration();
 if (IS_MANAGED_PAAS && !temporalConfiguration().enabled) {
 	throw new Error(
@@ -61,7 +75,15 @@ void app.prepare().then(async () => {
 	try {
 		console.log("Running DokployVersion: ", packageInfo.version);
 		const server = http.createServer((req, res) => {
-			handle(req, res);
+			void handleHttpRequestWithTelemetry(req, res, async () => {
+				await handle(req, res);
+			}).catch((error) => {
+				console.error("HTTP request failed", error);
+				if (!res.headersSent) {
+					res.statusCode = 500;
+					res.end("Internal Server Error");
+				}
+			});
 		});
 		const timers: NodeJS.Timeout[] = [];
 		let shuttingDown = false;
@@ -85,6 +107,7 @@ void app.prepare().then(async () => {
 				stopTemporalWorker(),
 				closeTemporalClient(),
 				app.close(),
+				shutdownOpenTelemetry(),
 			]);
 			const failures = results.filter(
 				(result): result is PromiseRejectedResult =>
@@ -160,6 +183,102 @@ void app.prepare().then(async () => {
 			}, 5 * 60_000);
 			edgeUsageTimer.unref();
 			timers.push(edgeUsageTimer);
+			const reconcileStorageUsage = async () => {
+				const reconciled = await reconcileStaticStorageUsage();
+				if (reconciled > 0) {
+					console.log(
+						`Reconciled static storage usage for ${reconciled} publication(s)`,
+					);
+				}
+			};
+			await reconcileStorageUsage().catch((error) =>
+				console.error("Failed to reconcile static storage usage", error),
+			);
+			const storageUsageTimer = setInterval(() => {
+				void reconcileStorageUsage().catch((error) =>
+					console.error("Failed to reconcile static storage usage", error),
+				);
+			}, 15 * 60_000);
+			storageUsageTimer.unref();
+			timers.push(storageUsageTimer);
+			let managedDataUsageRunning = false;
+			const reconcileDatabaseUsage = async () => {
+				if (managedDataUsageRunning) return;
+				managedDataUsageRunning = true;
+				try {
+					const result = await reconcileManagedDataUsage();
+					if (result.reconciled + result.failed > 0) {
+						console.log(
+							`Reconciled managed data usage: ${result.reconciled} succeeded, ${result.failed} failed`,
+						);
+					}
+				} finally {
+					managedDataUsageRunning = false;
+				}
+			};
+			await reconcileDatabaseUsage().catch((error) =>
+				console.error("Failed to reconcile managed data usage", error),
+			);
+			const managedDataUsageTimer = setInterval(() => {
+				void reconcileDatabaseUsage().catch((error) =>
+					console.error("Failed to reconcile managed data usage", error),
+				);
+			}, 15 * 60_000);
+			managedDataUsageTimer.unref();
+			timers.push(managedDataUsageTimer);
+
+			const reconcileObservability = async () => {
+				const result = await reconcilePlatformObservabilityCollectors();
+				if (result.active + result.failed > 0) {
+					console.log(
+						`Reconciled observability collectors: ${result.active} active, ${result.failed} failed`,
+					);
+				}
+			};
+			await reconcileObservability().catch((error) =>
+				console.error("Failed to reconcile observability collectors", error),
+			);
+			const observabilityTimer = setInterval(() => {
+				void reconcileObservability().catch((error) =>
+					console.error("Failed to reconcile observability collectors", error),
+				);
+			}, 5 * 60_000);
+			observabilityTimer.unref();
+			timers.push(observabilityTimer);
+
+			const stripeSecretKey = process.env.STRIPE_SECRET_KEY?.trim();
+			if (stripeSecretKey) {
+				const stripeUsageClient = createStripeMeterEventClient({
+					apiKey: stripeSecretKey,
+				});
+				let stripeUsageRunning = false;
+				const synchronizeUsage = async () => {
+					if (stripeUsageRunning) return;
+					stripeUsageRunning = true;
+					try {
+						const result = await synchronizeStripeUsage({
+							client: stripeUsageClient,
+						});
+						if (result.attempted > 0) {
+							console.log(
+								`Exported Stripe usage: ${result.delivered} delivered, ${result.failed} failed`,
+							);
+						}
+					} finally {
+						stripeUsageRunning = false;
+					}
+				};
+				await synchronizeUsage().catch((error) =>
+					console.error("Failed to export Stripe usage", error),
+				);
+				const stripeUsageTimer = setInterval(() => {
+					void synchronizeUsage().catch((error) =>
+						console.error("Failed to export Stripe usage", error),
+					);
+				}, 5 * 60_000);
+				stripeUsageTimer.unref();
+				timers.push(stripeUsageTimer);
+			}
 		}
 		if (process.env.NODE_ENV === "production" && !IS_CLOUD) {
 			createDefaultMiddlewares();

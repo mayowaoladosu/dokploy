@@ -1,3 +1,14 @@
+import { db } from "@dokploy/server/db";
+import {
+	applications,
+	environments,
+	projects,
+} from "@dokploy/server/db/schema";
+import {
+	observabilityResourceId,
+	observabilityTenantId,
+} from "@dokploy/server/services/observability";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import {
 	Client,
 	Connection,
@@ -5,6 +16,8 @@ import {
 	WorkflowIdConflictPolicy,
 	WorkflowIdReusePolicy,
 } from "@temporalio/client";
+import { OpenTelemetryWorkflowClientInterceptor } from "@temporalio/interceptors-opentelemetry";
+import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import type { DeploymentJob } from "../queues/queue-types";
 import { assertTemporalConfiguration } from "./config";
@@ -17,6 +30,33 @@ import {
 import { cancelDeploymentSignal, deploymentWorkflow } from "./workflows";
 
 let clientPromise: Promise<Client> | null = null;
+const temporalTracer = trace.getTracer("vlyv-temporal-client");
+
+const temporalTraceAttributes = async (applicationId: string) => {
+	const [application] = await db
+		.select({ organizationId: projects.organizationId })
+		.from(applications)
+		.innerJoin(
+			environments,
+			eq(environments.environmentId, applications.environmentId),
+		)
+		.innerJoin(projects, eq(projects.projectId, environments.projectId))
+		.where(eq(applications.applicationId, applicationId))
+		.limit(1);
+	return {
+		"vlyv.application.id": observabilityResourceId(
+			"application",
+			applicationId,
+		),
+		...(application
+			? {
+					"vlyv.organization.id": observabilityTenantId(
+						application.organizationId,
+					),
+				}
+			: {}),
+	};
+};
 
 const createClient = async () => {
 	const config = assertTemporalConfiguration();
@@ -30,7 +70,13 @@ const createClient = async () => {
 		tls: config.tls,
 		apiKey: config.apiKey,
 	});
-	return new Client({ connection, namespace: config.namespace });
+	return new Client({
+		connection,
+		namespace: config.namespace,
+		interceptors: {
+			workflow: [new OpenTelemetryWorkflowClientInterceptor()],
+		},
+	});
 };
 
 export const getTemporalClient = () => {
@@ -63,29 +109,51 @@ export const startDeploymentWorkflow = async (
 		job: workflowJob,
 	};
 	const client = await getTemporalClient();
-	try {
-		const handle = await client.workflow.start(deploymentWorkflow, {
-			workflowId,
-			taskQueue: config.taskQueue,
-			args: [input],
-			workflowExecutionTimeout: "3 hours",
-			workflowRunTimeout: "3 hours",
-			workflowTaskTimeout: "10 seconds",
-			workflowIdReusePolicy:
-				WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
-			workflowIdConflictPolicy: WorkflowIdConflictPolicy.USE_EXISTING,
-			memo: {
-				job: workflowJob,
-				idempotencyKey: normalizedIdempotencyKey,
-			},
-		});
-		return { id: workflowId, runId: handle.firstExecutionRunId };
-	} catch (error) {
-		if (error instanceof WorkflowExecutionAlreadyStartedError) {
-			return { id: workflowId };
-		}
-		throw error;
-	}
+	const traceAttributes = await temporalTraceAttributes(
+		job.applicationId,
+	).catch(() => ({
+		"vlyv.application.id": observabilityResourceId(
+			"application",
+			job.applicationId,
+		),
+	}));
+	return temporalTracer.startActiveSpan(
+		"temporal.deployment.start",
+		{ attributes: traceAttributes },
+		async (span) => {
+			try {
+				const handle = await client.workflow.start(deploymentWorkflow, {
+					workflowId,
+					taskQueue: config.taskQueue,
+					args: [input],
+					workflowExecutionTimeout: "3 hours",
+					workflowRunTimeout: "3 hours",
+					workflowTaskTimeout: "10 seconds",
+					workflowIdReusePolicy:
+						WorkflowIdReusePolicy.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
+					workflowIdConflictPolicy: WorkflowIdConflictPolicy.USE_EXISTING,
+					memo: {
+						job: workflowJob,
+						idempotencyKey: normalizedIdempotencyKey,
+					},
+				});
+				span.setStatus({ code: SpanStatusCode.OK });
+				return { id: workflowId, runId: handle.firstExecutionRunId };
+			} catch (error) {
+				if (error instanceof WorkflowExecutionAlreadyStartedError) {
+					span.setStatus({ code: SpanStatusCode.OK });
+					return { id: workflowId };
+				}
+				span.recordException(
+					error instanceof Error ? error : new Error(String(error)),
+				);
+				span.setStatus({ code: SpanStatusCode.ERROR });
+				throw error;
+			} finally {
+				span.end();
+			}
+		},
+	);
 };
 
 export const signalDeploymentCancellation = async (

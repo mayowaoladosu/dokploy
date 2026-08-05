@@ -1,4 +1,7 @@
-import { usageWindowStart } from "@dokploy/server/services/usage-metering";
+import {
+	databaseByteSeconds,
+	usageWindowStart,
+} from "@dokploy/server/services/usage-metering";
 import { describe, expect, it } from "vitest";
 
 describe("usage metering windows", () => {
@@ -20,5 +23,11 @@ describe("usage metering windows", () => {
 		expect(usageWindowStart("month", observedAt).toISOString()).toBe(
 			"2026-08-01T00:00:00.000Z",
 		);
+	});
+
+	it("converts database samples to exact integer byte-seconds", () => {
+		expect(databaseByteSeconds(1_024n, 60_000)).toBe(61_440n);
+		expect(databaseByteSeconds("5", 1_001)).toBe(10n);
+		expect(() => databaseByteSeconds(5, 0)).toThrow("duration is invalid");
 	});
 });

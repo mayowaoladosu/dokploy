@@ -48,6 +48,9 @@ try {
 		}),
 		bundleWorkflowCode({
 			workflowsPath: path.resolve("server/temporal/workflows.ts"),
+			workflowInterceptorModules: [
+				path.resolve("server/temporal/otel-workflow-interceptors.ts"),
+			],
 		}).then((bundle) =>
 			writeFile(path.resolve("dist/temporal-workflows.js"), bundle.code),
 		),
