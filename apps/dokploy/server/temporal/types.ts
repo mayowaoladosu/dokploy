@@ -51,6 +51,10 @@ export const temporalDeploymentMemo = (
 				type: job.type,
 				applicationType: job.applicationType,
 				previewDeploymentId: job.previewDeploymentId,
+				...(job.gitDeliveryTargetId
+					? { gitDeliveryTargetId: job.gitDeliveryTargetId }
+					: {}),
+				...(job.sourceBranch ? { sourceBranch: job.sourceBranch } : {}),
 				server: false,
 			}
 		: {
@@ -59,6 +63,10 @@ export const temporalDeploymentMemo = (
 				descriptionLog: job.descriptionLog,
 				type: job.type,
 				applicationType: job.applicationType,
+				...(job.gitDeliveryTargetId
+					? { gitDeliveryTargetId: job.gitDeliveryTargetId }
+					: {}),
+				...(job.sourceBranch ? { sourceBranch: job.sourceBranch } : {}),
 				server: false,
 			};
 

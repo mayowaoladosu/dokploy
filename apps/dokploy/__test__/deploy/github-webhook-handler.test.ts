@@ -10,6 +10,11 @@ const mocks = vi.hoisted(() => ({
 	applicationsFindMany: vi.fn(),
 	composeFindMany: vi.fn(),
 	queueAdd: vi.fn(),
+	admitGitDelivery: vi.fn(),
+	enqueueGitDeliveryTarget: vi.fn(),
+	resolveGitBranchEnvironmentMapping: vi.fn(),
+	verifyGitWebhookSignature: vi.fn(),
+	normalizeGitWebhookEvent: vi.fn(),
 	verify: vi.fn(),
 	shouldDeploy: vi.fn(),
 }));
@@ -42,6 +47,9 @@ vi.mock("@/server/db/schema", () => ({
 	github: {
 		githubInstallationId: "github.githubInstallationId",
 	},
+	previewDeployments: {
+		pullRequestId: "preview.pullRequestId",
+	},
 }));
 
 vi.mock("@dokploy/server/db", () => ({
@@ -61,6 +69,7 @@ vi.mock("@dokploy/server/db", () => ({
 }));
 
 vi.mock("@dokploy/server", () => ({
+	admitGitDelivery: mocks.admitGitDelivery,
 	IS_CLOUD: false,
 	shouldDeploy: mocks.shouldDeploy,
 	checkUserRepositoryPermissions: vi.fn(),
@@ -70,7 +79,13 @@ vi.mock("@dokploy/server", () => ({
 	findPreviewDeploymentByApplicationId: vi.fn(),
 	findPreviewDeploymentsByPullRequestId: vi.fn(),
 	getBitbucketHeaders: vi.fn(() => ({})),
+	gitWebhookPayloadHash: vi.fn(() => "payload-hash"),
+	gitWebhookProviderScopeHash: vi.fn(() => "scope-hash"),
+	extractGitWebhookDeliveryId: vi.fn(() => "delivery-1"),
+	normalizeGitWebhookEvent: mocks.normalizeGitWebhookEvent,
 	removePreviewDeployment: vi.fn(),
+	resolveGitBranchEnvironmentMapping: mocks.resolveGitBranchEnvironmentMapping,
+	verifyGitWebhookSignature: mocks.verifyGitWebhookSignature,
 }));
 
 vi.mock("@octokit/webhooks", () => ({
@@ -85,6 +100,14 @@ vi.mock("@/server/queues/queueSetup", () => ({
 	myQueue: {
 		add: mocks.queueAdd,
 	},
+}));
+
+vi.mock("@/server/git-delivery", () => ({
+	enqueueGitDeliveryTarget: mocks.enqueueGitDeliveryTarget,
+	readRawJsonWebhook: vi.fn(async (req: NextApiRequest) => ({
+		rawBody: Buffer.from(JSON.stringify(req.body)),
+		body: req.body,
+	})),
 }));
 
 vi.mock("@/server/utils/deploy", () => ({
@@ -164,8 +187,40 @@ describe("GitHub app webhook auto-deploy", () => {
 			githubId: "github-provider-id",
 			githubInstallationId: 12345,
 			githubWebhookSecret: "webhook-secret",
+			gitProviderId: "git-provider-id",
+			gitProvider: { organizationId: "organization-id" },
 		});
 		mocks.verify.mockResolvedValue(true);
+		mocks.verifyGitWebhookSignature.mockReturnValue({
+			verified: true,
+			algorithm: "hmac-sha256",
+		});
+		mocks.normalizeGitWebhookEvent.mockImplementation(({ body }) => ({
+			provider: "github",
+			eventType: body.ref.startsWith("refs/tags/") ? "tag" : "push",
+			repositoryOwner:
+				body.repository.owner.name ?? body.repository.owner.login,
+			repositoryName: body.repository.name,
+			branch: body.ref.replace(/^refs\/(heads|tags)\//, ""),
+			commitSha: body.after,
+			commitMessage: body.head_commit.message,
+			changedPaths: body.commits.flatMap(
+				(commit: { modified: string[] }) => commit.modified,
+			),
+			closed: false,
+		}));
+		mocks.resolveGitBranchEnvironmentMapping.mockResolvedValue({
+			isProduction: true,
+		});
+		mocks.admitGitDelivery.mockImplementation(async ({ targets }) => ({
+			delivery: { gitDeliveryId: "git-delivery-id" },
+			targets: targets.map((target: unknown, index: number) => ({
+				...(target as object),
+				gitDeliveryTargetId: `target-${index + 1}`,
+			})),
+			duplicate: false,
+		}));
+		mocks.enqueueGitDeliveryTarget.mockResolvedValue(true);
 		mocks.shouldDeploy.mockReturnValue(true);
 		mocks.composeFindMany.mockResolvedValue([]);
 		mocks.queueAdd.mockResolvedValue({ id: "job-id" });
@@ -175,7 +230,6 @@ describe("GitHub app webhook auto-deploy", () => {
 				getConditionValue(where, "application.sourceType") === "github" &&
 				getConditionValue(where, "application.autoDeploy") === true &&
 				getConditionValue(where, "application.triggerType") === "push" &&
-				getConditionValue(where, "application.branch") === "main" &&
 				getConditionValue(where, "application.repository") === "dokploy" &&
 				getConditionValue(where, "application.owner") === "agentHits" &&
 				getConditionValue(where, "application.githubId") ===
@@ -186,8 +240,21 @@ describe("GitHub app webhook auto-deploy", () => {
 					? [
 							{
 								applicationId: "application-id",
+								name: "API",
+								sourceType: "github",
+								branch: "main",
+								autoDeploy: true,
 								serverId: null,
 								watchPaths: null,
+								environment: {
+									name: "Production",
+									isDefault: true,
+									projectId: "project-id",
+									project: {
+										projectId: "project-id",
+										organizationId: "organization-id",
+									},
+								},
 							},
 						]
 					: [],
@@ -206,20 +273,19 @@ describe("GitHub app webhook auto-deploy", () => {
 			res,
 		);
 
-		expect(mocks.queueAdd).toHaveBeenCalledWith(
-			"deployments",
+		expect(mocks.admitGitDelivery).toHaveBeenCalledWith(
 			expect.objectContaining({
-				applicationId: "application-id",
-				applicationType: "application",
-				type: "deploy",
-			}),
-			expect.objectContaining({
-				removeOnComplete: true,
-				removeOnFail: true,
+				providerDeliveryId: "delivery-1",
+				targets: [
+					expect.objectContaining({
+						applicationId: "application-id",
+						targetKey: "application:application-id",
+					}),
+				],
 			}),
 		);
-		expect(res.status).toHaveBeenCalledWith(200);
-		expect(res.json).toHaveBeenCalledWith({ message: "Deployed 1 apps" });
+		expect(mocks.enqueueGitDeliveryTarget).toHaveBeenCalledWith("target-1");
+		expect(res.status).toHaveBeenCalledWith(202);
 	});
 
 	it("matches compose push events using repository owner login fallback", async () => {
@@ -239,6 +305,7 @@ describe("GitHub app webhook auto-deploy", () => {
 					? [
 							{
 								composeId: "compose-id",
+								name: "Compose",
 								serverId: null,
 								watchPaths: null,
 							},
@@ -250,20 +317,17 @@ describe("GitHub app webhook auto-deploy", () => {
 
 		await handler(createPushRequest("main"), res);
 
-		expect(mocks.queueAdd).toHaveBeenCalledWith(
-			"deployments",
+		expect(mocks.admitGitDelivery).toHaveBeenCalledWith(
 			expect.objectContaining({
-				applicationType: "compose",
-				composeId: "compose-id",
-				type: "deploy",
-			}),
-			expect.objectContaining({
-				removeOnComplete: true,
-				removeOnFail: true,
+				targets: [
+					expect.objectContaining({
+						composeId: "compose-id",
+						targetKey: "compose:compose-id",
+					}),
+				],
 			}),
 		);
-		expect(res.status).toHaveBeenCalledWith(200);
-		expect(res.json).toHaveBeenCalledWith({ message: "Deployed 1 apps" });
+		expect(res.status).toHaveBeenCalledWith(202);
 	});
 
 	it("matches tag events using repository owner login fallback", async () => {
@@ -282,7 +346,9 @@ describe("GitHub app webhook auto-deploy", () => {
 					? [
 							{
 								applicationId: "application-id",
+								name: "API",
 								serverId: null,
+								environment: { isDefault: true },
 							},
 						]
 					: [],
@@ -292,32 +358,37 @@ describe("GitHub app webhook auto-deploy", () => {
 
 		await handler(createTagRequest("v1.0.0"), res);
 
-		expect(mocks.queueAdd).toHaveBeenCalledWith(
-			"deployments",
+		expect(mocks.admitGitDelivery).toHaveBeenCalledWith(
 			expect.objectContaining({
-				applicationId: "application-id",
-				applicationType: "application",
-				titleLog: "Tag created: v1.0.0",
-				type: "deploy",
-			}),
-			expect.objectContaining({
-				removeOnComplete: true,
-				removeOnFail: true,
+				eventType: "tag",
+				targets: [expect.objectContaining({ applicationId: "application-id" })],
 			}),
 		);
-		expect(res.status).toHaveBeenCalledWith(200);
-		expect(res.json).toHaveBeenCalledWith({
-			message: "Deployed 1 apps based on tag v1.0.0",
-		});
+		expect(res.status).toHaveBeenCalledWith(202);
 	});
 
 	it("does not deploy when the pushed branch does not match", async () => {
+		mocks.resolveGitBranchEnvironmentMapping.mockResolvedValue(null);
 		const res = createResponse();
 
 		await handler(createPushRequest("feature"), res);
 
-		expect(mocks.queueAdd).not.toHaveBeenCalled();
-		expect(res.status).toHaveBeenCalledWith(200);
-		expect(res.json).toHaveBeenCalledWith({ message: "No apps to deploy" });
+		expect(mocks.admitGitDelivery).toHaveBeenCalledWith(
+			expect.objectContaining({ targets: [] }),
+		);
+		expect(res.status).toHaveBeenCalledWith(202);
+	});
+
+	it("rejects an invalid raw-body signature before recording a delivery", async () => {
+		mocks.verifyGitWebhookSignature.mockReturnValue({
+			verified: false,
+			algorithm: "hmac-sha256",
+		});
+		const res = createResponse();
+
+		await handler(createPushRequest("main"), res);
+
+		expect(res.status).toHaveBeenCalledWith(401);
+		expect(mocks.admitGitDelivery).not.toHaveBeenCalled();
 	});
 });

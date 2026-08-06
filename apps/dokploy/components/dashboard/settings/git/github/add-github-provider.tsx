@@ -44,10 +44,13 @@ export const AddGithubProvider = () => {
 				public: false,
 				request_oauth_on_install: true,
 				default_permissions: {
+					checks: "write",
 					contents: "read",
 					metadata: "read",
 					emails: "read",
 					pull_requests: "write",
+					statuses: "write",
+					issues: "write",
 				},
 				default_events: ["pull_request", "push"],
 			},

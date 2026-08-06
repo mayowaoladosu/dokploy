@@ -15,6 +15,7 @@ export * from "./domain";
 export * from "./domain-verification";
 export * from "./environment";
 export * from "./forward-auth";
+export * from "./git-delivery";
 export * from "./git-provider";
 export * from "./gitea";
 export * from "./github";

@@ -1,0 +1,1 @@
+ALTER TYPE "public"."gitDeliveryReportStatus" ADD VALUE 'syncing' BEFORE 'synced';

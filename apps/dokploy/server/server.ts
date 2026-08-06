@@ -24,6 +24,7 @@ import {
 	loadPlatformManagedDataProviders,
 	reconcileCloudflareEdgeUsage,
 	reconcileDomainVerifications,
+	reconcileExpiredPreviewDeployments,
 	reconcileKubernetesPlacements,
 	reconcileManagedDataBackups,
 	reconcileManagedDataResources,
@@ -40,6 +41,7 @@ import {
 import { config } from "dotenv";
 import next from "next";
 import packageInfo from "../package.json";
+import { reconcileGitDelivery } from "./git-delivery";
 import { closeTemporalClient } from "./temporal/client";
 import { temporalConfiguration } from "./temporal/config";
 import { startTemporalWorker, stopTemporalWorker } from "./temporal/worker";
@@ -188,6 +190,66 @@ void app.prepare().then(async () => {
 		}, 60_000);
 		placementReconciliationTimer.unref();
 		timers.push(placementReconciliationTimer);
+		let gitDeliveryReconciliationRunning = false;
+		const reconcileGitDeliveries = async () => {
+			if (gitDeliveryReconciliationRunning) return;
+			gitDeliveryReconciliationRunning = true;
+			try {
+				const result = await reconcileGitDelivery();
+				if (
+					result.stateReconciled +
+						result.enqueued +
+						result.reported +
+						result.failed >
+					0
+				) {
+					console.log(
+						`Reconciled Git delivery: ${result.enqueued} enqueued, ${result.stateReconciled} terminal, ${result.reported} reported, ${result.failed} failed`,
+					);
+				}
+			} finally {
+				gitDeliveryReconciliationRunning = false;
+			}
+		};
+		await reconcileGitDeliveries().catch((error) =>
+			console.error("Failed to reconcile Git delivery", error),
+		);
+		const gitDeliveryTimer = setInterval(() => {
+			void reconcileGitDeliveries().catch((error) =>
+				console.error("Failed to reconcile Git delivery", error),
+			);
+		}, 30_000);
+		gitDeliveryTimer.unref();
+		timers.push(gitDeliveryTimer);
+
+		const expirePreviews = async () => {
+			const { cleanQueuesByPreviewDeployment } = await import(
+				"./queues/queueSetup"
+			);
+			const result = await reconcileExpiredPreviewDeployments(
+				new Date(),
+				50,
+				(previewDeploymentId) =>
+					cleanQueuesByPreviewDeployment(previewDeploymentId, {
+						waitForCompletion: true,
+					}).then(() => undefined),
+			);
+			if (result.expired + result.failed > 0) {
+				console.log(
+					`Reconciled preview expiry: ${result.expired} expired, ${result.failed} failed`,
+				);
+			}
+		};
+		await expirePreviews().catch((error) =>
+			console.error("Failed to reconcile preview expiry", error),
+		);
+		const previewExpiryTimer = setInterval(() => {
+			void expirePreviews().catch((error) =>
+				console.error("Failed to reconcile preview expiry", error),
+			);
+		}, 5 * 60_000);
+		previewExpiryTimer.unref();
+		timers.push(previewExpiryTimer);
 		if (IS_MANAGED_PAAS) {
 			let managedDataLifecycleRunning = false;
 			const reconcileDatabaseLifecycle = async () => {

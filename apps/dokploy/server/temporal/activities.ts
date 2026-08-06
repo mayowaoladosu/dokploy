@@ -5,6 +5,8 @@ import {
 	deployPreviewApplication,
 	findApplicationById,
 	findDeploymentById,
+	markGitDeliveryTargetFinished,
+	markGitDeliveryTargetRunning,
 	rebuildApplication,
 	rebuildPreviewApplication,
 	updateApplicationStatus,
@@ -62,6 +64,7 @@ const executeJob = async (
 			descriptionLog: job.descriptionLog,
 			deploymentId: input.workflowId,
 			signal,
+			sourceBranch: job.sourceBranch,
 		});
 	}
 	return deployApplication({
@@ -70,6 +73,7 @@ const executeJob = async (
 		descriptionLog: job.descriptionLog,
 		deploymentId: input.workflowId,
 		signal,
+		sourceBranch: job.sourceBranch,
 	});
 };
 
@@ -115,12 +119,17 @@ export const executeDeploymentJob = async (input: DeploymentWorkflowInput) => {
 		once: true,
 	});
 	try {
+		await markGitDeliveryTargetRunning(input.job.gitDeliveryTargetId);
 		context.heartbeat({ phase: "starting", attempt: activityInfo().attempt });
 		const release = await createReleaseStateMachine()
 			.getByDeployment(input.workflowId)
 			.catch(() => null);
 		if (release?.state === "ready") {
 			await reconcileCompletedDeployment(input, "done");
+			await markGitDeliveryTargetFinished(
+				input.job.gitDeliveryTargetId,
+				"succeeded",
+			);
 			return true;
 		}
 		if (release?.state === "cancelled") {
@@ -151,9 +160,19 @@ export const executeDeploymentJob = async (input: DeploymentWorkflowInput) => {
 		const existing = await findDeploymentById(input.workflowId).catch(
 			() => null,
 		);
-		if (existing?.status === "done") return true;
+		if (existing?.status === "done") {
+			await markGitDeliveryTargetFinished(
+				input.job.gitDeliveryTargetId,
+				"succeeded",
+			);
+			return true;
+		}
 		const result = await executeJob(input, context.cancellationSignal);
 		context.cancellationSignal.throwIfAborted();
+		await markGitDeliveryTargetFinished(
+			input.job.gitDeliveryTargetId,
+			"succeeded",
+		);
 		return result;
 	} catch (error) {
 		if (context.cancellationSignal.aborted) throw error;
@@ -165,6 +184,11 @@ export const executeDeploymentJob = async (input: DeploymentWorkflowInput) => {
 			release?.state === "rolled_back" ||
 			release?.state === "cancelled"
 		) {
+			await markGitDeliveryTargetFinished(
+				input.job.gitDeliveryTargetId,
+				release.state === "cancelled" ? "cancelled" : "failed",
+				error,
+			);
 			throw ApplicationFailure.nonRetryable(
 				error instanceof Error ? error.message : String(error),
 				"TerminalReleaseFailure",
@@ -214,6 +238,10 @@ export const cancelDeploymentJob = async (input: DeploymentWorkflowInput) => {
 					previewStatus: completed ? "done" : "error",
 				});
 			}
+			await markGitDeliveryTargetFinished(
+				input.job.gitDeliveryTargetId,
+				completed ? "succeeded" : "failed",
+			);
 			return false;
 		}
 		if (runningDeployment) {
@@ -227,6 +255,10 @@ export const cancelDeploymentJob = async (input: DeploymentWorkflowInput) => {
 				previewStatus: "idle",
 			});
 		}
+		await markGitDeliveryTargetFinished(
+			input.job.gitDeliveryTargetId,
+			"cancelled",
+		);
 		return true;
 	} finally {
 		stopHeartbeat();

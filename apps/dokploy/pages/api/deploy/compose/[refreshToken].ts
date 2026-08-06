@@ -1,8 +1,23 @@
-import { IS_CLOUD, shouldDeploy } from "@dokploy/server";
+import {
+	admitGitDelivery,
+	detectGitWebhookProvider,
+	extractGitWebhookDeliveryId,
+	gitWebhookPayloadHash,
+	gitWebhookProviderScopeHash,
+	IS_CLOUD,
+	IS_MANAGED_PAAS,
+	normalizeGitWebhookEvent,
+	shouldDeploy,
+	verifyGitWebhookSignature,
+} from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import { eq } from "drizzle-orm";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { compose } from "@/server/db/schema";
+import {
+	enqueueGitDeliveryTarget,
+	readRawJsonWebhook,
+} from "@/server/git-delivery";
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import { myQueue } from "@/server/queues/queueSetup";
 import { deploy } from "@/server/utils/deploy";
@@ -16,7 +31,167 @@ import {
 	logWebhookError,
 } from "../[refreshToken]";
 
+export const config = { api: { bodyParser: false } };
+
+const secureComposeHandler = async (
+	req: NextApiRequest,
+	res: NextApiResponse,
+) => {
+	if (req.method && req.method !== "POST") {
+		return res.status(405).json({ message: "Method not allowed" });
+	}
+	if (IS_MANAGED_PAAS) {
+		return res.status(404).json({ message: "Not found" });
+	}
+	const { refreshToken } = req.query;
+	const { rawBody, body } = await readRawJsonWebhook(req);
+	const composeResult = await db.query.compose.findFirst({
+		where: eq(compose.refreshToken, refreshToken as string),
+		with: {
+			environment: { with: { project: true } },
+			github: true,
+			gitlab: true,
+			gitea: true,
+			bitbucket: true,
+		},
+	});
+	if (!composeResult)
+		return res.status(404).json({ message: "Compose Not Found" });
+	if (!composeResult.autoDeploy) {
+		return res
+			.status(400)
+			.json({ message: "Automatic deployments are disabled" });
+	}
+	const provider = detectGitWebhookProvider(req.headers);
+	const verification = verifyGitWebhookSignature({
+		provider,
+		headers: req.headers,
+		rawBody,
+		secret: String(refreshToken),
+		required: provider !== "generic",
+	});
+	if (!verification.verified && provider !== "generic") {
+		return res.status(401).json({ message: "Invalid webhook signature" });
+	}
+	const event = normalizeGitWebhookEvent({
+		provider,
+		headers: req.headers,
+		body,
+	});
+	const configuredBranch =
+		composeResult.sourceType === "github"
+			? composeResult.branch
+			: composeResult.sourceType === "gitlab"
+				? composeResult.gitlabBranch
+				: composeResult.sourceType === "gitea"
+					? composeResult.giteaBranch
+					: composeResult.sourceType === "bitbucket"
+						? composeResult.bitbucketBranch
+						: composeResult.customGitBranch;
+	let changedPaths = event.changedPaths;
+	if (provider === "bitbucket" && event.eventType === "push") {
+		changedPaths = await extractCommittedPaths(
+			body,
+			composeResult.bitbucket,
+			composeResult.bitbucketRepositorySlug ??
+				composeResult.bitbucketRepository ??
+				"",
+		);
+	}
+	const deploys =
+		(event.eventType === "push" && event.branch === configuredBranch) ||
+		(event.eventType === "tag" && composeResult.triggerType === "tag");
+	const targetPlans: Parameters<typeof admitGitDelivery>[0]["targets"] = [];
+	if (deploys && shouldDeploy(composeResult.watchPaths, changedPaths)) {
+		const job: DeploymentJob = {
+			composeId: composeResult.composeId,
+			titleLog: event.commitMessage ?? "Git delivery",
+			descriptionLog: event.commitSha ? `Hash: ${event.commitSha}` : "",
+			type: "deploy",
+			applicationType: "compose",
+			server: !!composeResult.serverId,
+			serverId: composeResult.serverId ?? undefined,
+		};
+		targetPlans.push({
+			targetKey: `compose:${composeResult.composeId}`,
+			composeId: composeResult.composeId,
+			targetName: composeResult.name,
+			job: { kind: "deployment", deployment: job },
+		});
+	}
+	const providerRecord =
+		provider === "github"
+			? composeResult.github
+			: provider === "gitlab"
+				? composeResult.gitlab
+				: provider === "gitea"
+					? composeResult.gitea
+					: provider === "bitbucket"
+						? composeResult.bitbucket
+						: null;
+	const providerConnectionId =
+		provider === "github"
+			? composeResult.githubId
+			: provider === "gitlab"
+				? composeResult.gitlabId
+				: provider === "gitea"
+					? composeResult.giteaId
+					: provider === "bitbucket"
+						? composeResult.bitbucketId
+						: null;
+	const payloadHash = gitWebhookPayloadHash(rawBody);
+	const scopeHash = gitWebhookProviderScopeHash(
+		`compose:${composeResult.composeId}`,
+	);
+	const admitted = await admitGitDelivery({
+		organizationId: composeResult.environment.project.organizationId,
+		gitProviderId: providerRecord?.gitProviderId ?? undefined,
+		providerConnectionId: providerConnectionId ?? undefined,
+		provider,
+		providerScopeHash: scopeHash,
+		providerDeliveryId: extractGitWebhookDeliveryId({
+			provider,
+			headers: req.headers,
+			payloadHash,
+			scopeHash,
+			eventType: event.eventType,
+		}),
+		eventType: event.eventType,
+		repositoryOwner: event.repositoryOwner,
+		repositoryName: event.repositoryName,
+		branch: event.branch,
+		commitSha: event.commitSha,
+		commitMessage: event.commitMessage,
+		payloadHash,
+		targets: targetPlans,
+	});
+	for (const target of admitted.targets) {
+		await enqueueGitDeliveryTarget(target.gitDeliveryTargetId).catch((error) =>
+			logWebhookError("Failed to enqueue compose Git delivery", error),
+		);
+	}
+	return res.status(202).json({
+		message: targetPlans.length
+			? "Git delivery accepted"
+			: "Git delivery ignored",
+		deliveryId: admitted.delivery.gitDeliveryId,
+		duplicate: admitted.duplicate,
+	});
+};
+
 export default async function handler(
+	req: NextApiRequest,
+	res: NextApiResponse,
+) {
+	try {
+		return await secureComposeHandler(req, res);
+	} catch (error) {
+		logWebhookError("Error processing compose Git delivery", error);
+		return res.status(400).json({ message: "Error processing Git delivery" });
+	}
+}
+
+export async function legacyComposeWebhookHandler(
 	req: NextApiRequest,
 	res: NextApiResponse,
 ) {

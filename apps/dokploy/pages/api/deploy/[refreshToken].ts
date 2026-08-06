@@ -1,16 +1,31 @@
 import {
+	admitGitDelivery,
 	type Bitbucket,
+	createPreviewDeployment,
+	detectGitWebhookProvider,
+	extractGitWebhookDeliveryId,
+	findPreviewDeploymentByApplicationId,
 	getBitbucketHeaders,
-	IS_CLOUD,
+	gitWebhookPayloadHash,
+	gitWebhookProviderScopeHash,
+	IS_MANAGED_PAAS,
+	normalizeGitWebhookEvent,
+	resolveGitBranchEnvironmentMapping,
 	shouldDeploy,
+	verifyGitPullRequestAuthor,
+	verifyGitWebhookSignature,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import { eq } from "drizzle-orm";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { applications } from "@/server/db/schema";
+import {
+	enqueueGitDeliveryTarget,
+	readRawJsonWebhook,
+} from "@/server/git-delivery";
 import type { DeploymentJob } from "@/server/queues/queue-types";
-import { myQueue } from "@/server/queues/queueSetup";
-import { deploy } from "@/server/utils/deploy";
+
+export const config = { api: { bodyParser: false } };
 
 /**
  * Log a webhook handler error server-side without leaking its shape to the HTTP
@@ -47,8 +62,12 @@ export default async function handler(
 	res: NextApiResponse,
 ) {
 	const { refreshToken } = req.query;
-	const deliveryId = extractDeliveryId(req.headers);
 	try {
+		if (req.method && req.method !== "POST") {
+			res.status(405).json({ message: "Method not allowed" });
+			return;
+		}
+		const { rawBody, body } = await readRawJsonWebhook(req);
 		if (req.headers["x-github-event"] === "ping") {
 			res.status(200).json({ message: "Ping received, webhook is active" });
 			return;
@@ -62,6 +81,9 @@ export default async function handler(
 					},
 				},
 				bitbucket: true,
+				github: true,
+				gitlab: true,
+				gitea: true,
 			},
 		});
 
@@ -75,220 +97,321 @@ export default async function handler(
 			});
 			return;
 		}
-
-		const deploymentTitle = extractCommitMessage(req.headers, req.body);
-
-		const deploymentHash = extractHash(req.headers, req.body);
-		const sourceType = application.sourceType;
-
-		if (sourceType === "docker") {
-			const applicationImageName = extractImageName(application.dockerImage);
-			const applicationDockerTag = extractImageTag(application.dockerImage);
-
-			const webhookImageName = extractImageNameFromRequest(
-				req.headers,
-				req.body,
-			);
-			const webhookDockerTag = extractImageTagFromRequest(
-				req.headers,
-				req.body,
-			);
-
-			if (!applicationImageName) {
-				res.status(301).json({
-					message: "Application Docker Image Name Not Found",
-				});
-				return;
-			}
-
-			// If webhook provides image information, validate it matches the configured image
-			// If webhook doesn't provide image information, fall back to using the configured image (backward compatibility)
-			if (webhookImageName) {
-				// Validate image name matches
-				if (webhookImageName !== applicationImageName) {
-					res.status(301).json({
-						message: `Application Image Name (${applicationImageName}) doesn't match request event payload Image Name (${webhookImageName}).`,
-					});
-					return;
-				}
-
-				if (!applicationDockerTag) {
-					res.status(301).json({
-						message: "Application Docker Tag Not Found",
-					});
-					return;
-				}
-
-				if (webhookDockerTag) {
-					if (webhookDockerTag !== applicationDockerTag) {
-						res.status(301).json({
-							message: `Application Image Tag (${applicationDockerTag}) doesn't match request event payload Image Tag (${webhookDockerTag}).`,
-						});
-						return;
-					}
-				}
-			}
-			// If webhook doesn't provide image info, we'll use the configured image (old behavior)
-		} else if (sourceType === "github") {
-			const normalizedCommits = req.body?.commits?.flatMap(
-				(commit: any) => commit.modified,
-			);
-
-			const shouldDeployPaths = shouldDeploy(
-				application.watchPaths,
-				normalizedCommits,
-			);
-
-			if (!shouldDeployPaths) {
-				res.status(301).json({ message: "Watch Paths Not Match" });
-				return;
-			}
-
-			const branchName = extractBranchName(req.headers, req.body);
-			if (!branchName || branchName !== application.branch) {
-				res.status(301).json({ message: "Branch Not Match" });
-				return;
-			}
-		} else if (sourceType === "git") {
-			const branchName = extractBranchName(req.headers, req.body);
-
-			if (!branchName || branchName !== application.customGitBranch) {
-				res.status(301).json({ message: "Branch Not Match" });
-				return;
-			}
-
-			const provider = getProviderByHeader(req.headers);
-			let normalizedCommits: string[] = [];
-
-			if (provider === "github") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
-			} else if (provider === "gitlab") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
-			} else if (provider === "gitea") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
-			} else if (provider === "soft-serve") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
-			}
-
-			const shouldDeployPaths = shouldDeploy(
-				application.watchPaths,
-				normalizedCommits,
-			);
-
-			if (!shouldDeployPaths) {
-				res.status(301).json({ message: "Watch Paths Not Match" });
-				return;
-			}
-		} else if (sourceType === "gitlab") {
-			const branchName = extractBranchName(req.headers, req.body);
-
-			const normalizedCommits = req.body?.commits?.flatMap(
-				(commit: any) => commit.modified,
-			);
-
-			const shouldDeployPaths = shouldDeploy(
-				application.watchPaths,
-				normalizedCommits,
-			);
-
-			if (!shouldDeployPaths) {
-				res.status(301).json({ message: "Watch Paths Not Match" });
-				return;
-			}
-
-			if (!branchName || branchName !== application.gitlabBranch) {
-				res.status(301).json({ message: "Branch Not Match" });
-				return;
-			}
-		} else if (sourceType === "bitbucket") {
-			const branchName = extractBranchName(req.headers, req.body);
-
-			if (!branchName || branchName !== application.bitbucketBranch) {
-				res.status(301).json({ message: "Branch Not Match" });
-				return;
-			}
-
-			const committedPaths = await extractCommittedPaths(
-				req.body,
-				application.bitbucket,
-				application.bitbucketRepositorySlug ||
-					application.bitbucketRepository ||
-					"",
-			);
-
-			const shouldDeployPaths = shouldDeploy(
-				application.watchPaths,
-				committedPaths,
-			);
-
-			if (!shouldDeployPaths) {
-				res.status(301).json({ message: "Watch Paths Not Match" });
-				return;
-			}
-		} else if (sourceType === "gitea") {
-			const branchName = extractBranchName(req.headers, req.body);
-
-			const normalizedCommits = req.body?.commits?.flatMap(
-				(commit: any) => commit.modified,
-			);
-
-			const shouldDeployPaths = shouldDeploy(
-				application.watchPaths,
-				normalizedCommits,
-			);
-
-			if (!shouldDeployPaths) {
-				res.status(301).json({ message: "Watch Paths Not Match" });
-				return;
-			}
-
-			if (!branchName || branchName !== application.giteaBranch) {
-				res.status(301).json({ message: "Branch Not Match" });
-				return;
-			}
+		const provider = detectGitWebhookProvider(req.headers);
+		if (IS_MANAGED_PAAS && ["generic", "docker"].includes(provider)) {
+			res.status(401).json({ message: "Signed Git provider webhook required" });
+			return;
 		}
-
-		try {
-			const jobData: DeploymentJob = {
-				applicationId: application.applicationId as string,
-				titleLog: deploymentTitle,
-				descriptionLog: deploymentHash ? `Hash: ${deploymentHash}` : "",
-				type: "deploy",
-				applicationType: "application",
-				server: !!application.serverId,
-			};
-
-			if (IS_CLOUD && application.serverId) {
-				jobData.serverId = application.serverId;
-				deploy(jobData).catch((error) => {
-					console.error("Background deployment failed:", error);
-				});
-			} else {
-				await myQueue.add(
-					"deployments",
-					{ ...jobData },
-					{
-						removeOnComplete: true,
-						removeOnFail: true,
-						jobId: deliveryId,
-					},
-				);
-			}
-		} catch (error) {
-			logWebhookError("Error deploying Application:", error);
-			res.status(400).json({ message: "Error deploying Application" });
+		if (
+			application.sourceType !== "git" &&
+			application.sourceType !== "docker" &&
+			application.sourceType !== provider
+		) {
+			res
+				.status(400)
+				.json({ message: "Webhook provider does not match source" });
+			return;
+		}
+		const signature = verifyGitWebhookSignature({
+			provider,
+			headers: req.headers,
+			rawBody,
+			secret: String(refreshToken),
+			required: provider !== "generic" || IS_MANAGED_PAAS,
+		});
+		const signatureVerified =
+			signature.verified || (provider === "generic" && !IS_MANAGED_PAAS);
+		if (!signatureVerified) {
+			res.status(401).json({ message: "Invalid webhook signature" });
 			return;
 		}
 
-		res.status(200).json({ message: "Application deployed successfully" });
+		const event = normalizeGitWebhookEvent({
+			provider,
+			headers: req.headers,
+			body,
+		});
+		const providerRecord =
+			provider === "github"
+				? application.github
+				: provider === "gitlab"
+					? application.gitlab
+					: provider === "gitea"
+						? application.gitea
+						: provider === "bitbucket"
+							? application.bitbucket
+							: null;
+		const providerConnectionId =
+			provider === "github"
+				? application.githubId
+				: provider === "gitlab"
+					? application.gitlabId
+					: provider === "gitea"
+						? application.giteaId
+						: provider === "bitbucket"
+							? application.bitbucketId
+							: null;
+		const repositoryOwner =
+			event.repositoryOwner ??
+			application.owner ??
+			application.gitlabOwner ??
+			application.giteaOwner ??
+			application.bitbucketOwner ??
+			"";
+		const repositoryName =
+			event.repositoryName ??
+			application.repository ??
+			application.gitlabRepository ??
+			application.giteaRepository ??
+			application.bitbucketRepositorySlug ??
+			application.bitbucketRepository ??
+			"";
+		const payloadHash = gitWebhookPayloadHash(rawBody);
+		const providerScopeHash = gitWebhookProviderScopeHash(
+			`application:${application.applicationId}`,
+		);
+		const deliveryId = extractGitWebhookDeliveryId({
+			provider,
+			headers: req.headers,
+			payloadHash,
+			scopeHash: providerScopeHash,
+			eventType: event.eventType,
+		});
+		const targets: Parameters<typeof admitGitDelivery>[0]["targets"] = [];
+		let ignoredReason: string | undefined;
+		if (application.sourceType === "docker") {
+			const configuredImage = extractImageName(application.dockerImage);
+			const configuredTag = extractImageTag(application.dockerImage);
+			const deliveredImage = extractImageNameFromRequest(req.headers, body);
+			const deliveredTag = extractImageTagFromRequest(req.headers, body);
+			if (!configuredImage) {
+				res
+					.status(400)
+					.json({ message: "Application image is not configured" });
+				return;
+			}
+			if (deliveredImage && deliveredImage !== configuredImage) {
+				res.status(400).json({ message: "Delivered image does not match" });
+				return;
+			}
+			if (deliveredTag && configuredTag && deliveredTag !== configuredTag) {
+				res.status(400).json({ message: "Delivered image tag does not match" });
+				return;
+			}
+		}
+
+		if (event.eventType === "pull_request") {
+			if (!event.pullRequestId || !event.pullRequestNumber || !event.branch) {
+				ignoredReason = "Incomplete pull request event";
+			} else {
+				const existingPreview = await findPreviewDeploymentByApplicationId(
+					application.applicationId,
+					event.pullRequestId,
+				);
+				if (event.closed) {
+					if (existingPreview) {
+						targets.push({
+							targetKey: `preview-cleanup:${existingPreview.previewDeploymentId}`,
+							applicationId: application.applicationId,
+							previewDeploymentId: existingPreview.previewDeploymentId,
+							targetName: application.name,
+							job: {
+								kind: "preview_cleanup",
+								previewDeploymentId: existingPreview.previewDeploymentId,
+							},
+						});
+					}
+				} else if (!application.isPreviewDeploymentsActive) {
+					ignoredReason = "Preview deployments are disabled";
+				} else if (
+					![
+						"opened",
+						"open",
+						"reopened",
+						"synchronize",
+						"synchronized",
+						"update",
+						"updated",
+						"created",
+					].includes(event.action ?? "")
+				) {
+					ignoredReason = "Pull request action does not deploy";
+				} else {
+					const mapping = await resolveGitBranchEnvironmentMapping({
+						application,
+						provider,
+						repositoryOwner,
+						repositoryName,
+						branch: event.branch,
+					});
+					if (!mapping) {
+						ignoredReason = "Target branch is not mapped to this environment";
+					} else if (
+						(IS_MANAGED_PAAS ||
+							application.previewRequireCollaboratorPermissions !== false) &&
+						(!providerConnectionId ||
+							!event.pullRequestAuthor ||
+							!(await verifyGitPullRequestAuthor({
+								provider,
+								providerConnectionId,
+								repositoryOwner,
+								repositoryName,
+								author: event.pullRequestAuthor,
+								authorId: event.pullRequestAuthorId,
+								providerProjectId: application.gitlabProjectId
+									? String(application.gitlabProjectId)
+									: undefined,
+							})))
+					) {
+						res
+							.status(403)
+							.json({ message: "Pull request author is not trusted" });
+						return;
+					} else {
+						const preview =
+							existingPreview ??
+							(await createPreviewDeployment({
+								applicationId: application.applicationId,
+								branch: event.sourceBranch ?? event.branch,
+								pullRequestId: event.pullRequestId,
+								pullRequestNumber: String(event.pullRequestNumber),
+								pullRequestTitle: event.pullRequestTitle ?? "Pull request",
+								pullRequestURL: event.pullRequestUrl ?? "",
+							}));
+						targets.push({
+							targetKey: `preview:${preview.previewDeploymentId}`,
+							applicationId: application.applicationId,
+							previewDeploymentId: preview.previewDeploymentId,
+							targetName: application.name,
+							externalCommentId: preview.pullRequestCommentId || undefined,
+							job: {
+								kind: "deployment",
+								deployment: {
+									applicationId: application.applicationId,
+									titleLog: "Preview Deployment",
+									descriptionLog: event.commitSha
+										? `Hash: ${event.commitSha}`
+										: "",
+									type: existingPreview ? "redeploy" : "deploy",
+									applicationType: "application-preview",
+									previewDeploymentId: preview.previewDeploymentId,
+									server: !!application.serverId,
+								},
+							},
+						});
+					}
+				}
+			}
+		} else {
+			const branch = event.branch;
+			let changedPaths = event.changedPaths;
+			if (
+				provider === "bitbucket" &&
+				event.eventType === "push" &&
+				changedPaths.length === 0
+			) {
+				changedPaths = await extractCommittedPaths(
+					body,
+					application.bitbucket,
+					application.bitbucketRepositorySlug ??
+						application.bitbucketRepository ??
+						"",
+				);
+			}
+			const mapping =
+				branch && event.eventType === "push"
+					? await resolveGitBranchEnvironmentMapping({
+							application,
+							provider,
+							repositoryOwner,
+							repositoryName,
+							branch,
+						})
+					: null;
+			if (event.eventType === "tag" && application.triggerType !== "tag") {
+				ignoredReason = "Tag deployments are disabled";
+			} else if (event.eventType === "push" && !mapping) {
+				ignoredReason = "Branch is not mapped to this environment";
+			} else if (!shouldDeploy(application.watchPaths, changedPaths)) {
+				ignoredReason = "Watch paths did not match";
+			} else if (
+				[
+					"[skip ci]",
+					"[ci skip]",
+					"[no ci]",
+					"[skip actions]",
+					"[actions skip]",
+				].some((keyword) => event.commitMessage?.includes(keyword))
+			) {
+				ignoredReason = "Commit requested CI skip";
+			} else {
+				const job: DeploymentJob = {
+					applicationId: application.applicationId,
+					titleLog: event.commitMessage ?? "Git delivery",
+					descriptionLog: event.commitSha ? `Hash: ${event.commitSha}` : "",
+					type: "deploy",
+					applicationType: "application",
+					server: !!application.serverId,
+					sourceBranch: event.eventType === "push" ? branch : undefined,
+				};
+				targets.push({
+					targetKey: `application:${application.applicationId}`,
+					applicationId: application.applicationId,
+					targetName: application.name,
+					job: { kind: "deployment", deployment: job },
+				});
+			}
+		}
+
+		const admitted = await admitGitDelivery({
+			organizationId: application.environment.project.organizationId,
+			gitProviderId: providerRecord?.gitProviderId ?? undefined,
+			providerConnectionId: providerConnectionId ?? undefined,
+			provider,
+			providerScopeHash,
+			providerDeliveryId: deliveryId,
+			eventType: event.eventType,
+			repositoryOwner: repositoryOwner || undefined,
+			repositoryName: repositoryName || undefined,
+			branch: event.branch,
+			commitSha: event.commitSha,
+			commitMessage: event.commitMessage,
+			payloadHash,
+			metadata: {
+				action: event.action,
+				pullRequestId: event.pullRequestId,
+				pullRequestNumber: event.pullRequestNumber,
+				pullRequestTitle: event.pullRequestTitle,
+				pullRequestUrl: event.pullRequestUrl,
+				providerProjectId: application.gitlabProjectId
+					? String(application.gitlabProjectId)
+					: undefined,
+				productionPromotion:
+					targets.length > 0 && event.branch
+						? ["main", "master", "production"].includes(
+								event.branch.toLowerCase(),
+							) && application.environment.isDefault
+						: false,
+			},
+			targets,
+		});
+		for (const target of admitted.targets) {
+			await enqueueGitDeliveryTarget(target.gitDeliveryTargetId).catch(
+				(error) =>
+					logWebhookError(
+						"Failed to enqueue durable Git delivery target",
+						error,
+					),
+			);
+		}
+		res.status(202).json({
+			message:
+				targets.length > 0
+					? "Git delivery accepted"
+					: (ignoredReason ?? "Git delivery ignored"),
+			deliveryId: admitted.delivery.gitDeliveryId,
+			duplicate: admitted.duplicate,
+		});
 	} catch (error) {
 		logWebhookError("Error deploying Application:", error);
 		res.status(400).json({ message: "Error deploying Application" });

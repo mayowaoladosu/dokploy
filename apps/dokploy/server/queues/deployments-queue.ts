@@ -2,6 +2,8 @@ import {
 	deployApplication,
 	deployCompose,
 	deployPreviewApplication,
+	markGitDeliveryTargetFinished,
+	markGitDeliveryTargetRunning,
 	rebuildApplication,
 	rebuildCompose,
 	rebuildPreviewApplication,
@@ -16,6 +18,7 @@ import type { InMemoryJob } from "./in-memory-queue";
  * (in cloud) the direct background execution path.
  */
 export const processDeploymentJob = async (job: InMemoryJob) => {
+	await markGitDeliveryTargetRunning(job.data.gitDeliveryTargetId);
 	try {
 		if (job.data.applicationType === "application") {
 			await updateApplicationStatus(job.data.applicationId, "running");
@@ -25,12 +28,14 @@ export const processDeploymentJob = async (job: InMemoryJob) => {
 					applicationId: job.data.applicationId,
 					titleLog: job.data.titleLog,
 					descriptionLog: job.data.descriptionLog,
+					sourceBranch: job.data.sourceBranch,
 				});
 			} else if (job.data.type === "deploy") {
 				await deployApplication({
 					applicationId: job.data.applicationId,
 					titleLog: job.data.titleLog,
 					descriptionLog: job.data.descriptionLog,
+					sourceBranch: job.data.sourceBranch,
 				});
 			}
 		} else if (job.data.applicationType === "compose") {
@@ -71,7 +76,16 @@ export const processDeploymentJob = async (job: InMemoryJob) => {
 				});
 			}
 		}
+		await markGitDeliveryTargetFinished(
+			job.data.gitDeliveryTargetId,
+			"succeeded",
+		);
 	} catch (error) {
-		console.log("Error", error);
+		await markGitDeliveryTargetFinished(
+			job.data.gitDeliveryTargetId,
+			"failed",
+			error,
+		);
+		throw error;
 	}
 };
