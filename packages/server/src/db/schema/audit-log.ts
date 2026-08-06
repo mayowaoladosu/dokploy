@@ -92,4 +92,9 @@ export type AuditResourceType =
 	| "mount"
 	| "application"
 	| "compose"
-	| "network";
+	| "network"
+	| "managed-data"
+	| "managed-data-credentials"
+	| "managed-data-binding"
+	| "managed-data-backup"
+	| "platform-managed-data-provider";

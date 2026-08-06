@@ -66,6 +66,40 @@ import {
 	redis,
 } from "@/server/db/schema";
 
+const redactManagedProjectInfrastructure = <T>(project: T): T => {
+	if (!IS_MANAGED_PAAS || !project || typeof project !== "object")
+		return project;
+	const result = { ...(project as Record<string, unknown>) };
+	if (Array.isArray(result.environments)) {
+		result.environments = result.environments.map((environment) => {
+			const safe = { ...(environment as Record<string, unknown>) };
+			if (Array.isArray(safe.applications)) {
+				safe.applications = safe.applications.map((application) => {
+					const value = { ...(application as Record<string, unknown>) };
+					delete value.serverId;
+					delete value.buildServerId;
+					delete value.server;
+					delete value.buildServer;
+					return value;
+				});
+			}
+			for (const key of [
+				"compose",
+				"libsql",
+				"mariadb",
+				"mongo",
+				"mysql",
+				"postgres",
+				"redis",
+			]) {
+				if (key in safe) safe[key] = [];
+			}
+			return safe;
+		});
+	}
+	return result as T;
+};
+
 export const projectRouter = createTRPCRouter({
 	create: protectedProcedure
 		.input(apiCreateProject)
@@ -96,7 +130,7 @@ export const projectRouter = createTRPCRouter({
 					resourceId: project.project.projectId,
 					resourceName: project.project.name,
 				});
-				return project;
+				return redactManagedProjectInfrastructure(project);
 			} catch (error) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
@@ -182,7 +216,7 @@ export const projectRouter = createTRPCRouter({
 						message: "Project not found",
 					});
 				}
-				return project;
+				return redactManagedProjectInfrastructure(project);
 			}
 			const project = await findProjectById(input.projectId);
 
@@ -192,7 +226,7 @@ export const projectRouter = createTRPCRouter({
 					message: "You are not authorized to access this project",
 				});
 			}
-			return project;
+			return redactManagedProjectInfrastructure(project);
 		}),
 	all: protectedProcedure.query(async ({ ctx }) => {
 		if (ctx.user.role !== "owner" && ctx.user.role !== "admin") {
@@ -211,7 +245,7 @@ export const projectRouter = createTRPCRouter({
 							sql`, `,
 						)})`;
 
-			return await db.query.projects.findMany({
+			const memberProjects = await db.query.projects.findMany({
 				where: and(
 					sql`${projects.projectId} IN (${sql.join(
 						accessedProjects.map((projectId) => sql`${projectId}`),
@@ -308,9 +342,10 @@ export const projectRouter = createTRPCRouter({
 				},
 				orderBy: desc(projects.createdAt),
 			});
+			return memberProjects.map(redactManagedProjectInfrastructure);
 		}
 
-		return await db.query.projects.findMany({
+		const organizationProjects = await db.query.projects.findMany({
 			with: {
 				environments: {
 					with: {
@@ -374,11 +409,12 @@ export const projectRouter = createTRPCRouter({
 			where: eq(projects.organizationId, ctx.session.activeOrganizationId),
 			orderBy: desc(projects.createdAt),
 		});
+		return organizationProjects.map(redactManagedProjectInfrastructure);
 	}),
 
 	allForPermissions: withPermission("member", "update").query(
 		async ({ ctx }) => {
-			return await db.query.projects.findMany({
+			const permissionProjects = await db.query.projects.findMany({
 				where: eq(projects.organizationId, ctx.session.activeOrganizationId),
 				orderBy: desc(projects.createdAt),
 				columns: {
@@ -485,6 +521,7 @@ export const projectRouter = createTRPCRouter({
 					},
 				},
 			});
+			return permissionProjects.map(redactManagedProjectInfrastructure);
 		},
 	),
 

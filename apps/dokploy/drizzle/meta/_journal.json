@@ -1310,6 +1310,13 @@
       "when": 1785971636639,
       "tag": "0186_cynical_nitro",
       "breakpoints": true
+    },
+    {
+      "idx": 187,
+      "version": "7",
+      "when": 1785979154159,
+      "tag": "0187_clumsy_black_bolt",
+      "breakpoints": true
     }
   ]
 }

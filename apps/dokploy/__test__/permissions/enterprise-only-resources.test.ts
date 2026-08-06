@@ -12,6 +12,7 @@ const FREE_TIER_RESOURCES = [
 	"ac",
 	"project",
 	"service",
+	"managedData",
 	"environment",
 	"docker",
 	"sshKeys",

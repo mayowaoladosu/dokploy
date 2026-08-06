@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { db } from "@dokploy/server/db";
 import { dbUrl } from "@dokploy/server/db/constants";
 import {
+	managedDataBackups,
 	type PlatformEdgeProvider,
 	type PlatformEdgeProviderMetadata,
 	type PlatformObjectStorage,
@@ -12,7 +13,7 @@ import {
 	platformStaticAssetPublications,
 } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
-import { and, asc, eq, inArray, lt, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, lt, ne, sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
 	parseBuildOutputArtifactMetadata,
@@ -151,6 +152,11 @@ const activateEdge = async (provider: PlatformEdgeProvider) => {
 const activateStorage = async (storage: PlatformObjectStorage) => {
 	assertStorageReadiness(storage);
 	if (storage.status !== "active") return;
+	const objectStorage = createS3ObjectStorageClient({ storage });
+	if (storage.metadata.managedDataBackups) {
+		await objectStorage.verifyManagedDataBackups();
+		return;
+	}
 	const provider = await db.query.platformEdgeProviders.findFirst({
 		where: and(
 			eq(platformEdgeProviders.status, "active"),
@@ -164,7 +170,7 @@ const activateStorage = async (storage: PlatformObjectStorage) => {
 		});
 	}
 	await Promise.all([
-		createS3ObjectStorageClient({ storage }).verify(),
+		objectStorage.verify(),
 		createCloudflareEdgeClient({
 			config: cloudflareConfigFor(provider),
 		}).verifyCdnHostname(new URL(storage.publicBaseUrl).hostname),
@@ -383,6 +389,29 @@ export const updatePlatformObjectStorage = async (
 			code: "NOT_FOUND",
 			message: "Object storage not found",
 		});
+	}
+	if (
+		current.metadata.managedDataBackups &&
+		(input.endpoint !== undefined ||
+			input.region !== undefined ||
+			input.bucket !== undefined ||
+			input.prefix !== undefined ||
+			input.forcePathStyle !== undefined ||
+			input.metadata !== undefined)
+	) {
+		const retainedArchive = await db.query.managedDataBackups.findFirst({
+			where: and(
+				eq(managedDataBackups.objectStorageId, objectStorageId),
+				ne(managedDataBackups.status, "deleted"),
+			),
+		});
+		if (retainedArchive) {
+			throw new TRPCError({
+				code: "PRECONDITION_FAILED",
+				message:
+					"Managed data archive storage is immutable while backups are retained",
+			});
+		}
 	}
 	const candidate: PlatformObjectStorage = {
 		...current,

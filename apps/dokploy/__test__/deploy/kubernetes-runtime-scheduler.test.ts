@@ -7,11 +7,21 @@ import { kubernetesReleaseNamespace } from "@dokploy/server/services/kubernetes/
 import {
 	classifyKubernetesRuntimeDeployment,
 	createKubernetesRuntimeScheduler,
+	managedDataEnvironmentForRuntimeApplication,
 } from "@dokploy/server/services/kubernetes/runtime-scheduler";
 import type { ApplicationNested } from "@dokploy/server/utils/builders";
 import { describe, expect, it, vi } from "vitest";
 
 describe("Kubernetes runtime scheduler", () => {
+	it("never injects production data bindings into preview releases", async () => {
+		await expect(
+			managedDataEnvironmentForRuntimeApplication({
+				applicationId: "application-1",
+				releaseIdentity: "preview-1",
+			}),
+		).resolves.toEqual([]);
+	});
+
 	it("does not accept stale ready replicas from the previous image", () => {
 		expect(
 			classifyKubernetesRuntimeDeployment(

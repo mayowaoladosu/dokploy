@@ -14,6 +14,7 @@ import { eq, getTableColumns } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
 import {
+	assertLegacyDatabaseAllowed,
 	assertManagedResourceLimits,
 	getManagedResourceDefaults,
 	resolveManagedCompute,
@@ -25,6 +26,7 @@ export type Mariadb = typeof mariadb.$inferSelect;
 export const createMariadb = async (
 	input: z.infer<typeof apiCreateMariaDB>,
 ) => {
+	assertLegacyDatabaseAllowed();
 	const appName = buildAppName("mariadb", input.appName);
 	const compute = await resolveManagedCompute({
 		kind: "service",
@@ -149,6 +151,7 @@ export const deployMariadb = async (
 	mariadbId: string,
 	onData?: (data: any) => void,
 ) => {
+	assertLegacyDatabaseAllowed();
 	const mariadb = await findMariadbById(mariadbId);
 	try {
 		await updateMariadbById(mariadbId, {

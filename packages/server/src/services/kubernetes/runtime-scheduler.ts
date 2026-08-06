@@ -6,6 +6,7 @@ import type {
 } from "@dokploy/server/db/schema";
 import { prepareEnvironmentVariables } from "@dokploy/server/utils/docker/utils";
 import { findVerifiedDomainsByApplicationId } from "../domain-verification";
+import { managedDataEnvironmentForApplication } from "../managed-data-binding";
 import {
 	observabilityResourceId,
 	observabilityTenantId,
@@ -119,6 +120,13 @@ const verifiedRoutesForApplication = async (
 ): Promise<KubernetesDomainRoute[]> => {
 	return findVerifiedDomainsByApplicationId(applicationId);
 };
+
+export const managedDataEnvironmentForRuntimeApplication = async (
+	application: Pick<RuntimeApplication, "applicationId" | "releaseIdentity">,
+) =>
+	application.releaseIdentity
+		? []
+		: managedDataEnvironmentForApplication(application.applicationId);
 
 export const classifyKubernetesRuntimeDeployment = (
 	deployment: Awaited<ReturnType<KubernetesControlPlane["readDeployment"]>>,
@@ -248,11 +256,14 @@ export const createKubernetesRuntimeScheduler = ({
 		imageRef: string,
 		timeoutMs: number,
 	) => {
-		const environment = prepareEnvironmentVariables(
-			application.env,
-			application.environment.project.env,
-			application.environment.env,
-		);
+		const environment = [
+			...prepareEnvironmentVariables(
+				application.env,
+				application.environment.project.env,
+				application.environment.env,
+			),
+			...(await managedDataEnvironmentForRuntimeApplication(application)),
+		];
 		const releaseIdentity =
 			application.releaseIdentity || application.applicationId;
 		const namespace = kubernetesReleaseNamespace({

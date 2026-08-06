@@ -18,6 +18,16 @@ import { hasActiveKubernetesCapacity } from "./platform-infrastructure";
 
 export type ManagedComputeKind = "application" | "service";
 
+export const assertLegacyDatabaseAllowed = (managed = IS_MANAGED_PAAS) => {
+	if (managed) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message:
+				"Container databases are development-only; use managed data services",
+		});
+	}
+};
+
 export type ManagedComputeCandidate = {
 	serverId: string;
 	serverType: "deploy" | "build";

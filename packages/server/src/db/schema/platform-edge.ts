@@ -103,6 +103,8 @@ export type PlatformObjectStorageMetadata = {
 	serverSideEncryption?: "AES256" | "aws:kms";
 	kmsKeyId?: string;
 	cacheControl?: string;
+	managedDataBackups?: boolean;
+	publicAccessDisabled?: boolean;
 };
 
 export const platformObjectStorages = pgTable(

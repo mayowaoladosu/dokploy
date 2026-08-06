@@ -14,6 +14,7 @@ import { eq, getTableColumns } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
 import {
+	assertLegacyDatabaseAllowed,
 	assertManagedResourceLimits,
 	getManagedResourceDefaults,
 	resolveManagedCompute,
@@ -23,6 +24,7 @@ import { validUniqueServerAppName } from "./project";
 export type MySql = typeof mysql.$inferSelect;
 
 export const createMysql = async (input: z.infer<typeof apiCreateMySql>) => {
+	assertLegacyDatabaseAllowed();
 	const appName = buildAppName("mysql", input.appName);
 	const compute = await resolveManagedCompute({
 		kind: "service",
@@ -147,6 +149,7 @@ export const deployMySql = async (
 	mysqlId: string,
 	onData?: (data: any) => void,
 ) => {
+	assertLegacyDatabaseAllowed();
 	const mysql = await findMySqlById(mysqlId);
 	try {
 		await updateMySqlById(mysqlId, {

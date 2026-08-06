@@ -20,6 +20,7 @@ export * from "./gitea";
 export * from "./github";
 export * from "./gitlab";
 export * from "./libsql";
+export * from "./managed-data-platform";
 export * from "./managed-data-resource";
 export * from "./mariadb";
 export * from "./mongo";

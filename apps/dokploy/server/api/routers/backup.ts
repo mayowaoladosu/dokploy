@@ -53,8 +53,8 @@ import { quote } from "shell-quote";
 import { z } from "zod";
 import {
 	createTRPCRouter,
-	protectedProcedure,
-	withPermission,
+	selfHostedProcedure as protectedProcedure,
+	selfHostedWithPermission as withPermission,
 } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
 import { assertDatabaseBackupLimit } from "@/server/api/utils/plan-limits";

@@ -13,6 +13,7 @@ import { eq } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
 import {
+	assertLegacyDatabaseAllowed,
 	assertManagedResourceLimits,
 	getManagedResourceDefaults,
 	resolveManagedCompute,
@@ -23,6 +24,7 @@ export type Redis = typeof redis.$inferSelect;
 
 // https://github.com/drizzle-team/drizzle-orm/discussions/1483#discussioncomment-7523881
 export const createRedis = async (input: z.infer<typeof apiCreateRedis>) => {
+	assertLegacyDatabaseAllowed();
 	const appName = buildAppName("redis", input.appName);
 	const compute = await resolveManagedCompute({
 		kind: "service",
@@ -113,6 +115,7 @@ export const deployRedis = async (
 	redisId: string,
 	onData?: (data: any) => void,
 ) => {
+	assertLegacyDatabaseAllowed();
 	const redis = await findRedisById(redisId);
 	try {
 		await updateRedisById(redisId, {

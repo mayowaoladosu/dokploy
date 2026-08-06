@@ -1,6 +1,8 @@
 import http from "node:http";
 import {
+	assertManagedDataBackupPlatformReadiness,
 	assertManagedPlatformConfiguration,
+	configureFirstPartyManagedDataProvidersFromEnvironment,
 	configureManagedDataProviderFromEnvironment,
 	createDefaultMiddlewares,
 	createDefaultServerTraefikConfig,
@@ -18,16 +20,22 @@ import {
 	initializeOpenTelemetry,
 	initSchedules,
 	initVolumeBackupsCronJobs,
+	listRegisteredManagedDataProviders,
+	loadPlatformManagedDataProviders,
 	reconcileCloudflareEdgeUsage,
 	reconcileDomainVerifications,
 	reconcileKubernetesPlacements,
+	reconcileManagedDataBackups,
+	reconcileManagedDataResources,
 	reconcileManagedDataUsage,
 	reconcilePlatformObservabilityCollectors,
 	reconcileStaticStorageUsage,
 	sendDokployRestartNotifications,
 	setupDirectories,
 	shutdownOpenTelemetry,
+	synchronizeManagedDataBindingSecrets,
 	synchronizeStripeUsage,
+	verifyRegisteredManagedDataProviders,
 } from "@dokploy/server";
 import { config } from "dotenv";
 import next from "next";
@@ -55,7 +63,6 @@ if (IS_MANAGED_PAAS && !temporalConfiguration().enabled) {
 		"Managed mode requires TEMPORAL_ENABLED=true and a configured Temporal service",
 	);
 }
-configureManagedDataProviderFromEnvironment();
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 const HOST = process.env.HOST || "0.0.0.0";
 const dev = process.env.NODE_ENV !== "production";
@@ -72,8 +79,31 @@ if (process.env.NODE_ENV === "production" && !IS_CLOUD) {
 const app = next({ dev, turbopack: process.env.TURBOPACK === "1" });
 const handle = app.getRequestHandler();
 void app.prepare().then(async () => {
+	let shutdownAfterStart:
+		| ((signal: NodeJS.Signals) => Promise<void>)
+		| undefined;
 	try {
 		console.log("Running DokployVersion: ", packageInfo.version);
+		const databaseProviderCount = await loadPlatformManagedDataProviders();
+		const firstPartyProviderCount =
+			configureFirstPartyManagedDataProvidersFromEnvironment();
+		const genericProvider = configureManagedDataProviderFromEnvironment();
+		if (
+			IS_MANAGED_PAAS &&
+			databaseProviderCount + firstPartyProviderCount === 0 &&
+			!genericProvider
+		) {
+			throw new Error("Managed mode requires an active managed data provider");
+		}
+		await verifyRegisteredManagedDataProviders();
+		if (IS_MANAGED_PAAS) {
+			await assertManagedDataBackupPlatformReadiness();
+		}
+		console.log(
+			`Managed data providers active: ${listRegisteredManagedDataProviders()
+				.map((provider) => provider.name)
+				.join(", ")}`,
+		);
 		const server = http.createServer((req, res) => {
 			void handleHttpRequestWithTelemetry(req, res, async () => {
 				await handle(req, res);
@@ -118,6 +148,7 @@ void app.prepare().then(async () => {
 			}
 			process.exitCode = failures.length > 0 ? 1 : 0;
 		};
+		shutdownAfterStart = shutdown;
 		process.once("SIGTERM", () => void shutdown("SIGTERM"));
 		process.once("SIGINT", () => void shutdown("SIGINT"));
 
@@ -158,6 +189,44 @@ void app.prepare().then(async () => {
 		placementReconciliationTimer.unref();
 		timers.push(placementReconciliationTimer);
 		if (IS_MANAGED_PAAS) {
+			let managedDataLifecycleRunning = false;
+			const reconcileDatabaseLifecycle = async () => {
+				if (managedDataLifecycleRunning) return;
+				managedDataLifecycleRunning = true;
+				try {
+					const result = await reconcileManagedDataResources();
+					const synchronized = await synchronizeManagedDataBindingSecrets();
+					if (result.reconciled + result.failed + synchronized > 0) {
+						console.log(
+							`Reconciled managed data lifecycle: ${result.reconciled} resources, ${synchronized} credential rollout(s), ${result.failed} failed`,
+						);
+					}
+				} finally {
+					managedDataLifecycleRunning = false;
+				}
+			};
+			await reconcileDatabaseLifecycle().catch((error) =>
+				console.error("Failed to reconcile managed data lifecycle", error),
+			);
+			const managedDataLifecycleTimer = setInterval(() => {
+				void reconcileDatabaseLifecycle().catch((error) =>
+					console.error("Failed to reconcile managed data lifecycle", error),
+				);
+			}, 60_000);
+			managedDataLifecycleTimer.unref();
+			timers.push(managedDataLifecycleTimer);
+			const providerHealthTimer = setInterval(() => {
+				void (async () => {
+					await loadPlatformManagedDataProviders();
+					configureFirstPartyManagedDataProvidersFromEnvironment();
+					configureManagedDataProviderFromEnvironment();
+					await verifyRegisteredManagedDataProviders();
+				})().catch((error) =>
+					console.error("Managed data provider reload failed", error),
+				);
+			}, 5 * 60_000);
+			providerHealthTimer.unref();
+			timers.push(providerHealthTimer);
 			let edgeUsageReconciliationRunning = false;
 			const reconcileEdgeUsage = async () => {
 				if (edgeUsageReconciliationRunning) return;
@@ -226,6 +295,34 @@ void app.prepare().then(async () => {
 			}, 15 * 60_000);
 			managedDataUsageTimer.unref();
 			timers.push(managedDataUsageTimer);
+			let managedDataBackupRunning = false;
+			const reconcileDatabaseBackups = async () => {
+				if (managedDataBackupRunning) return;
+				managedDataBackupRunning = true;
+				try {
+					const result = await reconcileManagedDataBackups();
+					if (
+						result.created + result.refreshed + result.deleted + result.failed >
+						0
+					) {
+						console.log(
+							`Reconciled managed data backups: ${result.created} created, ${result.refreshed} refreshed, ${result.deleted} expired, ${result.failed} failed`,
+						);
+					}
+				} finally {
+					managedDataBackupRunning = false;
+				}
+			};
+			await reconcileDatabaseBackups().catch((error) =>
+				console.error("Failed to reconcile managed data backups", error),
+			);
+			const managedDataBackupTimer = setInterval(() => {
+				void reconcileDatabaseBackups().catch((error) =>
+					console.error("Failed to reconcile managed data backups", error),
+				);
+			}, 60_000);
+			managedDataBackupTimer.unref();
+			timers.push(managedDataBackupTimer);
 
 			const reconcileObservability = async () => {
 				const result = await reconcilePlatformObservabilityCollectors();
@@ -280,7 +377,11 @@ void app.prepare().then(async () => {
 				timers.push(stripeUsageTimer);
 			}
 		}
-		if (process.env.NODE_ENV === "production" && !IS_CLOUD) {
+		if (
+			process.env.NODE_ENV === "production" &&
+			!IS_CLOUD &&
+			!IS_MANAGED_PAAS
+		) {
 			createDefaultMiddlewares();
 			await initializeNetwork();
 			await initCronJobs();
@@ -320,14 +421,22 @@ void app.prepare().then(async () => {
 		}, 60_000);
 		releaseReconciliationTimer.unref();
 		timers.push(releaseReconciliationTimer);
-		await initEnterpriseBackupCronJobs();
+		if (!IS_MANAGED_PAAS) {
+			await initEnterpriseBackupCronJobs();
+		}
 
-		if (!IS_CLOUD) {
+		if (!IS_CLOUD && !IS_MANAGED_PAAS) {
 			console.log("Starting Deployment Worker");
 			const { startDeploymentWorker } = await import("./queues/queueSetup");
 			await startDeploymentWorker();
 		}
 	} catch (e) {
 		console.error("Main Server Error", e);
+		process.exitCode = 1;
+		if (shutdownAfterStart) {
+			await shutdownAfterStart("SIGTERM");
+		} else {
+			await Promise.allSettled([app.close(), shutdownOpenTelemetry()]);
+		}
 	}
 });

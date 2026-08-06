@@ -1,6 +1,9 @@
 import { relations } from "drizzle-orm";
 import {
+	bigint,
+	boolean,
 	index,
+	integer,
 	jsonb,
 	pgEnum,
 	pgTable,
@@ -30,6 +33,7 @@ export const managedDataStatus = pgEnum("managedDataStatus", [
 	"error",
 	"deleting",
 	"deleted",
+	"restoring",
 ]);
 
 export const managedDataResources = pgTable(
@@ -39,15 +43,16 @@ export const managedDataResources = pgTable(
 			.primaryKey()
 			.$defaultFn(() => nanoid()),
 		idempotencyKey: text("idempotency_key").notNull(),
+		requestHash: text("request_hash").notNull(),
 		organizationId: text("organization_id")
 			.notNull()
-			.references(() => organization.id, { onDelete: "cascade" }),
+			.references(() => organization.id, { onDelete: "restrict" }),
 		projectId: text("project_id")
 			.notNull()
-			.references(() => projects.projectId, { onDelete: "cascade" }),
+			.references(() => projects.projectId, { onDelete: "restrict" }),
 		environmentId: text("environment_id")
 			.notNull()
-			.references(() => environments.environmentId, { onDelete: "cascade" }),
+			.references(() => environments.environmentId, { onDelete: "restrict" }),
 		regionId: text("region_id").references(() => platformRegions.regionId, {
 			onDelete: "set null",
 		}),
@@ -57,6 +62,24 @@ export const managedDataResources = pgTable(
 		status: managedDataStatus("status").notNull().default("provisioning"),
 		name: text("name").notNull(),
 		plan: text("plan").notNull(),
+		storageLimitBytes: bigint("storage_limit_bytes", { mode: "bigint" }),
+		retentionDays: integer("retention_days").notNull().default(7),
+		pitrEnabled: boolean("pitr_enabled").notNull().default(true),
+		highAvailability: boolean("high_availability").notNull().default(true),
+		poolingEnabled: boolean("pooling_enabled").notNull().default(true),
+		replicas: integer("replicas").notNull().default(2),
+		backupEnabled: boolean("backup_enabled").notNull().default(true),
+		backupIntervalHours: integer("backup_interval_hours").notNull().default(24),
+		backupRetentionDays: integer("backup_retention_days").notNull().default(7),
+		nextBackupAt: timestamp("next_backup_at"),
+		lastBackupAt: timestamp("last_backup_at"),
+		lifecycleAttempts: integer("lifecycle_attempts").notNull().default(0),
+		nextReconcileAt: timestamp("next_reconcile_at").defaultNow().notNull(),
+		credentialVersion: integer("credential_version").notNull().default(1),
+		lastHealthyAt: timestamp("last_healthy_at"),
+		deletionRequestedAt: timestamp("deletion_requested_at"),
+		usageAttempts: integer("usage_attempts").notNull().default(0),
+		nextUsageAt: timestamp("next_usage_at").defaultNow().notNull(),
 		connectionUri: encryptedText("connection_uri"),
 		errorMessage: text("error_message"),
 		metadata: jsonb("metadata")
@@ -67,7 +90,8 @@ export const managedDataResources = pgTable(
 		updatedAt: timestamp("updated_at").defaultNow().notNull(),
 	},
 	(table) => [
-		uniqueIndex("managedDataResource_idempotencyKey_unique").on(
+		uniqueIndex("managedDataResource_organizationIdempotency_unique").on(
+			table.organizationId,
 			table.idempotencyKey,
 		),
 		uniqueIndex("managedDataResource_providerResource_unique").on(
@@ -79,6 +103,11 @@ export const managedDataResources = pgTable(
 			table.status,
 		),
 		index("managedDataResource_environment_idx").on(table.environmentId),
+		index("managedDataResource_reconcile_idx").on(
+			table.status,
+			table.nextReconcileAt,
+		),
+		index("managedDataResource_usage_idx").on(table.status, table.nextUsageAt),
 	],
 );
 

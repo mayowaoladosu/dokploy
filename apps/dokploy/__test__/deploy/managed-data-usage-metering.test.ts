@@ -1,4 +1,7 @@
-import { managedDataUsagePeriod } from "@dokploy/server/services/managed-data-usage-metering";
+import {
+	averageDatabaseBytes,
+	managedDataUsagePeriod,
+} from "@dokploy/server/services/managed-data-usage-metering";
 import { describe, expect, it } from "vitest";
 
 describe("managed database usage periods", () => {
@@ -11,7 +14,21 @@ describe("managed database usage periods", () => {
 		});
 	});
 
-	it("uses the prior checkpoint while capping outage backfill", () => {
+	it("never meters a new resource before it existed", () => {
+		const observedAt = new Date("2026-08-05T12:00:00.000Z");
+		expect(
+			managedDataUsagePeriod(
+				null,
+				observedAt,
+				new Date("2026-08-05T11:59:45.000Z"),
+			),
+		).toEqual({
+			periodStart: new Date("2026-08-05T11:59:45.000Z"),
+			periodEnd: observedAt,
+		});
+	});
+
+	it("uses the prior checkpoint without discarding outage usage", () => {
 		expect(
 			managedDataUsagePeriod(new Date("2026-08-05T11:45:00.000Z"), observedAt),
 		).toEqual({
@@ -21,9 +38,14 @@ describe("managed database usage periods", () => {
 		expect(
 			managedDataUsagePeriod(new Date("2026-08-04T00:00:00.000Z"), observedAt),
 		).toEqual({
-			periodStart: new Date("2026-08-05T11:00:00.000Z"),
+			periodStart: new Date("2026-08-04T00:00:00.000Z"),
 			periodEnd: observedAt,
 		});
+	});
+
+	it("trapezoid-integrates storage changes between samples", () => {
+		expect(averageDatabaseBytes(100n, 300n)).toBe(200n);
+		expect(averageDatabaseBytes(null, 300n)).toBe(300n);
 	});
 
 	it("ignores repeated or backward samples", () => {

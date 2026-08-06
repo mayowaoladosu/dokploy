@@ -14,6 +14,7 @@ import { eq, getTableColumns } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
 import {
+	assertLegacyDatabaseAllowed,
 	assertManagedResourceLimits,
 	getManagedResourceDefaults,
 	resolveManagedCompute,
@@ -38,6 +39,7 @@ export type Postgres = typeof postgres.$inferSelect;
 export const createPostgres = async (
 	input: z.infer<typeof apiCreatePostgres>,
 ) => {
+	assertLegacyDatabaseAllowed();
 	const appName = buildAppName("postgres", input.appName);
 	const compute = await resolveManagedCompute({
 		kind: "service",
@@ -157,6 +159,7 @@ export const deployPostgres = async (
 	postgresId: string,
 	onData?: (data: any) => void,
 ) => {
+	assertLegacyDatabaseAllowed();
 	const postgres = await findPostgresById(postgresId);
 	try {
 		await updatePostgresById(postgresId, {

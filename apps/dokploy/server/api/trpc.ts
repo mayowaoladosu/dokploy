@@ -7,6 +7,7 @@
  * need to use are documented accordingly near the end.
  */
 
+import { IS_MANAGED_PAAS } from "@dokploy/server/constants";
 // import { getServerAuthSession } from "@/server/auth";
 import { db } from "@dokploy/server/db";
 import type { ApiCredentialScope } from "@dokploy/server/db/schema";
@@ -186,6 +187,18 @@ export const protectedProcedure = t.procedure.use(({ ctx, next, type }) => {
 	});
 });
 
+/** Legacy host/container operations are not part of the managed tenant API. */
+export const selfHostedProcedure = protectedProcedure.use(({ next }) => {
+	if (IS_MANAGED_PAAS) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message:
+				"Container databases are development-only; use managed data services",
+		});
+	}
+	return next();
+});
+
 export const cliProcedure = t.procedure.use(({ ctx, next }) => {
 	if (
 		!ctx.session ||
@@ -302,6 +315,21 @@ export const withPermission = <R extends Resource>(
 	action: ActionOf<R>,
 ) =>
 	protectedProcedure.use(async ({ ctx, next, getRawInput }) => {
+		assertApiCredentialScope(
+			ctx.session.apiCredentialScope,
+			resource,
+			action,
+			await getRawInput(),
+		);
+		await checkPermission(ctx, { [resource]: [action] } as any);
+		return next();
+	});
+
+export const selfHostedWithPermission = <R extends Resource>(
+	resource: R,
+	action: ActionOf<R>,
+) =>
+	selfHostedProcedure.use(async ({ ctx, next, getRawInput }) => {
 		assertApiCredentialScope(
 			ctx.session.apiCredentialScope,
 			resource,

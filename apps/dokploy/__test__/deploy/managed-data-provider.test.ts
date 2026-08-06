@@ -1,10 +1,33 @@
 import {
+	clearManagedDataProviders,
 	createHttpManagedDataProvider,
 	filterManagedDataResourcesForScope,
+	getManagedDataProvider,
+	registerManagedDataProvider,
 } from "@dokploy/server/services/managed-data-provider";
 import { describe, expect, it, vi } from "vitest";
 
 describe("HTTP managed data provider", () => {
+	it("rejects inactive providers outside cleanup paths", () => {
+		clearManagedDataProviders();
+		const provider = createHttpManagedDataProvider({
+			name: "offline",
+			baseUrl: "https://data.example.com/",
+			token: "provider-token",
+			kinds: ["postgres"],
+			validateEndpoint: async () => undefined,
+		});
+		registerManagedDataProvider(provider, [], undefined, false);
+
+		expect(() => getManagedDataProvider("offline")).toThrow(
+			"temporarily unavailable",
+		);
+		expect(getManagedDataProvider("offline", { allowInactive: true })).toBe(
+			provider,
+		);
+		clearManagedDataProviders();
+	});
+
 	it("filters list results by API credential project and environment scopes", () => {
 		const resources = [
 			{ projectId: "project-1", environmentId: "environment-1" },
@@ -36,7 +59,8 @@ describe("HTTP managed data provider", () => {
 					JSON.stringify({
 						providerResourceId: "provider-resource-1",
 						status: "ready",
-						connectionUri: "postgres://secret",
+						connectionUri:
+							"postgres://app:secret@db.example.com/app?sslmode=require",
 					}),
 					{ status: 200, headers: { "content-type": "application/json" } },
 				),
@@ -51,13 +75,26 @@ describe("HTTP managed data provider", () => {
 		});
 
 		const result = await provider.provision({
+			managedDataResourceId: "managed-data-1",
 			idempotencyKey: "provision-1",
 			organizationId: "organization-1",
 			projectId: "project-1",
 			environmentId: "environment-1",
+			regionId: "region-1",
+			providerRegion: "us-east-1",
 			kind: "postgres",
 			name: "primary",
-			plan: "small",
+			plan: "starter",
+			providerPlan: "small",
+			storageLimitBytes: 1024n ** 3n,
+			retentionDays: 7,
+			pitrEnabled: true,
+			highAvailability: true,
+			poolingEnabled: true,
+			replicas: 2,
+			backupEnabled: true,
+			backupIntervalHours: 24,
+			backupRetentionDays: 7,
 		});
 
 		expect(result.status).toBe("ready");

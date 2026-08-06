@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
 import {
 	DeleteObjectsCommand,
+	GetBucketEncryptionCommand,
 	GetObjectCommand,
+	GetPublicAccessBlockCommand,
 	HeadBucketCommand,
+	HeadObjectCommand,
 	ListObjectsV2Command,
+	ListObjectVersionsCommand,
 	PutObjectCommand,
 	S3Client,
 	type S3ClientConfig,
@@ -129,6 +133,21 @@ const assertStorage = (
 	) {
 		throw new Error("KMS object encryption requires a KMS key ID");
 	}
+	if (storage.metadata.managedDataBackups) {
+		if (
+			storage.provider !== "s3" ||
+			storage.metadata.serverSideEncryption !== "aws:kms" ||
+			!storage.metadata.kmsKeyId ||
+			!/^arn:aws(?:-[a-z]+)?:kms:[a-z0-9-]+:\d{12}:key\/[a-fA-F0-9-]+$/.test(
+				storage.metadata.kmsKeyId,
+			) ||
+			storage.metadata.publicAccessDisabled !== true
+		) {
+			throw new Error(
+				"Managed data archives require private S3 storage with a dedicated KMS key",
+			);
+		}
+	}
 };
 
 export const createS3ObjectStorageClient = ({
@@ -157,6 +176,35 @@ export const createS3ObjectStorageClient = ({
 	return {
 		verify: async () => {
 			await s3.send(new HeadBucketCommand({ Bucket: storage.bucket }));
+			return true;
+		},
+		verifyManagedDataBackups: async () => {
+			if (!storage.metadata.managedDataBackups) {
+				throw new Error("Storage is not dedicated to managed data backups");
+			}
+			const [encryption, access] = await Promise.all([
+				s3.send(new GetBucketEncryptionCommand({ Bucket: storage.bucket })),
+				s3.send(new GetPublicAccessBlockCommand({ Bucket: storage.bucket })),
+			]);
+			const rule = encryption.ServerSideEncryptionConfiguration?.Rules?.find(
+				(candidate) =>
+					candidate.ApplyServerSideEncryptionByDefault?.SSEAlgorithm ===
+					"aws:kms",
+			);
+			const configuredKey =
+				rule?.ApplyServerSideEncryptionByDefault?.KMSMasterKeyID;
+			if (!configuredKey || configuredKey !== storage.metadata.kmsKeyId) {
+				throw new Error("Managed data backup bucket KMS policy is invalid");
+			}
+			const block = access.PublicAccessBlockConfiguration;
+			if (
+				!block?.BlockPublicAcls ||
+				!block.IgnorePublicAcls ||
+				!block.BlockPublicPolicy ||
+				!block.RestrictPublicBuckets
+			) {
+				throw new Error("Managed data backup bucket must block public access");
+			}
 			return true;
 		},
 		put: async ({
@@ -198,6 +246,24 @@ export const createS3ObjectStorageClient = ({
 			}
 			return bytes;
 		},
+		head: async (key: string) => {
+			const objectKey = normalizeStaticAssetPath(key);
+			const response = await s3.send(
+				new HeadObjectCommand({
+					Bucket: storage.bucket,
+					Key: objectKey,
+					ChecksumMode: "ENABLED",
+				}),
+			);
+			return {
+				contentLength: response.ContentLength ?? null,
+				etag: response.ETag ?? null,
+				serverSideEncryption: response.ServerSideEncryption ?? null,
+				kmsKeyId: response.SSEKMSKeyId ?? null,
+				checksumSha256: response.ChecksumSHA256 ?? null,
+				metadata: response.Metadata ?? {},
+			};
+		},
 		deletePrefix: async (prefix: string) => {
 			const normalized = `${normalizeStaticAssetPath(prefix).replace(/\/+$/, "")}/`;
 			let continuationToken: string | undefined;
@@ -214,17 +280,89 @@ export const createS3ObjectStorageClient = ({
 					.filter((key): key is string => Boolean(key))
 					.map((Key) => ({ Key }));
 				if (objects.length > 0) {
-					await s3.send(
+					const deleted = await s3.send(
 						new DeleteObjectsCommand({
 							Bucket: storage.bucket,
 							Delete: { Objects: objects, Quiet: true },
 						}),
 					);
+					if ((deleted.Errors?.length ?? 0) > 0) {
+						throw new Error(
+							"Object storage did not delete every backup object",
+						);
+					}
 				}
 				continuationToken = page.IsTruncated
 					? page.NextContinuationToken
 					: undefined;
 			} while (continuationToken);
+			const remaining = await s3.send(
+				new ListObjectsV2Command({
+					Bucket: storage.bucket,
+					Prefix: normalized,
+					MaxKeys: 1,
+				}),
+			);
+			if ((remaining.Contents?.length ?? 0) > 0) {
+				throw new Error("Object storage backup prefix is not empty");
+			}
+			if (!storage.metadata.managedDataBackups) return;
+			let keyMarker: string | undefined;
+			let versionIdMarker: string | undefined;
+			do {
+				const versions = await s3.send(
+					new ListObjectVersionsCommand({
+						Bucket: storage.bucket,
+						Prefix: normalized,
+						KeyMarker: keyMarker,
+						VersionIdMarker: versionIdMarker,
+					}),
+				);
+				const versionedObjects = [
+					...(versions.Versions ?? []),
+					...(versions.DeleteMarkers ?? []),
+				]
+					.filter(
+						(
+							object,
+						): object is typeof object & { Key: string; VersionId: string } =>
+							Boolean(object.Key && object.VersionId),
+					)
+					.map((object) => ({
+						Key: object.Key,
+						VersionId: object.VersionId,
+					}));
+				if (versionedObjects.length > 0) {
+					const deleted = await s3.send(
+						new DeleteObjectsCommand({
+							Bucket: storage.bucket,
+							Delete: { Objects: versionedObjects, Quiet: true },
+						}),
+					);
+					if ((deleted.Errors?.length ?? 0) > 0) {
+						throw new Error(
+							"Object storage did not delete every backup version",
+						);
+					}
+				}
+				keyMarker = versions.IsTruncated ? versions.NextKeyMarker : undefined;
+				versionIdMarker = versions.IsTruncated
+					? versions.NextVersionIdMarker
+					: undefined;
+			} while (keyMarker || versionIdMarker);
+			const versionCheck = await s3.send(
+				new ListObjectVersionsCommand({
+					Bucket: storage.bucket,
+					Prefix: normalized,
+					MaxKeys: 1,
+				}),
+			);
+			if (
+				(versionCheck.Versions?.length ?? 0) > 0 ||
+				(versionCheck.DeleteMarkers?.length ?? 0) > 0
+			) {
+				throw new Error("Object storage backup versions are not empty");
+			}
 		},
 	};
 };

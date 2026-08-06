@@ -15,6 +15,7 @@ import { eq, getTableColumns } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
 import {
+	assertLegacyDatabaseAllowed,
 	assertManagedResourceLimits,
 	getManagedResourceDefaults,
 	resolveManagedCompute,
@@ -24,6 +25,7 @@ import { validUniqueServerAppName } from "./project";
 export type Mongo = typeof mongo.$inferSelect;
 
 export const createMongo = async (input: z.infer<typeof apiCreateMongo>) => {
+	assertLegacyDatabaseAllowed();
 	const appName = buildAppName("mongo", input.appName);
 	const compute = await resolveManagedCompute({
 		kind: "service",
@@ -163,6 +165,7 @@ export const deployMongo = async (
 	mongoId: string,
 	onData?: (data: any) => void,
 ) => {
+	assertLegacyDatabaseAllowed();
 	const mongo = await findMongoById(mongoId);
 	try {
 		await updateMongoById(mongoId, {

@@ -56,6 +56,14 @@ const clusterMetadataSchema = z.object({
 		)
 		.optional(),
 	observabilityNamespace: z.string().min(1).max(63).optional(),
+	managedDataBackupImage: z
+		.string()
+		.regex(
+			/^[^\s@]+@sha256:[a-f0-9]{64}$/,
+			"Managed data backup image must use a digest",
+		)
+		.optional(),
+	managedDataBackupNamespace: z.string().min(1).max(63).optional(),
 	multiZoneEnabled: z.boolean().optional(),
 	readOnlyRootFilesystem: z.boolean().optional(),
 	allowedEgressCidrs: z.array(cidrSchema).max(50).optional(),

@@ -1,7 +1,7 @@
 import { db } from "@dokploy/server/db";
 import { IS_CLOUD, sendInvitationEmail } from "@dokploy/server/index";
 import { TRPCError } from "@trpc/server";
-import { and, desc, eq, exists } from "drizzle-orm";
+import { and, desc, eq, exists, ne } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
@@ -11,6 +11,7 @@ import {
 } from "@/server/api/utils/plan-limits";
 import {
 	invitation,
+	managedDataResources,
 	member,
 	organization,
 	organizationRole,
@@ -243,6 +244,27 @@ export const organizationRouter = createTRPCRouter({
 						"You must maintain at least one organization where you are the owner",
 				});
 			}
+			const liveManagedData = await db.query.managedDataResources.findFirst({
+				where: and(
+					eq(managedDataResources.organizationId, input.organizationId),
+					ne(managedDataResources.status, "deleted"),
+				),
+			});
+			if (liveManagedData) {
+				throw new TRPCError({
+					code: "PRECONDITION_FAILED",
+					message:
+						"Delete all managed data services before deleting this organization",
+				});
+			}
+			await db
+				.delete(managedDataResources)
+				.where(
+					and(
+						eq(managedDataResources.organizationId, input.organizationId),
+						eq(managedDataResources.status, "deleted"),
+					),
+				);
 
 			const result = await db
 				.delete(organization)

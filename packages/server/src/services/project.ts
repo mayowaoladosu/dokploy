@@ -3,6 +3,7 @@ import {
 	type apiCreateProject,
 	applications,
 	libsql,
+	managedDataResources,
 	mariadb,
 	mongo,
 	mysql,
@@ -11,7 +12,7 @@ import {
 	redis,
 } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { z } from "zod";
 import { createProductionEnvironment } from "./environment";
 
@@ -121,6 +122,32 @@ export const findProjectById = async (projectId: string) => {
 };
 
 export const deleteProject = async (projectId: string) => {
+	const managedData = await db.query.managedDataResources.findFirst({
+		where: and(
+			eq(managedDataResources.projectId, projectId),
+			inArray(managedDataResources.status, [
+				"provisioning",
+				"ready",
+				"error",
+				"deleting",
+				"restoring",
+			]),
+		),
+	});
+	if (managedData) {
+		throw new TRPCError({
+			code: "PRECONDITION_FAILED",
+			message: "Delete all managed data services before deleting this project",
+		});
+	}
+	await db
+		.delete(managedDataResources)
+		.where(
+			and(
+				eq(managedDataResources.projectId, projectId),
+				eq(managedDataResources.status, "deleted"),
+			),
+		);
 	const project = await db
 		.delete(projects)
 		.where(eq(projects.projectId, projectId))

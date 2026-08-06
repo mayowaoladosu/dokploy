@@ -1,5 +1,6 @@
 import type { PlatformObjectStorage } from "@dokploy/server/db/schema";
 import {
+	createS3ObjectStorageClient,
 	createS3StaticAssetPublisher,
 	normalizeStaticAssetPath,
 	staticAssetObjectPrefix,
@@ -196,5 +197,98 @@ describe("platform static object storage", () => {
 					(command as any).constructor.name === "DeleteObjectsCommand",
 			),
 		).toBe(true);
+	});
+
+	it("rejects managed archive storage without dedicated private KMS policy", () => {
+		expect(() =>
+			createS3ObjectStorageClient({
+				storage: {
+					...storage,
+					metadata: {
+						managedDataBackups: true,
+						serverSideEncryption: "AES256",
+						publicAccessDisabled: true,
+					},
+				},
+			}),
+		).toThrow("private S3 storage with a dedicated KMS key");
+	});
+
+	it("does not report a partial backup deletion as successful", async () => {
+		let listCalls = 0;
+		const client = {
+			send: vi.fn(async (command: unknown) => {
+				const name = (command as any).constructor.name;
+				if (name === "ListObjectsV2Command") {
+					listCalls += 1;
+					return listCalls === 1
+						? { Contents: [{ Key: "backups/archive/data.dump" }] }
+						: { Contents: [] };
+				}
+				if (name === "DeleteObjectsCommand") {
+					return { Errors: [{ Key: "backups/archive/data.dump" }] };
+				}
+				return {};
+			}),
+		} as any;
+		const objects = createS3ObjectStorageClient({ storage, client });
+		await expect(objects.deletePrefix("backups/archive")).rejects.toThrow(
+			"did not delete every backup object",
+		);
+	});
+
+	it("erases every retained version and delete marker for managed archives", async () => {
+		let versionCalls = 0;
+		const commands: any[] = [];
+		const client = {
+			send: vi.fn(async (command: any) => {
+				commands.push(command);
+				const name = command.constructor.name;
+				if (name === "ListObjectsV2Command") return { Contents: [] };
+				if (name === "ListObjectVersionsCommand") {
+					versionCalls += 1;
+					return versionCalls === 1
+						? {
+								Versions: [
+									{ Key: "backups/archive/data.dump", VersionId: "v1" },
+								],
+								DeleteMarkers: [
+									{ Key: "backups/archive/data.dump", VersionId: "marker" },
+								],
+							}
+						: { Versions: [], DeleteMarkers: [] };
+				}
+				return {};
+			}),
+		} as any;
+		const objects = createS3ObjectStorageClient({
+			storage: {
+				...storage,
+				provider: "s3",
+				metadata: {
+					managedDataBackups: true,
+					publicAccessDisabled: true,
+					serverSideEncryption: "aws:kms",
+					kmsKeyId:
+						"arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012",
+				},
+			},
+			client,
+		});
+
+		await expect(
+			objects.deletePrefix("backups/archive"),
+		).resolves.toBeUndefined();
+		const versionDelete = commands.find(
+			(command) =>
+				command.constructor.name === "DeleteObjectsCommand" &&
+				command.input.Delete.Objects.some((object: any) => object.VersionId),
+		);
+		expect(versionDelete.input.Delete.Objects).toEqual(
+			expect.arrayContaining([
+				{ Key: "backups/archive/data.dump", VersionId: "v1" },
+				{ Key: "backups/archive/data.dump", VersionId: "marker" },
+			]),
+		);
 	});
 });

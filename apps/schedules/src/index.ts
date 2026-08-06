@@ -1,3 +1,4 @@
+import { IS_MANAGED_PAAS } from "@dokploy/server";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import "dotenv/config";
@@ -12,6 +13,10 @@ import {
 import { jobQueueSchema } from "./schema.js";
 import { initializeJobs } from "./utils.js";
 import { firstWorker, secondWorker, thirdWorker } from "./workers.js";
+
+if (IS_MANAGED_PAAS) {
+	throw new Error("The legacy schedules worker is disabled in managed mode");
+}
 
 const app = new Hono();
 

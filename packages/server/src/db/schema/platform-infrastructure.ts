@@ -118,6 +118,8 @@ export type PlatformClusterMetadata = {
 	metricsServerDeploymentName?: string;
 	observabilityCollectorImage?: string;
 	observabilityNamespace?: string;
+	managedDataBackupImage?: string;
+	managedDataBackupNamespace?: string;
 	multiZoneEnabled?: boolean;
 	readOnlyRootFilesystem?: boolean;
 	allowedEgressCidrs?: string[];

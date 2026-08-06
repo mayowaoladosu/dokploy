@@ -3,9 +3,10 @@ import {
 	type apiCreateEnvironment,
 	type apiDuplicateEnvironment,
 	environments,
+	managedDataResources,
 } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import type { z } from "zod";
 
 export type Environment = typeof environments.$inferSelect;
@@ -287,13 +288,33 @@ export const deleteEnvironment = async (environmentId: string) => {
 			message: "You cannot delete the default environment",
 		});
 	}
-	if (environmentHasServices(currentEnvironment)) {
+	const managedData = await db.query.managedDataResources.findFirst({
+		where: and(
+			eq(managedDataResources.environmentId, environmentId),
+			inArray(managedDataResources.status, [
+				"provisioning",
+				"ready",
+				"error",
+				"deleting",
+				"restoring",
+			]),
+		),
+	});
+	if (environmentHasServices(currentEnvironment) || managedData) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
 			message:
 				"Cannot delete environment: it has active services. Delete all services first.",
 		});
 	}
+	await db
+		.delete(managedDataResources)
+		.where(
+			and(
+				eq(managedDataResources.environmentId, environmentId),
+				eq(managedDataResources.status, "deleted"),
+			),
+		);
 	const deletedEnvironment = await db
 		.delete(environments)
 		.where(eq(environments.environmentId, environmentId))

@@ -26,7 +26,10 @@ import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
 import { assertScheduledJobLimit } from "@/server/api/utils/plan-limits";
 import { removeJob, schedule } from "@/server/utils/backup";
-import { createTRPCRouter, protectedProcedure } from "../trpc";
+import {
+	createTRPCRouter,
+	selfHostedProcedure as protectedProcedure,
+} from "../trpc";
 
 export const scheduleRouter = createTRPCRouter({
 	create: protectedProcedure

@@ -14,6 +14,7 @@ import { eq, getTableColumns } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
 import {
+	assertLegacyDatabaseAllowed,
 	assertManagedResourceLimits,
 	getManagedResourceDefaults,
 	resolveManagedCompute,
@@ -23,6 +24,7 @@ import { validUniqueServerAppName } from "./project";
 export type Libsql = typeof libsql.$inferSelect;
 
 export const createLibsql = async (input: z.infer<typeof apiCreateLibsql>) => {
+	assertLegacyDatabaseAllowed();
 	const appName = buildAppName("libsql", input.appName);
 	const compute = await resolveManagedCompute({
 		kind: "service",
@@ -144,6 +146,7 @@ export const deployLibsql = async (
 	libsqlId: string,
 	onData?: (data: any) => void,
 ) => {
+	assertLegacyDatabaseAllowed();
 	const libsql = await findLibsqlById(libsqlId);
 	try {
 		await updateLibsqlById(libsqlId, {

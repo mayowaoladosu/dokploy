@@ -168,6 +168,11 @@ const getLegacyOverrides = (
 			create: !!memberRecord.canCreateServices,
 			delete: !!memberRecord.canDeleteServices,
 		},
+		managedData: {
+			read: true,
+			create: !!memberRecord.canCreateServices,
+			delete: !!memberRecord.canDeleteServices,
+		},
 		environment: {
 			create: !!memberRecord.canCreateEnvironments,
 			delete: !!memberRecord.canDeleteEnvironments,

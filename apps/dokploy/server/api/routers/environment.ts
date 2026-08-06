@@ -40,15 +40,7 @@ const redactManagedEnvironmentInfrastructure = <T>(environment: T): T => {
 	}
 
 	const result = { ...(environment as Record<string, unknown>) };
-	for (const key of [
-		"applications",
-		"libsql",
-		"mariadb",
-		"mongo",
-		"mysql",
-		"postgres",
-		"redis",
-	]) {
+	for (const key of ["applications"]) {
 		const services = result[key];
 		if (Array.isArray(services)) {
 			result[key] = services.map((service) => ({
@@ -60,7 +52,17 @@ const redactManagedEnvironmentInfrastructure = <T>(environment: T): T => {
 			}));
 		}
 	}
-	result.compose = [];
+	for (const key of [
+		"compose",
+		"libsql",
+		"mariadb",
+		"mongo",
+		"mysql",
+		"postgres",
+		"redis",
+	]) {
+		if (key in result) result[key] = [];
+	}
 
 	return result as T;
 };

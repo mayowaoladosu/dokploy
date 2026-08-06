@@ -40,8 +40,16 @@ const edgeMetadataSchema = z.object({
 });
 const storageMetadataSchema = z.object({
 	serverSideEncryption: z.enum(["AES256", "aws:kms"]).optional(),
-	kmsKeyId: z.string().min(1).max(2_048).optional(),
+	kmsKeyId: z
+		.string()
+		.regex(
+			/^arn:aws(?:-[a-z]+)?:kms:[a-z0-9-]+:\d{12}:key\/[a-fA-F0-9-]+$/,
+			"A canonical AWS KMS key ARN is required",
+		)
+		.optional(),
 	cacheControl: z.string().min(1).max(512).optional(),
+	managedDataBackups: z.boolean().optional(),
+	publicAccessDisabled: z.boolean().optional(),
 });
 
 const edgeCreateSchema = z.object({
