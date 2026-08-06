@@ -307,6 +307,13 @@ export const userRouter = createTRPCRouter({
 	getMetricsToken: withPermission("monitoring", "read").query(
 		async ({ ctx }) => {
 			const user = await findUserById(ctx.user.ownerId);
+			if (IS_MANAGED_PAAS) {
+				return {
+					serverIp: undefined,
+					enabledFeatures: user.enablePaidFeatures,
+					metricsConfig: undefined,
+				};
+			}
 			const settings = await getWebServerSettings();
 			return {
 				serverIp: settings?.serverIp,

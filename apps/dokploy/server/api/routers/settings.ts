@@ -57,6 +57,7 @@ import { eq, sql } from "drizzle-orm";
 import { scheduledJobs, scheduleJob } from "node-schedule";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
+import { runtimeRouter } from "@/server/api/runtime-root";
 import { audit } from "@/server/api/utils/audit";
 import {
 	apiAssignDomain,
@@ -75,7 +76,6 @@ import {
 import { cleanAllDeploymentQueue } from "@/server/queues/queueSetup";
 import { removeJob, schedule } from "@/server/utils/backup";
 import packageInfo from "../../../package.json";
-import { appRouter } from "../root";
 import {
 	createTRPCRouter,
 	enterpriseProcedure,
@@ -669,7 +669,7 @@ export const settingsRouter = createTRPCRouter({
 		async ({ ctx }): Promise<unknown> => {
 			const protocol = ctx.req.headers["x-forwarded-proto"];
 			const url = `${protocol}://${ctx.req.headers.host}/api`;
-			const openApiDocument = generateOpenApiDocument(appRouter, {
+			const openApiDocument = generateOpenApiDocument(runtimeRouter, {
 				title: "tRPC OpenAPI",
 				version: packageInfo.version,
 				baseUrl: url,
@@ -912,7 +912,7 @@ export const settingsRouter = createTRPCRouter({
 		return {
 			mode: IS_MANAGED_PAAS ? ("managed" as const) : ("self-hosted" as const),
 			canManageInfrastructure: IS_MANAGED_PAAS
-				? await isPlatformAdmin(ctx.user.id)
+				? ctx.surface === "operator" && (await isPlatformAdmin(ctx.user.id))
 				: ctx.user.role === "owner" || ctx.user.role === "admin",
 		};
 	}),

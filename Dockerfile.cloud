@@ -26,6 +26,8 @@ ARG NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY
 ENV NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=$NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY
 
 ENV NODE_ENV=production
+ENV DOKPLOY_BUILD_TARGET=managed
+ENV PLATFORM_MODE=managed
 RUN pnpm --filter=@dokploy/server build
 RUN pnpm --filter=./apps/dokploy run build
 
@@ -55,9 +57,6 @@ COPY --from=build /prod/dokploy/drizzle ./drizzle
 COPY --from=build /prod/dokploy/components.json ./components.json
 COPY --from=build /prod/dokploy/node_modules ./node_modules
 
-
-# Install RCLONE
-RUN curl https://rclone.org/install.sh | bash
 
 # tsx
 RUN pnpm install -g tsx

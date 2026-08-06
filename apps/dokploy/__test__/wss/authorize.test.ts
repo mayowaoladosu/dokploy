@@ -85,21 +85,21 @@ describe("canAccessDockerOverWss", () => {
 		expect(mockGetAccessibleServerIds).not.toHaveBeenCalled();
 	});
 
-	it("reserves generic Docker access for a platform admin in managed mode", async () => {
+	it("removes generic Docker access from managed mode", async () => {
 		platformMode.isManaged = true;
 		mockHasPermission.mockResolvedValue(true);
 
 		expect(await canAccessDockerOverWss(USER, SESSION)).toBe(false);
 		mockIsPlatformAdmin.mockResolvedValue(true);
-		expect(await canAccessDockerOverWss(USER, SESSION)).toBe(true);
+		expect(await canAccessDockerOverWss(USER, SESSION)).toBe(false);
 	});
 
-	it("allows managed service logs but not a managed service terminal", async () => {
+	it("removes service Docker logs and terminals from managed mode", async () => {
 		platformMode.isManaged = true;
 		mockCheckServiceAccess.mockResolvedValue(undefined);
 
 		expect(await canAccessDockerOverWss(USER, SESSION, null, "svc-1")).toBe(
-			true,
+			false,
 		);
 		expect(
 			await canAccessDockerOverWss(USER, SESSION, null, "svc-1", false),
@@ -131,12 +131,12 @@ describe("canAccessTerminalOverWss", () => {
 		expect(mockFindMember).not.toHaveBeenCalled();
 	});
 
-	it("reserves every terminal for a platform admin in managed mode", async () => {
+	it("removes every host terminal from managed mode", async () => {
 		platformMode.isManaged = true;
 		mockFindMember.mockResolvedValue({ role: "owner" });
 
 		expect(await canAccessTerminalOverWss(USER, SESSION, "local")).toBe(false);
 		mockIsPlatformAdmin.mockResolvedValue(true);
-		expect(await canAccessTerminalOverWss(USER, SESSION, "local")).toBe(true);
+		expect(await canAccessTerminalOverWss(USER, SESSION, "local")).toBe(false);
 	});
 });

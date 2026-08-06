@@ -6,11 +6,10 @@
  * which can then be consumed by the documentation website
  */
 
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateOpenApiDocument } from "@dokploy/trpc-openapi";
-import { appRouter } from "../server/api/root";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -18,8 +17,92 @@ const __dirname = dirname(__filename);
 async function generateOpenAPI() {
 	try {
 		console.log("🔄 Generating OpenAPI specification...");
+		const outputPath = resolve(__dirname, "../../../openapi.json");
+		const managedTarget =
+			process.env.DOKPLOY_BUILD_TARGET === "managed" ||
+			process.env.PLATFORM_MODE === "managed";
+		if (managedTarget) {
+			const document = JSON.parse(readFileSync(outputPath, "utf8")) as {
+				info: Record<string, unknown>;
+				tags?: Array<{ name?: string }>;
+				paths?: Record<string, unknown>;
+				servers?: Array<{ url: string }>;
+			};
+			const forbiddenNamespaces = new Set([
+				"admin",
+				"backup",
+				"certificates",
+				"cluster",
+				"compose",
+				"destination",
+				"docker",
+				"libsql",
+				"licenseKey",
+				"mariadb",
+				"mongo",
+				"mysql",
+				"network",
+				"platformEdge",
+				"platformInfrastructure",
+				"postgres",
+				"redis",
+				"registry",
+				"schedule",
+				"server",
+				"sshKey",
+				"sshRouter",
+				"swarm",
+				"volumeBackups",
+			]);
+			const safeSettings = new Set([
+				"getDokployVersion",
+				"getIp",
+				"getOpenApiDocument",
+				"getWebServerSettings",
+				"health",
+				"isCloud",
+				"isUserSubscribed",
+				"platformCapabilities",
+			]);
+			for (const route of Object.keys(document.paths ?? {})) {
+				const procedure = route.replace(/^\//, "");
+				const [namespace, name] = procedure.split(".");
+				if (
+					(namespace && forbiddenNamespaces.has(namespace)) ||
+					(namespace === "settings" && (!name || !safeSettings.has(name)))
+				) {
+					delete document.paths?.[route];
+				}
+			}
+			document.tags = document.tags?.filter(
+				(tag) => !tag.name || !forbiddenNamespaces.has(tag.name),
+			);
+			document.info = {
+				...document.info,
+				title: "vlyv API",
+				description:
+					"Managed vlyv tenant API for applications, deployments, domains, Git delivery, managed data, observability, usage, billing, and organization resources.",
+				contact: { name: "vlyv", url: "https://vlyv.dev" },
+				license: {
+					name: "Apache 2.0",
+					url: "https://github.com/mayowaoladosu/dokploy/blob/main/LICENSE.MD",
+				},
+			};
+			document.servers = [{ url: "https://vlyv.dev/api" }];
+			(
+				document as { externalDocs?: { description: string; url: string } }
+			).externalDocs = {
+				description: "vlyv documentation",
+				url: "https://vlyv.dev",
+			};
+			writeFileSync(outputPath, JSON.stringify(document, null, 2), "utf-8");
+			console.log("✅ Managed tenant OpenAPI specification generated");
+			console.log(`📊 Endpoints: ${Object.keys(document.paths ?? {}).length}`);
+			return;
+		}
 
-		const openApiDocument = generateOpenApiDocument(appRouter, {
+		const documentRouter = (await import("../server/api/root")).appRouter;
+		const openApiDocument = generateOpenApiDocument(documentRouter, {
 			title: "Dokploy API",
 			version: "1.0.0",
 			baseUrl: "https://your-dokploy-instance.com/api",
@@ -109,7 +192,6 @@ async function generateOpenAPI() {
 		};
 
 		// Write to root of repo
-		const outputPath = resolve(__dirname, "../../../openapi.json");
 		writeFileSync(
 			outputPath,
 			JSON.stringify(openApiDocument, null, 2),

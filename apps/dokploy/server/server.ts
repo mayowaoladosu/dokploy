@@ -45,12 +45,8 @@ import { reconcileGitDelivery } from "./git-delivery";
 import { closeTemporalClient } from "./temporal/client";
 import { temporalConfiguration } from "./temporal/config";
 import { startTemporalWorker, stopTemporalWorker } from "./temporal/worker";
-import { setupDockerContainerLogsWebSocketServer } from "./wss/docker-container-logs";
-import { setupDockerContainerTerminalWebSocketServer } from "./wss/docker-container-terminal";
-import { setupDockerStatsMonitoringSocketServer } from "./wss/docker-stats";
 import { setupDrawerLogsWebSocketServer } from "./wss/drawer-logs";
 import { setupDeploymentLogsWebSocketServer } from "./wss/listen-deployment";
-import { setupTerminalWebSocketServer } from "./wss/terminal";
 
 config({ path: ".env" });
 const telemetry = initializeOpenTelemetry();
@@ -157,11 +153,22 @@ void app.prepare().then(async () => {
 		// WEBSOCKET
 		setupDrawerLogsWebSocketServer(server);
 		setupDeploymentLogsWebSocketServer(server);
-		setupDockerContainerLogsWebSocketServer(server);
-		setupDockerContainerTerminalWebSocketServer(server);
-		setupTerminalWebSocketServer(server);
-		if (!IS_HOSTED) {
-			setupDockerStatsMonitoringSocketServer(server);
+		if (!IS_MANAGED_PAAS && process.env.DOKPLOY_BUILD_TARGET !== "managed") {
+			const [containerLogs, containerTerminal, hostTerminal] =
+				await Promise.all([
+					import("./wss/docker-container-logs"),
+					import("./wss/docker-container-terminal"),
+					import("./wss/terminal"),
+				]);
+			containerLogs.setupDockerContainerLogsWebSocketServer(server);
+			containerTerminal.setupDockerContainerTerminalWebSocketServer(server);
+			hostTerminal.setupTerminalWebSocketServer(server);
+			if (!IS_HOSTED) {
+				const { setupDockerStatsMonitoringSocketServer } = await import(
+					"./wss/docker-stats"
+				);
+				setupDockerStatsMonitoringSocketServer(server);
+			}
 		}
 
 		if (temporalConfiguration().enabled) {

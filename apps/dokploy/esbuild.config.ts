@@ -21,6 +21,10 @@ function prepareDefine(config: DotenvParseOutput | undefined) {
 }
 
 const define = prepareDefine(result.parsed);
+// @ts-ignore
+define["process.env.DOKPLOY_BUILD_TARGET"] = JSON.stringify(
+	process.env.DOKPLOY_BUILD_TARGET ?? "self-hosted",
+);
 
 try {
 	await mkdir(path.resolve("dist"), { recursive: true });

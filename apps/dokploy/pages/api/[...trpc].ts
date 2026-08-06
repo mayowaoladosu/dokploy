@@ -1,7 +1,7 @@
 import { validateRequest } from "@dokploy/server";
 import { createOpenApiNextHandler } from "@dokploy/trpc-openapi";
 import type { NextApiRequest, NextApiResponse } from "next";
-import { appRouter } from "@/server/api/root";
+import { runtimeRouter } from "@/server/api/runtime-root";
 import { createTRPCContext } from "@/server/api/trpc";
 
 const handler = async (req: NextApiRequest, res: NextApiResponse) => {
@@ -14,7 +14,7 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
 
 	// @ts-ignore
 	return createOpenApiNextHandler({
-		router: appRouter,
+		router: runtimeRouter,
 		createContext: createTRPCContext,
 		onError:
 			process.env.NODE_ENV === "development"

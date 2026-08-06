@@ -23,6 +23,7 @@ import type { CreateNextContextOptions } from "@trpc/server/adapters/next";
 import type { Session, User } from "better-auth";
 import superjson from "superjson";
 import { ZodError } from "zod";
+import { canUsePlatformOperatorSurface } from "./surface-policy";
 
 type Resource = keyof typeof statements;
 type ActionOf<R extends Resource> = (typeof statements)[R][number];
@@ -36,6 +37,7 @@ type ActionOf<R extends Resource> = (typeof statements)[R][number];
  */
 
 interface CreateContextOptions {
+	surface?: "tenant" | "operator";
 	user:
 		| (User & {
 				role: "member" | "admin" | "owner";
@@ -73,6 +75,7 @@ const createInnerTRPCContext = (opts: CreateContextOptions) => {
 		req: opts.req,
 		res: opts.res,
 		user: opts.user,
+		...(opts.surface ? { surface: opts.surface } : {}),
 	};
 };
 
@@ -82,13 +85,17 @@ const createInnerTRPCContext = (opts: CreateContextOptions) => {
  *
  * @see https://trpc.io/docs/context
  */
-export const createTRPCContext = async (opts: CreateNextContextOptions) => {
+const createTRPCContextForSurface = async (
+	opts: CreateNextContextOptions,
+	surface: "tenant" | "operator",
+) => {
 	const { req, res } = opts;
 
 	// Get from the request
 	const { session, user } = await validateRequest(req);
 
 	return createInnerTRPCContext({
+		surface,
 		req,
 		res,
 		// @ts-ignore
@@ -110,6 +117,12 @@ export const createTRPCContext = async (opts: CreateNextContextOptions) => {
 			: null,
 	});
 };
+
+export const createTRPCContext = (opts: CreateNextContextOptions) =>
+	createTRPCContextForSurface(opts, "tenant");
+
+export const createOperatorTRPCContext = (opts: CreateNextContextOptions) =>
+	createTRPCContextForSurface(opts, "operator");
 
 /**
  * 2. INITIALIZATION
@@ -244,6 +257,14 @@ export const adminProcedure = t.procedure.use(({ ctx, next }) => {
  */
 export const platformAdminProcedure = protectedProcedure.use(
 	async ({ ctx, next }) => {
+		if (
+			!canUsePlatformOperatorSurface({
+				managed: IS_MANAGED_PAAS,
+				surface: ctx.surface,
+			})
+		) {
+			throw new TRPCError({ code: "NOT_FOUND" });
+		}
 		if (!(await isPlatformAdmin(ctx.user.id))) {
 			throw new TRPCError({
 				code: "FORBIDDEN",
