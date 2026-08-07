@@ -255,6 +255,7 @@ export const createKubernetesEdgeRouter = ({
 					namespace,
 					gateway: {
 						namespace: clusterMetadata.gatewayNamespace,
+						dataPlaneNamespace: clusterMetadata.gatewayDataPlaneNamespace,
 						name: clusterMetadata.gatewayName,
 						sectionName: clusterMetadata.gatewaySectionName,
 						className: clusterMetadata.gatewayClassName,

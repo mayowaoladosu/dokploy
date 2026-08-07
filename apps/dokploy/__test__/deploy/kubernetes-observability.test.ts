@@ -1,4 +1,5 @@
 import { buildKubernetesObservabilityCollectorManifests } from "@dokploy/server/services/kubernetes/observability-manifests";
+import { controlPlaneObservabilityManifests } from "@dokploy/server/services/platform-observability-reconciler";
 import { describe, expect, it } from "vitest";
 
 const findManifest = (manifests: Array<Record<string, any>>, kind: string) => {
@@ -52,6 +53,22 @@ describe("Kubernetes observability collector", () => {
 		expect(
 			findManifest(manifests, "PodDisruptionBudget").spec.minAvailable,
 		).toBe(1);
+	});
+
+	it("keeps cluster RBAC and the host log agent admin-managed", () => {
+		const reconciled = controlPlaneObservabilityManifests(manifests);
+		expect(reconciled.some((manifest) => manifest.kind === "ClusterRole")).toBe(
+			false,
+		);
+		expect(
+			reconciled.some((manifest) => manifest.kind === "ClusterRoleBinding"),
+		).toBe(false);
+		expect(reconciled.some((manifest) => manifest.kind === "DaemonSet")).toBe(
+			false,
+		);
+		expect(reconciled.some((manifest) => manifest.kind === "Deployment")).toBe(
+			true,
+		);
 	});
 
 	it("overwrites client tenant claims from Kubernetes metadata", () => {

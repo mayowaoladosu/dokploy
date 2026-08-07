@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { buildKubernetesControlPlaneRoleBinding } from "./control-plane-rbac";
 import type { KubernetesManifest } from "./manifests";
 
 export type ObservabilityCollectorBackend = {
@@ -430,6 +431,7 @@ export const buildKubernetesObservabilityCollectorManifests = (
 				},
 			},
 		},
+		buildKubernetesControlPlaneRoleBinding(namespace),
 		{
 			apiVersion: "v1",
 			kind: "ServiceAccount",

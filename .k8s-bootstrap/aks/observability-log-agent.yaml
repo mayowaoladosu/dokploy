@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vlyv-otel-log-agent
+  namespace: vlyv-observability
+  labels:
+    app.kubernetes.io/name: vlyv-otel-log-agent
+    app.kubernetes.io/managed-by: vlyv
+    app.kubernetes.io/component: observability
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vlyv-otel-log-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vlyv-otel-log-agent
+        app.kubernetes.io/managed-by: vlyv
+        app.kubernetes.io/component: observability
+    spec:
+      serviceAccountName: vlyv-otel-log-agent
+      nodeSelector:
+        vlyv.dev/pool: system
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: log-agent
+          image: docker.io/otel/opentelemetry-collector-contrib@sha256:c5918f78992ee73b0d6f0e599423ac5ec52dd5d9726733114d6eca53d5a32ed5
+          args: ["--config=/etc/otel/log-agent.json"]
+          envFrom:
+            - secretRef:
+                name: vlyv-otel-collector-backends
+                optional: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+              readOnly: true
+            - name: pod-logs
+              mountPath: /var/log/pods
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: vlyv-otel-collector
+        - name: pod-logs
+          hostPath:
+            path: /var/log/pods
+            type: Directory
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

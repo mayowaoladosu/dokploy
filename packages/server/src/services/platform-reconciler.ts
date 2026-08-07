@@ -38,9 +38,23 @@ export const classifyKubernetesDeployment = (
 export const reconcileManagedBillingSuspensions = async () => {
 	const placements = await db.query.platformPlacements.findMany({
 		with: {
-			runtimeTarget: { with: { cluster: true } },
-			application: true,
-			organization: { with: { owner: true } },
+			runtimeTarget: {
+				columns: {},
+				with: {
+					cluster: { columns: { kubeconfig: true, metadata: true } },
+				},
+			},
+			application: {
+				columns: { applicationStatus: true, appName: true },
+			},
+			organization: {
+				columns: {
+					billingStatus: true,
+					billingLastSyncedAt: true,
+					billingCurrentPeriodEnd: true,
+				},
+				with: { owner: { columns: { isEnterpriseCloud: true } } },
+			},
 		},
 	});
 	const summary = { suspended: 0, resumed: 0, unchanged: 0, failed: 0 };
@@ -268,10 +282,34 @@ export const reconcileManagedBillingSuspensions = async () => {
 export const reconcileKubernetesPlacements = async () => {
 	const placements = await db.query.platformPlacements.findMany({
 		with: {
-			runtimeTarget: { with: { cluster: { with: { region: true } } } },
-			buildPool: true,
+			runtimeTarget: {
+				columns: { runtime: true, status: true },
+				with: {
+					cluster: {
+						columns: {
+							clusterId: true,
+							status: true,
+							kubeconfig: true,
+							metadata: true,
+						},
+						with: { region: { columns: { status: true } } },
+					},
+				},
+			},
+			buildPool: { columns: { status: true } },
 			application: {
-				with: { ports: true, environment: { with: { project: true } } },
+				columns: {
+					appName: true,
+					applicationStatus: true,
+					environmentId: true,
+				},
+				with: {
+					ports: { columns: { targetPort: true } },
+					environment: {
+						columns: {},
+						with: { project: { columns: { projectId: true } } },
+					},
+				},
 			},
 		},
 	});

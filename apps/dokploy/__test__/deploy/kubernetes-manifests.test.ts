@@ -61,6 +61,7 @@ describe("Kubernetes runtime manifests", () => {
 		domains: [{ host: "example.com", path: "/" }],
 		gateway: {
 			namespace: "gateway-system",
+			dataPlaneNamespace: "envoy-gateway-system",
 			name: "public",
 			mode: "shared",
 			externalDns: { enabled: true, ttl: 60 },
@@ -129,7 +130,7 @@ describe("Kubernetes runtime manifests", () => {
 		const ingress = manifests.find(
 			(manifest: any) => manifest.metadata?.name === "allow-runtime-ingress",
 		) as any;
-		expect(JSON.stringify(ingress)).toContain("gateway-system");
+		expect(JSON.stringify(ingress)).toContain("envoy-gateway-system");
 	});
 
 	it("uses immutable images, secret-backed env, and restricted pod security", () => {

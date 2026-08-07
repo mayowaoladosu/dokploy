@@ -814,14 +814,18 @@ export const verifyKubernetesClusterCapabilities = async ({
 				namespace: metadata.metricsServerNamespace || "kube-system",
 			},
 		},
-		{
-			apiVersion: "apps/v1",
-			kind: "Deployment",
-			metadata: {
-				name: metadata.externalDnsDeploymentName || "external-dns",
-				namespace: metadata.externalDnsNamespace || "external-dns",
-			},
-		},
+		...(metadata.externalDnsEnabled
+			? [
+					{
+						apiVersion: "apps/v1",
+						kind: "Deployment",
+						metadata: {
+							name: metadata.externalDnsDeploymentName || "external-dns",
+							namespace: metadata.externalDnsNamespace || "external-dns",
+						},
+					},
+				]
+			: []),
 		...Array.from(new Set(runtimeClassNames)).map((name) => ({
 			apiVersion: "node.k8s.io/v1",
 			kind: "RuntimeClass",
@@ -889,7 +893,6 @@ export const assertKubernetesClusterReadiness = (cluster: {
 		!cluster.metadata.gatewayClassName ? "gatewayClassName" : null,
 		!cluster.metadata.certManagerEnabled ? "certManagerEnabled" : null,
 		!cluster.metadata.certIssuerName ? "certIssuerName" : null,
-		!cluster.metadata.externalDnsEnabled ? "externalDnsEnabled" : null,
 		!cluster.metadata.multiZoneEnabled ? "multiZoneEnabled" : null,
 		!cluster.metadata.readOnlyRootFilesystem ? "readOnlyRootFilesystem" : null,
 	].filter((value): value is string => Boolean(value));

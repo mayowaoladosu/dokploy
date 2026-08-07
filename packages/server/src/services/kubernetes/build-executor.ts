@@ -145,6 +145,7 @@ const defaultSleep = (durationMs: number) =>
 
 const BUILD_PREREQUISITE_KINDS = new Set([
 	"Namespace",
+	"RoleBinding",
 	"ResourceQuota",
 	"LimitRange",
 	"NetworkPolicy",

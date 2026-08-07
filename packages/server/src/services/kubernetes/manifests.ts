@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { KubernetesObject } from "@kubernetes/client-node";
 import { quote } from "shell-quote";
 import { buildOutputDiscoveryShell } from "../build-output-manifest";
+import { buildKubernetesControlPlaneRoleBinding } from "./control-plane-rbac";
 
 export type KubernetesManifest = KubernetesObject & Record<string, unknown>;
 
@@ -68,6 +69,7 @@ export type KubernetesPlacementSpec = {
 	readOnlyRootFilesystem?: boolean;
 	gateway?: {
 		namespace: string;
+		dataPlaneNamespace?: string;
 		name: string;
 		sectionName?: string;
 		className?: string;
@@ -757,6 +759,7 @@ export const buildKubernetesRuntimeManifests = (
 				},
 			},
 		},
+		buildKubernetesControlPlaneRoleBinding(spec.namespace),
 		{
 			apiVersion: "v1",
 			kind: "ResourceQuota",
@@ -863,7 +866,9 @@ export const buildKubernetesRuntimeManifests = (
 										{
 											namespaceSelector: {
 												matchLabels: {
-													"kubernetes.io/metadata.name": spec.gateway.namespace,
+													"kubernetes.io/metadata.name":
+														spec.gateway.dataPlaneNamespace ||
+														spec.gateway.namespace,
 												},
 											},
 											...(spec.gateway.podSelector
@@ -1102,6 +1107,7 @@ cat /artifacts/image.json >/dev/termination-log
 				},
 			},
 		},
+		buildKubernetesControlPlaneRoleBinding(spec.namespace),
 		{
 			apiVersion: "v1",
 			kind: "ResourceQuota",

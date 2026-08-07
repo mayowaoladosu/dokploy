@@ -27,9 +27,9 @@ Verified against primary sources and the installed SDK on 2026-08-06.
 
 ## Kubernetes provider boundary
 
-- The Layerrail integration intentionally relies only on the Kubernetes-standard kubeconfig contract; provider-specific credentials are not guessed. The complete kubeconfig is base64-encoded in the deployment secret store and encrypted at rest after bootstrap.
-- Activation verifies the Kubernetes capabilities required by this control plane: Gateway API, cert-manager issuer, metrics-server, external-dns, RuntimeClasses, isolated node labels, digest-pinned build/agent images, a registry, and KMS-backed supply-chain signing.
-- If Layerrail does not provide any required capability, install or configure it before launching the tenant control plane. Production requires bootstrap activation and fails closed rather than weakening isolation.
+- The Azure AKS integration runs under a dedicated, restricted `vlyv-control-plane` service account. AKS projects and rotates the short-lived Kubernetes token in-cluster; no admin kubeconfig is stored in production.
+- Activation verifies the Kubernetes capabilities required by this control plane: Gateway API, cert-manager issuer, metrics-server, optional external-dns, RuntimeClasses, isolated node labels, digest-pinned build/agent images, a registry, and KMS-backed supply-chain signing.
+- The production AKS cluster uses Cilium NetworkPolicy, Key Vault KMS encryption, workload identity, and three availability zones. Production requires bootstrap activation and fails closed rather than weakening isolation.
 
 ## Security notes
 

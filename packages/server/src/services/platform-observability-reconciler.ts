@@ -4,6 +4,19 @@ import { and, eq } from "drizzle-orm";
 import { createKubernetesControlPlane } from "./kubernetes/client";
 import { buildKubernetesObservabilityCollectorManifests } from "./kubernetes/observability-manifests";
 
+const ADMIN_MANAGED_OBSERVABILITY_KINDS = new Set([
+	"ClusterRole",
+	"ClusterRoleBinding",
+	"DaemonSet",
+]);
+
+export const controlPlaneObservabilityManifests = <T extends { kind?: string }>(
+	manifests: T[],
+) =>
+	manifests.filter(
+		(manifest) => !ADMIN_MANAGED_OBSERVABILITY_KINDS.has(manifest.kind || ""),
+	);
+
 const waitForObservabilityReadiness = async ({
 	client,
 	namespace,
@@ -111,55 +124,54 @@ export const reconcilePlatformObservabilityCollectors = async () => {
 			});
 			const namespace =
 				cluster.metadata.observabilityNamespace || "vlyv-observability";
-			await client.apply(
-				buildKubernetesObservabilityCollectorManifests({
-					namespace: namespace,
-					image,
-					otlp: otlp
-						? {
-								endpoint: otlp.endpoint,
-								headers: {
-									...(otlp.metadata.otlpHeaders ?? {}),
-									...(otlp.authToken
-										? {
-												Authorization: `${otlp.metadata.authScheme || "Bearer"} ${otlp.authToken}`,
-											}
-										: {}),
-								},
-							}
-						: null,
-					metrics: metrics
-						? {
-								endpoint: metrics.endpoint,
-								authToken: metrics.authToken,
-								tenantHeader: metrics.tenantHeader,
-								tenantId: metrics.tenantId,
-							}
-						: null,
-					logs: logs
-						? {
-								endpoint: logs.endpoint,
-								authToken: logs.authToken,
-								tenantHeader: logs.tenantHeader,
-								tenantId: logs.tenantId,
-							}
-						: null,
-					traces: traces
-						? {
-								endpoint: traces.endpoint,
-								authToken: traces.authToken,
-								tenantHeader: traces.tenantHeader,
-								tenantId: traces.tenantId,
-							}
-						: null,
-					nodeSelector: systemPool?.labels,
-					tolerations: systemPool?.taints,
-				}),
-			);
+			const manifests = buildKubernetesObservabilityCollectorManifests({
+				namespace: namespace,
+				image,
+				otlp: otlp
+					? {
+							endpoint: otlp.endpoint,
+							headers: {
+								...(otlp.metadata.otlpHeaders ?? {}),
+								...(otlp.authToken
+									? {
+											Authorization: `${otlp.metadata.authScheme || "Bearer"} ${otlp.authToken}`,
+										}
+									: {}),
+							},
+						}
+					: null,
+				metrics: metrics
+					? {
+							endpoint: metrics.endpoint,
+							authToken: metrics.authToken,
+							tenantHeader: metrics.tenantHeader,
+							tenantId: metrics.tenantId,
+						}
+					: null,
+				logs: logs
+					? {
+							endpoint: logs.endpoint,
+							authToken: logs.authToken,
+							tenantHeader: logs.tenantHeader,
+							tenantId: logs.tenantId,
+						}
+					: null,
+				traces: traces
+					? {
+							endpoint: traces.endpoint,
+							authToken: traces.authToken,
+							tenantHeader: traces.tenantHeader,
+							tenantId: traces.tenantId,
+						}
+					: null,
+				nodeSelector: systemPool?.labels,
+				tolerations: systemPool?.taints,
+			});
+			await client.apply(controlPlaneObservabilityManifests(manifests));
 			await waitForObservabilityReadiness({
 				client,
 				namespace,
-				requireLogAgent: Boolean(logs || otlp),
+				requireLogAgent: false,
 			});
 			summary.active += 1;
 		} catch (error) {

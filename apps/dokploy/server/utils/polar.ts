@@ -138,11 +138,12 @@ export const assertPolarConfiguration = () => {
 	}
 };
 
-export const verifyPolarConfiguration = async (polar = getPolarClient()) => {
+export const verifyPolarConfiguration = async (polar?: Polar) => {
 	if (!IS_HOSTED || process.env.NODE_ENV !== "production") return true;
+	const client = polar ?? getPolarClient();
 	const organizationId = process.env.POLAR_ORGANIZATION_ID?.trim();
 	if (!organizationId) throw new Error("POLAR_ORGANIZATION_ID is required");
-	const remoteOrganization = await polar.organizations.get(organizationId);
+	const remoteOrganization = await client.organizations.get(organizationId);
 	if (remoteOrganization.id !== organizationId) {
 		throw new Error("Polar access token does not match POLAR_ORGANIZATION_ID");
 	}
@@ -154,7 +155,7 @@ export const verifyPolarConfiguration = async (polar = getPolarClient()) => {
 		throw new Error("Polar product IDs must be unique");
 	}
 	for (const product of configured) {
-		const remote = await polar.products.get(product.productId);
+		const remote = await client.products.get(product.productId);
 		if (remote.organization_id !== organizationId || remote.is_archived) {
 			throw new Error(
 				`Polar ${product.tier} ${product.interval} product is invalid`,

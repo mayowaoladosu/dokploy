@@ -56,6 +56,9 @@ const applyOwnedManagedDataJob = async ({
 	const namespaceManifest = manifests.find(
 		(manifest) => manifest.kind === "Namespace",
 	);
+	const roleBinding = manifests.find(
+		(manifest) => manifest.kind === "RoleBinding",
+	);
 	const serviceAccount = manifests.find(
 		(manifest) => manifest.kind === "ServiceAccount",
 	);
@@ -66,6 +69,7 @@ const applyOwnedManagedDataJob = async ({
 	);
 	if (
 		!namespaceManifest ||
+		!roleBinding ||
 		!serviceAccount ||
 		!job ||
 		!secret ||
@@ -75,7 +79,7 @@ const applyOwnedManagedDataJob = async ({
 	}
 	// Create the non-secret identity and Job first so Kubernetes assigns the
 	// authoritative owner UID. The pod waits for its Secret until the next apply.
-	await client.apply([namespaceManifest, serviceAccount, job]);
+	await client.apply([namespaceManifest, roleBinding, serviceAccount, job]);
 	const createdJob = await client.readJob(namespace, name);
 	const uid = createdJob?.metadata?.uid;
 	if (!uid) throw new Error("Managed data job did not receive an owner UID");

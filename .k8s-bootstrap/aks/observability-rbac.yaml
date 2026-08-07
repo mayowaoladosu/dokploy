@@ -1,0 +1,123 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vlyv-observability
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+    vlyv.dev/managed: "true"
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vlyv-otel-collector
+  namespace: vlyv-observability
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vlyv-control-plane
+  namespace: vlyv-observability
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vlyv-namespace-manager
+subjects:
+  - kind: ServiceAccount
+    name: vlyv-control-plane
+    namespace: vlyv-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vlyv-otel-log-agent
+  namespace: vlyv-observability
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vlyv-otel-collector
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vlyv-otel-collector
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vlyv-otel-collector
+subjects:
+  - kind: ServiceAccount
+    name: vlyv-otel-collector
+    namespace: vlyv-observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vlyv-otel-log-agent
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vlyv-otel-log-agent
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vlyv-otel-log-agent
+subjects:
+  - kind: ServiceAccount
+    name: vlyv-otel-log-agent
+    namespace: vlyv-observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vlyv-observability-admin-readiness
+  namespace: vlyv-observability
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+rules:
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    resourceNames: ["vlyv-otel-log-agent"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vlyv-observability-admin-readiness
+  namespace: vlyv-observability
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vlyv-observability-admin-readiness
+subjects:
+  - kind: ServiceAccount
+    name: vlyv-control-plane
+    namespace: vlyv-system

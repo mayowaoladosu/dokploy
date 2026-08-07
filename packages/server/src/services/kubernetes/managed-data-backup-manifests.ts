@@ -1,4 +1,5 @@
 import type { ManagedDataKind } from "@dokploy/server/db/schema";
+import { buildKubernetesControlPlaneRoleBinding } from "./control-plane-rbac";
 import type { KubernetesManifest } from "./manifests";
 
 export type KubernetesManagedDataBackupSpec = {
@@ -247,12 +248,14 @@ jq -cn --arg objectKey "$VLYV_OBJECT_KEY" --arg checksum "$checksum" --argjson s
 				name: spec.namespace,
 				labels: {
 					"app.kubernetes.io/managed-by": "vlyv",
+					"vlyv.dev/managed": "true",
 					"pod-security.kubernetes.io/enforce": "restricted",
 					"pod-security.kubernetes.io/audit": "restricted",
 					"pod-security.kubernetes.io/warn": "restricted",
 				},
 			},
 		},
+		buildKubernetesControlPlaneRoleBinding(spec.namespace),
 		{
 			apiVersion: "v1",
 			kind: "ServiceAccount",

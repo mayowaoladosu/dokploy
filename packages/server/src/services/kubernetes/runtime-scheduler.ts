@@ -279,6 +279,7 @@ export const createKubernetesRuntimeScheduler = ({
 			clusterMetadata.gatewayNamespace && clusterMetadata.gatewayName
 				? {
 						namespace: clusterMetadata.gatewayNamespace,
+						dataPlaneNamespace: clusterMetadata.gatewayDataPlaneNamespace,
 						name: clusterMetadata.gatewayName,
 						sectionName: clusterMetadata.gatewaySectionName,
 						className: clusterMetadata.gatewayClassName,

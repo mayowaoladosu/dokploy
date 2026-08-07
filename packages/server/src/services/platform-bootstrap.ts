@@ -243,6 +243,10 @@ const bootstrapKubernetes = async (activate: boolean) => {
 		runtimeClassName,
 		buildRuntimeClassName,
 		gatewayNamespace: optional("PLATFORM_GATEWAY_NAMESPACE") || "vlyv-system",
+		gatewayDataPlaneNamespace:
+			optional("PLATFORM_GATEWAY_DATA_PLANE_NAMESPACE") ||
+			optional("PLATFORM_GATEWAY_NAMESPACE") ||
+			"vlyv-system",
 		gatewayName: optional("PLATFORM_GATEWAY_NAME") || "vlyv-gateway",
 		gatewaySectionName: optional("PLATFORM_GATEWAY_SECTION_NAME"),
 		gatewayClassName: required("PLATFORM_GATEWAY_CLASS_NAME"),

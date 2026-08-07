@@ -1,0 +1,248 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vlyv-control-plane
+  namespace: vlyv-system
+  labels:
+    app.kubernetes.io/name: vlyv-control-plane
+    app.kubernetes.io/managed-by: vlyv
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vlyv-namespace-manager
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+rules:
+  - apiGroups: [""]
+    resources:
+      - resourcequotas
+      - limitranges
+      - configmaps
+      - secrets
+      - serviceaccounts
+      - services
+      - persistentvolumeclaims
+    verbs: ["get", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "create", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "create", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "create", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "create", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "create", "patch", "delete"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["get", "create", "patch", "delete"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vlyv-control-plane-bootstrap
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "create", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["get", "create", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    resourceNames: ["vlyv-namespace-manager"]
+    verbs: ["get", "bind"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses"]
+    verbs: ["get"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["clusterissuers"]
+    verbs: ["get"]
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vlyv-control-plane-bootstrap
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vlyv-control-plane-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: vlyv-control-plane
+    namespace: vlyv-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vlyv-gateway-manager
+  namespace: vlyv-system
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+rules:
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways"]
+    verbs: ["get", "create", "patch", "delete"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates"]
+    verbs: ["get", "create", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vlyv-gateway-manager
+  namespace: vlyv-system
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vlyv-gateway-manager
+subjects:
+  - kind: ServiceAccount
+    name: vlyv-control-plane
+    namespace: vlyv-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vlyv-metrics-server-reader
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["metrics-server"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vlyv-metrics-server-reader
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vlyv-metrics-server-reader
+subjects:
+  - kind: ServiceAccount
+    name: vlyv-control-plane
+    namespace: vlyv-system
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: vlyv-control-plane-namespaces
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["namespaces"]
+  matchConditions:
+    - name: vlyv-control-plane-only
+      expression: request.userInfo.username == 'system:serviceaccount:vlyv-system:vlyv-control-plane'
+  validations:
+    - expression: >-
+        (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name).startsWith('vlyv-app-') ||
+        (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name).startsWith('vlyv-build-') ||
+        (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) == 'vlyv-observability' ||
+        (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) == 'vlyv-backups' ||
+        (request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name) == 'vlyv-data-backups'
+      message: The Vlyv control plane may manage only Vlyv-owned namespaces.
+    - expression: >-
+        request.operation == 'DELETE' ||
+        ('vlyv.dev/managed' in object.metadata.labels && object.metadata.labels['vlyv.dev/managed'] == 'true')
+      message: Managed namespaces must retain the vlyv.dev/managed label.
+    - expression: >-
+        request.operation == 'DELETE' ||
+        !object.metadata.name.startsWith('vlyv-app-') ||
+        ('pod-security.kubernetes.io/enforce' in object.metadata.labels &&
+         object.metadata.labels['pod-security.kubernetes.io/enforce'] == 'restricted')
+      message: Runtime namespaces must enforce the restricted Pod Security Standard.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: vlyv-control-plane-namespaces
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+spec:
+  policyName: vlyv-control-plane-namespaces
+  validationActions: ["Deny"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: vlyv-control-plane-rolebindings
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["rolebindings"]
+  matchConditions:
+    - name: vlyv-control-plane-only
+      expression: request.userInfo.username == 'system:serviceaccount:vlyv-system:vlyv-control-plane'
+  validations:
+    - expression: >-
+        request.namespace.startsWith('vlyv-app-') ||
+        request.namespace.startsWith('vlyv-build-') ||
+        request.namespace == 'vlyv-observability' ||
+        request.namespace == 'vlyv-backups' ||
+        request.namespace == 'vlyv-data-backups'
+      message: The Vlyv control plane may bind roles only in Vlyv-owned namespaces.
+    - expression: >-
+        object.metadata.name == 'vlyv-control-plane' &&
+        object.roleRef.apiGroup == 'rbac.authorization.k8s.io' &&
+        object.roleRef.kind == 'ClusterRole' &&
+        object.roleRef.name == 'vlyv-namespace-manager' &&
+        object.subjects.size() == 1 &&
+        object.subjects[0].kind == 'ServiceAccount' &&
+        object.subjects[0].name == 'vlyv-control-plane' &&
+        object.subjects[0].namespace == 'vlyv-system'
+      message: Managed RoleBindings may grant only the fixed namespace manager role to the control-plane service account.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: vlyv-control-plane-rolebindings
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+spec:
+  policyName: vlyv-control-plane-rolebindings
+  validationActions: ["Deny"]

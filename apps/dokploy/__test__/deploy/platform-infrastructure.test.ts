@@ -116,7 +116,7 @@ describe("Kubernetes cluster readiness", () => {
 					gatewayClassName: "cilium",
 					certManagerEnabled: true,
 					certIssuerName: "letsencrypt-production",
-					externalDnsEnabled: true,
+					externalDnsEnabled: false,
 					multiZoneEnabled: true,
 					readOnlyRootFilesystem: true,
 				},
@@ -231,13 +231,19 @@ describe("Kubernetes cluster readiness", () => {
 					gatewayName: "public",
 					gatewayClassName: "cilium",
 					certIssuerName: "letsencrypt-production",
-					externalDnsEnabled: true,
+					externalDnsEnabled: false,
 				},
 				runtimeClassNames: ["gvisor"],
 			}),
 		).resolves.toBeUndefined();
 		expect(controlPlane.read).toHaveBeenCalledWith(
 			expect.objectContaining({ kind: "RuntimeClass" }),
+		);
+		expect(controlPlane.read).not.toHaveBeenCalledWith(
+			expect.objectContaining({
+				kind: "Deployment",
+				metadata: expect.objectContaining({ name: "external-dns" }),
+			}),
 		);
 	});
 

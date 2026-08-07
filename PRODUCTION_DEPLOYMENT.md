@@ -12,7 +12,7 @@ Revoke any token previously shared outside the production secret store. Create a
 2. **Temporal** — create a Temporal Cloud namespace or an HA Temporal deployment.
 3. **Polar** — create monthly and annual Hobby and Startup products. Seat-based prices are recommended when server capacity is billable.
 4. **Neon** — create an API key and map the vlyv region slug to a Neon region.
-5. **Layerrail Kubernetes** — download a standard kubeconfig and create or label separate runtime, build, and system node pools.
+5. **Azure Kubernetes Service** — create a three-zone cluster with separate system, runtime, and scale-to-zero build pools, then issue a restricted control-plane kubeconfig.
 6. **OCI registry** — create a repository namespace and runtime pull secret.
 7. **Cloudflare** — configure the `vlyv.dev` zone, scoped API token, origin hostname, and `apps.vlyv.dev` managed domain.
 8. **Cloudflare R2** — create the static-assets bucket and connect `assets.vlyv.dev` as its custom domain.
@@ -26,8 +26,8 @@ The bootstrap validates rather than silently installing security-critical cluste
 
 - Gateway API CRDs, an accepted GatewayClass, and a programmed shared Gateway;
 - cert-manager and a ready production ClusterIssuer;
-- metrics-server and external-dns deployments;
-- sandbox RuntimeClasses for runtime and build workloads;
+- metrics-server, plus external-dns only after `vlyv.dev` is purchased and delegated;
+- provider RuntimeClasses for runtime and build workloads;
 - network-policy enforcement and Kubernetes Secret encryption at rest;
 - correctly labeled runtime/build/system nodes;
 - an artifact StorageClass;
@@ -65,7 +65,7 @@ Set `POLAR_USAGE_CUTOVER_AT` once to the exact canonical UTC instant Polar start
 Copy every value from `apps/dokploy/.env.production.example` into the deployment platform and replace each `<...>` placeholder. In particular:
 
 - keep `BETTER_AUTH_SECRET` and the distinct `ENCRYPTION_KEY` stable forever;
-- base64-encode the complete Layerrail kubeconfig as one line;
+- deploy the control plane under the `vlyv-control-plane` service account so AKS rotates its projected token; never use the AKS admin kubeconfig in production;
 - use the Grafana-provided percent-encoded OTLP header string;
 - keep Cloudflare R2 and AWS archive credentials separate;
 - use only PostgreSQL/Neon for managed tenant databases.

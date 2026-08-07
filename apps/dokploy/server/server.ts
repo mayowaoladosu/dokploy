@@ -221,7 +221,9 @@ void app.prepare().then(async () => {
 				);
 			}
 		};
-		await reconcilePlacements();
+		await reconcilePlacements().catch((error) =>
+			console.error("Failed to reconcile Kubernetes placements", error),
+		);
 		const placementReconciliationTimer = setInterval(() => {
 			void reconcilePlacements().catch((error) =>
 				console.error("Failed to reconcile Kubernetes placements", error),

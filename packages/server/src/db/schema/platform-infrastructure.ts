@@ -100,6 +100,7 @@ export type PlatformClusterMetadata = {
 	buildRuntimeClassName?: string;
 	runtimeClassName?: string;
 	gatewayNamespace?: string;
+	gatewayDataPlaneNamespace?: string;
 	gatewayName?: string;
 	gatewaySectionName?: string;
 	gatewayClassName?: string;
