@@ -888,6 +888,8 @@ export const assertKubernetesClusterReadiness = (cluster: {
 		!cluster.metadata.certManagerEnabled ? "certManagerEnabled" : null,
 		!cluster.metadata.certIssuerName ? "certIssuerName" : null,
 		!cluster.metadata.externalDnsEnabled ? "externalDnsEnabled" : null,
+		!cluster.metadata.multiZoneEnabled ? "multiZoneEnabled" : null,
+		!cluster.metadata.readOnlyRootFilesystem ? "readOnlyRootFilesystem" : null,
 	].filter((value): value is string => Boolean(value));
 	if (missing.length > 0) {
 		throw new TRPCError({

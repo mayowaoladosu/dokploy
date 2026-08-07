@@ -54,7 +54,7 @@ export const CreateServer = ({ stepper }: Props) => {
 	const { data: sshKeys } = api.sshKey.all.useQuery();
 	const [isOpen, _setIsOpen] = useState(false);
 	const { data: canCreateMoreServers, refetch } =
-		api.stripe.canCreateMoreServers.useQuery();
+		api.polar.canCreateMoreServers.useQuery();
 	const { mutateAsync } = api.server.create.useMutation();
 	const cloudSSHKey = sshKeys?.find(
 		(sshKey) => sshKey.name === "dokploy-cloud-ssh-key",

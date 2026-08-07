@@ -857,6 +857,45 @@ export const reconcileManagedDataBackups = async (
 		});
 		for (const resource of due) {
 			try {
+				const owner = await db.query.organization.findFirst({
+					where: (table, { eq }) => eq(table.id, resource.organizationId),
+					with: { owner: { columns: { isEnterpriseCloud: true } } },
+					columns: {
+						billingPlan: true,
+						billingStatus: true,
+						billingCurrentPeriodEnd: true,
+						billingLastSyncedAt: true,
+					},
+				});
+				const entitled = Boolean(
+					owner &&
+						(owner.owner.isEnterpriseCloud ||
+							(owner.billingPlan !== null &&
+								(owner.billingStatus === "active" ||
+									owner.billingStatus === "trialing") &&
+								owner.billingLastSyncedAt &&
+								now.getTime() - owner.billingLastSyncedAt.getTime() <=
+									24 * 60 * 60 * 1_000 &&
+								(owner.billingCurrentPeriodEnd === null ||
+									owner.billingCurrentPeriodEnd.getTime() >= now.getTime()))),
+				);
+				if (!entitled) {
+					await db
+						.update(managedDataResources)
+						.set({
+							nextBackupAt: new Date(
+								now.getTime() + resource.backupIntervalHours * 60 * 60 * 1_000,
+							),
+							updatedAt: now,
+						})
+						.where(
+							eq(
+								managedDataResources.managedDataResourceId,
+								resource.managedDataResourceId,
+							),
+						);
+					continue;
+				}
 				await createManagedDataBackup({
 					managedDataResourceId: resource.managedDataResourceId,
 					idempotencyKey: `${resource.managedDataResourceId}:${resource.nextBackupAt?.toISOString()}:scheduled`,

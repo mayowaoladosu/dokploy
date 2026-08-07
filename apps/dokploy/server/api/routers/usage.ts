@@ -1,7 +1,7 @@
 import {
-	listStripeUsageMeters,
-	upsertStripeUsageMeter,
-} from "@dokploy/server/services/stripe-usage-metering";
+	listPolarUsageMeters,
+	upsertPolarUsageMeter,
+} from "@dokploy/server/services/polar-usage-metering";
 import {
 	getUsageTotal,
 	upsertUsageQuota,
@@ -56,19 +56,18 @@ export const usageRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(({ input }) => upsertUsageQuota(input)),
-	configureStripeMeter: platformAdminProcedure
+	configurePolarMeter: platformAdminProcedure
 		.input(
 			z.object({
 				organizationId: z.string().min(1),
 				metric,
-				stripeCustomerId: z.string().min(1).max(200),
-				stripeEventName: z.string().min(1).max(100),
+				polarEventName: z.string().min(1).max(128),
 				enabled: z.boolean().optional(),
 				metadata: z.record(z.string(), z.unknown()).optional(),
 			}),
 		)
-		.mutation(({ input }) => upsertStripeUsageMeter(input)),
-	listStripeMeters: platformAdminProcedure
+		.mutation(({ input }) => upsertPolarUsageMeter(input)),
+	listPolarMeters: platformAdminProcedure
 		.input(z.object({ organizationId: z.string().min(1).optional() }))
-		.query(({ input }) => listStripeUsageMeters(input.organizationId)),
+		.query(({ input }) => listPolarUsageMeters(input.organizationId)),
 });

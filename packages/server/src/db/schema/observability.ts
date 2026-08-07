@@ -51,7 +51,7 @@ export const observabilityQueryStatus = pgEnum("observabilityQueryStatus", [
 	"denied",
 ]);
 
-export const stripeUsageDeliveryStatus = pgEnum("stripeUsageDeliveryStatus", [
+export const polarUsageDeliveryStatus = pgEnum("polarUsageDeliveryStatus", [
 	"pending",
 	"delivering",
 	"delivered",
@@ -66,6 +66,8 @@ export type PlatformObservabilityBackendMetadata = {
 	retentionManagedExternally?: boolean;
 	healthEndpoint?: string;
 	otlpHeaders?: Record<string, string>;
+	authScheme?: "Bearer" | "Basic";
+	omitTenantHeader?: boolean;
 };
 
 export const platformObservabilityBackends = pgTable(
@@ -211,18 +213,17 @@ export const managedDataUsageCheckpoints = pgTable(
 	],
 );
 
-export const stripeUsageMeters = pgTable(
-	"stripe_usage_meter",
+export const polarUsageMeters = pgTable(
+	"polar_usage_meter",
 	{
-		stripeUsageMeterId: text("stripe_usage_meter_id")
+		polarUsageMeterId: text("polar_usage_meter_id")
 			.primaryKey()
 			.$defaultFn(() => nanoid()),
 		organizationId: text("organization_id")
 			.notNull()
 			.references(() => organization.id, { onDelete: "cascade" }),
 		metric: usageMetric("metric").notNull(),
-		stripeCustomerId: text("stripe_customer_id").notNull(),
-		stripeEventName: text("stripe_event_name").notNull(),
+		polarEventName: text("polar_event_name").notNull(),
 		enabled: boolean("enabled").notNull().default(true),
 		metadata: jsonb("metadata")
 			.$type<Record<string, unknown>>()
@@ -232,34 +233,34 @@ export const stripeUsageMeters = pgTable(
 		updatedAt: timestamp("updated_at").defaultNow().notNull(),
 	},
 	(table) => [
-		uniqueIndex("stripeUsageMeter_organizationMetric_unique").on(
+		uniqueIndex("polarUsageMeter_organizationMetric_unique").on(
 			table.organizationId,
 			table.metric,
 		),
-		index("stripeUsageMeter_enabled_idx").on(table.enabled),
+		index("polarUsageMeter_enabled_idx").on(table.enabled),
 	],
 );
 
-export const stripeUsageDeliveries = pgTable(
-	"stripe_usage_delivery",
+export const polarUsageDeliveries = pgTable(
+	"polar_usage_delivery",
 	{
-		stripeUsageDeliveryId: text("stripe_usage_delivery_id")
+		polarUsageDeliveryId: text("polar_usage_delivery_id")
 			.primaryKey()
 			.$defaultFn(() => nanoid()),
-		stripeUsageMeterId: text("stripe_usage_meter_id")
+		polarUsageMeterId: text("polar_usage_meter_id")
 			.notNull()
-			.references(() => stripeUsageMeters.stripeUsageMeterId, {
+			.references(() => polarUsageMeters.polarUsageMeterId, {
 				onDelete: "cascade",
 			}),
 		usageEventId: text("usage_event_id")
 			.notNull()
 			.references(() => usageEvents.usageEventId, { onDelete: "cascade" }),
 		identifier: text("identifier").notNull(),
-		stripeCustomerId: text("stripe_customer_id").notNull(),
-		stripeEventName: text("stripe_event_name").notNull(),
+		externalCustomerId: text("external_customer_id").notNull(),
+		polarEventName: text("polar_event_name").notNull(),
 		quantity: bigint("quantity", { mode: "bigint" }).notNull(),
 		eventTimestamp: timestamp("event_timestamp").notNull(),
-		status: stripeUsageDeliveryStatus("status").notNull().default("pending"),
+		status: polarUsageDeliveryStatus("status").notNull().default("pending"),
 		attempts: integer("attempts").notNull().default(0),
 		nextAttemptAt: timestamp("next_attempt_at").defaultNow().notNull(),
 		deliveredAt: timestamp("delivered_at"),
@@ -268,12 +269,12 @@ export const stripeUsageDeliveries = pgTable(
 		updatedAt: timestamp("updated_at").defaultNow().notNull(),
 	},
 	(table) => [
-		uniqueIndex("stripeUsageDelivery_meterEvent_unique").on(
-			table.stripeUsageMeterId,
+		uniqueIndex("polarUsageDelivery_meterEvent_unique").on(
+			table.polarUsageMeterId,
 			table.usageEventId,
 		),
-		uniqueIndex("stripeUsageDelivery_identifier_unique").on(table.identifier),
-		index("stripeUsageDelivery_statusRetry_idx").on(
+		uniqueIndex("polarUsageDelivery_identifier_unique").on(table.identifier),
+		index("polarUsageDelivery_statusRetry_idx").on(
 			table.status,
 			table.nextAttemptAt,
 		),
@@ -304,26 +305,26 @@ export const observabilityQueryAuditRelations = relations(
 	}),
 );
 
-export const stripeUsageMeterRelations = relations(
-	stripeUsageMeters,
+export const polarUsageMeterRelations = relations(
+	polarUsageMeters,
 	({ one, many }) => ({
 		organization: one(organization, {
-			fields: [stripeUsageMeters.organizationId],
+			fields: [polarUsageMeters.organizationId],
 			references: [organization.id],
 		}),
-		deliveries: many(stripeUsageDeliveries),
+		deliveries: many(polarUsageDeliveries),
 	}),
 );
 
-export const stripeUsageDeliveryRelations = relations(
-	stripeUsageDeliveries,
+export const polarUsageDeliveryRelations = relations(
+	polarUsageDeliveries,
 	({ one }) => ({
-		meter: one(stripeUsageMeters, {
-			fields: [stripeUsageDeliveries.stripeUsageMeterId],
-			references: [stripeUsageMeters.stripeUsageMeterId],
+		meter: one(polarUsageMeters, {
+			fields: [polarUsageDeliveries.polarUsageMeterId],
+			references: [polarUsageMeters.polarUsageMeterId],
 		}),
 		usageEvent: one(usageEvents, {
-			fields: [stripeUsageDeliveries.usageEventId],
+			fields: [polarUsageDeliveries.usageEventId],
 			references: [usageEvents.usageEventId],
 		}),
 	}),
@@ -333,4 +334,4 @@ export type PlatformObservabilityBackend =
 	typeof platformObservabilityBackends.$inferSelect;
 export type OrganizationObservabilityPolicy =
 	typeof organizationObservabilityPolicies.$inferSelect;
-export type StripeUsageMeter = typeof stripeUsageMeters.$inferSelect;
+export type PolarUsageMeter = typeof polarUsageMeters.$inferSelect;

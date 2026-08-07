@@ -18,6 +18,7 @@ import {
 	activityInfo,
 	Context,
 } from "@temporalio/activity";
+import { assertBillingEntitlement } from "@/server/utils/billing";
 import type { DeploymentWorkflowInput } from "./types";
 
 const heartbeatTimer = (phase: string) => {
@@ -119,6 +120,10 @@ export const executeDeploymentJob = async (input: DeploymentWorkflowInput) => {
 		once: true,
 	});
 	try {
+		const application = await findApplicationById(input.job.applicationId);
+		await assertBillingEntitlement(
+			application.environment.project.organizationId,
+		);
 		await markGitDeliveryTargetRunning(input.job.gitDeliveryTargetId);
 		context.heartbeat({ phase: "starting", attempt: activityInfo().attempt });
 		const release = await createReleaseStateMachine()

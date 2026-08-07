@@ -1,7 +1,8 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	DeleteObjectsCommand,
 	GetBucketEncryptionCommand,
+	GetBucketVersioningCommand,
 	GetObjectCommand,
 	GetPublicAccessBlockCommand,
 	HeadBucketCommand,
@@ -182,9 +183,10 @@ export const createS3ObjectStorageClient = ({
 			if (!storage.metadata.managedDataBackups) {
 				throw new Error("Storage is not dedicated to managed data backups");
 			}
-			const [encryption, access] = await Promise.all([
+			const [encryption, access, versioning] = await Promise.all([
 				s3.send(new GetBucketEncryptionCommand({ Bucket: storage.bucket })),
 				s3.send(new GetPublicAccessBlockCommand({ Bucket: storage.bucket })),
+				s3.send(new GetBucketVersioningCommand({ Bucket: storage.bucket })),
 			]);
 			const rule = encryption.ServerSideEncryptionConfiguration?.Rules?.find(
 				(candidate) =>
@@ -205,6 +207,108 @@ export const createS3ObjectStorageClient = ({
 			) {
 				throw new Error("Managed data backup bucket must block public access");
 			}
+			if (versioning.Status !== "Enabled") {
+				throw new Error("Managed data backup bucket must enable versioning");
+			}
+			return true;
+		},
+		verifyManagedDataBackupWrite: async () => {
+			if (!storage.metadata.managedDataBackups) {
+				throw new Error("Storage is not dedicated to managed data backups");
+			}
+			const key = `${storage.prefix.replace(/\/+$/, "")}/.vlyv-readiness/kms-canary-${randomUUID()}`;
+			const body = Buffer.from("vlyv-managed-archive-readiness", "utf8");
+			const cleanup = async () => {
+				const currentDeletion = await s3.send(
+					new DeleteObjectsCommand({
+						Bucket: storage.bucket,
+						Delete: { Objects: [{ Key: key }], Quiet: true },
+					}),
+				);
+				if ((currentDeletion.Errors?.length ?? 0) > 0) {
+					throw new Error(
+						"Managed archive canary current object was not deleted",
+					);
+				}
+				const versions = await s3.send(
+					new ListObjectVersionsCommand({
+						Bucket: storage.bucket,
+						Prefix: key,
+					}),
+				);
+				const retained = [
+					...(versions.Versions ?? []),
+					...(versions.DeleteMarkers ?? []),
+				].flatMap((entry) =>
+					entry.Key && entry.VersionId
+						? [{ Key: entry.Key, VersionId: entry.VersionId }]
+						: [],
+				);
+				if (retained.length > 0) {
+					const versionDeletion = await s3.send(
+						new DeleteObjectsCommand({
+							Bucket: storage.bucket,
+							Delete: { Objects: retained, Quiet: true },
+						}),
+					);
+					if ((versionDeletion.Errors?.length ?? 0) > 0) {
+						throw new Error("Managed archive canary versions were not deleted");
+					}
+				}
+				const remaining = await s3.send(
+					new ListObjectVersionsCommand({
+						Bucket: storage.bucket,
+						Prefix: key,
+					}),
+				);
+				if (
+					(remaining.Versions?.length ?? 0) > 0 ||
+					(remaining.DeleteMarkers?.length ?? 0) > 0
+				) {
+					throw new Error("Managed archive canary cleanup is incomplete");
+				}
+			};
+			try {
+				await s3.send(
+					new PutObjectCommand({
+						Bucket: storage.bucket,
+						Key: key,
+						Body: body,
+						ContentLength: body.byteLength,
+						ContentType: "application/octet-stream",
+						ServerSideEncryption: "aws:kms",
+						SSEKMSKeyId: kmsKeyId,
+					}),
+				);
+				const object = await s3.send(
+					new HeadObjectCommand({
+						Bucket: storage.bucket,
+						Key: key,
+					}),
+				);
+				if (
+					object.ServerSideEncryption !== "aws:kms" ||
+					object.SSEKMSKeyId !== kmsKeyId
+				) {
+					throw new Error(
+						"Managed archive canary did not use the configured KMS key",
+					);
+				}
+				const downloaded = await s3.send(
+					new GetObjectCommand({ Bucket: storage.bucket, Key: key }),
+				);
+				if (!downloaded.Body) {
+					throw new Error("Managed archive canary could not be read");
+				}
+				const bytes = await downloaded.Body.transformToByteArray();
+				if (!Buffer.from(bytes).equals(body)) {
+					throw new Error("Managed archive canary content did not round-trip");
+				}
+			} catch (error) {
+				await cleanup().catch(() => undefined);
+				throw error;
+			}
+			await cleanup();
 			return true;
 		},
 		put: async ({

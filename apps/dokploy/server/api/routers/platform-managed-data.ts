@@ -1,3 +1,4 @@
+import { IS_MANAGED_PAAS } from "@dokploy/server/constants";
 import {
 	activatePlatformManagedDataProvider,
 	createPlatformManagedDataProvider,
@@ -8,14 +9,7 @@ import { z } from "zod";
 import { createTRPCRouter, platformAdminProcedure } from "../trpc";
 import { audit } from "../utils/audit";
 
-const managedKind = z.enum([
-	"postgres",
-	"mysql",
-	"mariadb",
-	"mongo",
-	"redis",
-	"libsql",
-]);
+const managedKind = z.literal("postgres");
 const providerCapabilities = z.object({
 	highAvailability: z.boolean(),
 	pooling: z.boolean(),
@@ -43,11 +37,11 @@ export const platformManagedDataRouter = createTRPCRouter({
 		.input(
 			z.object({
 				name: z.string().min(1).max(100),
-				type: z.enum(["neon", "upstash", "http"]),
+				type: IS_MANAGED_PAAS ? z.literal("neon") : z.enum(["neon", "http"]),
 				baseUrl: z.string().url(),
 				credentials: z.record(z.string(), z.unknown()),
-				kinds: z.array(managedKind).min(1).max(6),
-				defaultKinds: z.array(managedKind).max(6).optional(),
+				kinds: z.tuple([managedKind]),
+				defaultKinds: z.tuple([managedKind]).optional(),
 				capabilities: providerCapabilities,
 				metadata: providerMetadata.optional(),
 			}),
@@ -69,8 +63,8 @@ export const platformManagedDataRouter = createTRPCRouter({
 				name: z.string().min(1).max(100).optional(),
 				baseUrl: z.string().url().optional(),
 				credentials: z.record(z.string(), z.unknown()).optional(),
-				kinds: z.array(managedKind).min(1).max(6).optional(),
-				defaultKinds: z.array(managedKind).max(6).optional(),
+				kinds: z.tuple([managedKind]).optional(),
+				defaultKinds: z.tuple([managedKind]).optional(),
 				capabilities: providerCapabilities.optional(),
 				metadata: providerMetadata.optional(),
 				status: z.enum(["provisioning", "error", "offline"]).optional(),

@@ -4,6 +4,7 @@ export * from "./api-credential-scope";
 export * from "./application";
 export * from "./audit-log";
 export * from "./backups";
+export * from "./billing";
 export * from "./bitbucket";
 export * from "./build-artifact";
 export * from "./certificate";

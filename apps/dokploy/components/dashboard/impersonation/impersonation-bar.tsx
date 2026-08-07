@@ -359,20 +359,20 @@ export const ImpersonationBar = () => {
 													</Button>
 												</span>
 											</span>
-											{data?.user?.stripeCustomerId && (
+											{data?.organization?.polarCustomerId && (
 												<span className="flex items-center gap-1">
 													<CreditCard className="h-3 w-3" />
 													<span className="flex items-center gap-1">
 														Customer:
-														{data?.user?.stripeCustomerId?.slice(0, 8)}
+														{data.organization.polarCustomerId.slice(0, 8)}
 														<Button
 															variant="ghost"
 															size="icon"
 															className="h-4 w-4 hover:bg-muted/50"
 															onClick={() => {
-																copy(data?.user?.stripeCustomerId || "");
+																copy(data.organization?.polarCustomerId || "");
 																toast.success(
-																	"Stripe Customer ID copied to clipboard",
+																	"Polar Customer ID copied to clipboard",
 																);
 															}}
 														>
@@ -381,19 +381,19 @@ export const ImpersonationBar = () => {
 													</span>
 												</span>
 											)}
-											{data?.user?.stripeSubscriptionId && (
+											{data?.organization?.polarSubscriptionId && (
 												<span className="flex items-center gap-1">
 													<CreditCard className="h-3 w-3" />
 													<span className="flex items-center gap-1">
-														Sub: {data?.user?.stripeSubscriptionId?.slice(0, 8)}
+														Sub: {data.organization.polarSubscriptionId.slice(0, 8)}
 														<Button
 															variant="ghost"
 															size="icon"
 															className="h-4 w-4 hover:bg-muted/50"
 															onClick={() => {
-																copy(data.user.stripeSubscriptionId || "");
+																copy(data.organization?.polarSubscriptionId || "");
 																toast.success(
-																	"Stripe Subscription ID copied to clipboard",
+																	"Polar Subscription ID copied to clipboard",
 																);
 															}}
 														>

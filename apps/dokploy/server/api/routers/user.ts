@@ -151,6 +151,18 @@ export const userRouter = createTRPCRouter({
 				eq(member.organizationId, ctx.session?.activeOrganizationId || ""),
 			),
 			with: {
+				organization: {
+					columns: {
+						id: true,
+						polarCustomerId: true,
+						polarSubscriptionId: true,
+						billingPlan: true,
+						billingStatus: true,
+						billingSeats: true,
+						billingLastSyncedAt: true,
+						billingLastEventAt: true,
+					},
+				},
 				user: {
 					columns: {
 						id: true,
@@ -160,8 +172,6 @@ export const userRouter = createTRPCRouter({
 						image: true,
 						allowImpersonation: true,
 						twoFactorEnabled: true,
-						stripeCustomerId: true,
-						stripeSubscriptionId: true,
 						serversQuantity: true,
 						isEnterpriseCloud: true,
 						sendInvoiceNotifications: true,

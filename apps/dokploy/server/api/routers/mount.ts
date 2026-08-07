@@ -32,6 +32,29 @@ import {
 } from "@/server/db/schema";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 
+const createMountInput = IS_MANAGED_PAAS
+	? apiCreateMount.extend({ serviceType: z.literal("application") })
+	: apiCreateMount;
+const updateMountInput = IS_MANAGED_PAAS
+	? apiUpdateMount
+			.omit({
+				composeId: true,
+				libsqlId: true,
+				mariadbId: true,
+				mongoId: true,
+				mysqlId: true,
+				postgresId: true,
+				redisId: true,
+			})
+			.extend({ serviceType: z.literal("application").optional() })
+	: apiUpdateMount;
+const listMountsInput = IS_MANAGED_PAAS
+	? z.object({
+			serviceType: z.literal("application"),
+			serviceId: z.string().min(1),
+		})
+	: apiFindMountByApplicationId;
+
 const assertManagedMountSafety = (input: {
 	type?: "bind" | "volume" | "file";
 	hostPath?: string | null;
@@ -44,6 +67,12 @@ const assertManagedMountSafety = (input: {
 		throw new TRPCError({
 			code: "FORBIDDEN",
 			message: "Host bind mounts are not available on managed compute",
+		});
+	}
+	if (input.volumeName !== undefined) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message: "Volume names are managed by the platform",
 		});
 	}
 
@@ -124,7 +153,7 @@ async function getServiceOrganizationId(
 
 export const mountRouter = createTRPCRouter({
 	create: protectedProcedure
-		.input(apiCreateMount)
+		.input(createMountInput)
 		.mutation(async ({ input, ctx }) => {
 			await checkServicePermissionAndAccess(ctx, input.serviceId, {
 				volume: ["create"],
@@ -186,7 +215,7 @@ export const mountRouter = createTRPCRouter({
 			return mount;
 		}),
 	update: protectedProcedure
-		.input(apiUpdateMount)
+		.input(updateMountInput)
 		.mutation(async ({ input, ctx }) => {
 			const mount = await findMountById(input.mountId);
 			const serviceId =
@@ -207,12 +236,6 @@ export const mountRouter = createTRPCRouter({
 				...input,
 				type: input.type ?? mount.type,
 			});
-			if (IS_MANAGED_PAAS && input.volumeName !== undefined) {
-				throw new TRPCError({
-					code: "FORBIDDEN",
-					message: "Volume names are managed by the platform",
-				});
-			}
 			await audit(ctx, {
 				action: "update",
 				resourceType: "mount",
@@ -235,7 +258,7 @@ export const mountRouter = createTRPCRouter({
 			return mounts;
 		}),
 	listByServiceId: protectedProcedure
-		.input(apiFindMountByApplicationId)
+		.input(listMountsInput)
 		.query(async ({ input, ctx }) => {
 			await checkServiceAccess(ctx, input.serviceId, "read");
 			const organizationId = await getServiceOrganizationId(

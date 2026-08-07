@@ -37,6 +37,7 @@ import {
 	addNewProject,
 	checkPermission,
 	checkProjectAccess,
+	checkServicePermissionAndAccess,
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
 import { TRPCError } from "@trpc/server";
@@ -65,6 +66,7 @@ import {
 	projects,
 	redis,
 } from "@/server/db/schema";
+import { assertBillingEntitlement } from "@/server/utils/billing";
 
 const redactManagedProjectInfrastructure = <T>(project: T): T => {
 	if (!IS_MANAGED_PAAS || !project || typeof project !== "object")
@@ -105,6 +107,7 @@ export const projectRouter = createTRPCRouter({
 		.input(apiCreateProject)
 		.mutation(async ({ ctx, input }) => {
 			try {
+				await assertBillingEntitlement(ctx.session.activeOrganizationId);
 				await checkProjectAccess(ctx, "create");
 
 				const admin = await findUserById(ctx.user.ownerId);
@@ -830,16 +833,18 @@ export const projectRouter = createTRPCRouter({
 					.array(
 						z.object({
 							id: z.string(),
-							type: z.enum([
-								"application",
-								"compose",
-								"libsql",
-								"mariadb",
-								"mongo",
-								"mysql",
-								"postgres",
-								"redis",
-							]),
+							type: IS_MANAGED_PAAS
+								? z.literal("application")
+								: z.enum([
+										"application",
+										"compose",
+										"libsql",
+										"mariadb",
+										"mongo",
+										"mysql",
+										"postgres",
+										"redis",
+									]),
 						}),
 					)
 					.optional(),
@@ -848,20 +853,36 @@ export const projectRouter = createTRPCRouter({
 		)
 		.mutation(async ({ ctx, input }) => {
 			try {
+				await assertBillingEntitlement(ctx.session.activeOrganizationId);
 				await checkProjectAccess(ctx, "create");
+				const sourceEnvironment = await findEnvironmentById(
+					input.sourceEnvironmentId,
+				);
+				if (
+					sourceEnvironment.project.organizationId !==
+					ctx.session.activeOrganizationId
+				) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You are not authorized to duplicate this project",
+					});
+				}
+				for (const service of input.selectedServices ?? []) {
+					await checkServicePermissionAndAccess(ctx, service.id, {
+						service: ["read"],
+					});
+				}
 				if (
 					IS_MANAGED_PAAS &&
-					input.selectedServices?.some((service) => service.type === "compose")
+					input.selectedServices?.some(
+						(service) => service.type !== "application",
+					)
 				) {
 					throw new TRPCError({
 						code: "FORBIDDEN",
-						message: "Compose workloads are not available on managed compute",
+						message: "Only applications can be duplicated on managed compute",
 					});
 				}
-
-				const sourceEnvironment = input.duplicateInSameProject
-					? await findEnvironmentById(input.sourceEnvironmentId)
-					: null;
 
 				if (
 					input.duplicateInSameProject &&
@@ -898,7 +919,7 @@ export const projectRouter = createTRPCRouter({
 							{
 								name: input.name,
 								description: input.description,
-								env: sourceEnvironment?.project.env,
+								env: sourceEnvironment.project.env,
 							},
 							ctx.session.activeOrganizationId,
 						).then((value) => value.environment);

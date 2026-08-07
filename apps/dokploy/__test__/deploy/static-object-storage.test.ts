@@ -214,6 +214,58 @@ describe("platform static object storage", () => {
 		).toThrow("private S3 storage with a dedicated KMS key");
 	});
 
+	it("requires versioning when verifying managed archive storage", async () => {
+		const client = {
+			send: vi.fn(async (command: unknown) => {
+				const name = (command as any).constructor.name;
+				if (name === "GetBucketEncryptionCommand") {
+					return {
+						ServerSideEncryptionConfiguration: {
+							Rules: [
+								{
+									ApplyServerSideEncryptionByDefault: {
+										SSEAlgorithm: "aws:kms",
+										KMSMasterKeyID:
+											"arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012",
+									},
+								},
+							],
+						},
+					};
+				}
+				if (name === "GetPublicAccessBlockCommand") {
+					return {
+						PublicAccessBlockConfiguration: {
+							BlockPublicAcls: true,
+							IgnorePublicAcls: true,
+							BlockPublicPolicy: true,
+							RestrictPublicBuckets: true,
+						},
+					};
+				}
+				if (name === "GetBucketVersioningCommand") return {};
+				return {};
+			}),
+		} as any;
+		const objects = createS3ObjectStorageClient({
+			storage: {
+				...storage,
+				provider: "s3",
+				metadata: {
+					managedDataBackups: true,
+					publicAccessDisabled: true,
+					serverSideEncryption: "aws:kms",
+					kmsKeyId:
+						"arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012",
+				},
+			},
+			client,
+		});
+		await expect(objects.verifyManagedDataBackups()).rejects.toThrow(
+			"enable versioning",
+		);
+	});
+
 	it("does not report a partial backup deletion as successful", async () => {
 		let listCalls = 0;
 		const client = {

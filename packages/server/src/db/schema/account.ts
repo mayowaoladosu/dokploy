@@ -1,6 +1,7 @@
 import { relations, sql } from "drizzle-orm";
 import {
 	boolean,
+	check,
 	index,
 	integer,
 	pgTable,
@@ -57,19 +58,43 @@ export const verification = pgTable("verification", {
 	updatedAt: timestamp("updated_at"),
 });
 
-export const organization = pgTable("organization", {
-	id: text("id")
-		.primaryKey()
-		.$defaultFn(() => nanoid()),
-	name: text("name").notNull(),
-	slug: text("slug").unique(),
-	logo: text("logo"),
-	createdAt: timestamp("created_at").notNull(),
-	metadata: text("metadata"),
-	ownerId: text("owner_id")
-		.notNull()
-		.references(() => user.id, { onDelete: "cascade" }),
-});
+export const organization = pgTable(
+	"organization",
+	{
+		id: text("id")
+			.primaryKey()
+			.$defaultFn(() => nanoid()),
+		name: text("name").notNull(),
+		slug: text("slug").unique(),
+		logo: text("logo"),
+		createdAt: timestamp("created_at").notNull(),
+		metadata: text("metadata"),
+		ownerId: text("owner_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "cascade" }),
+		polarCustomerId: text("polar_customer_id").unique(),
+		polarSubscriptionId: text("polar_subscription_id").unique(),
+		billingPlan: text("billing_plan"),
+		billingStatus: text("billing_status"),
+		billingSeats: integer("billing_seats").notNull().default(0),
+		billingCurrentPeriodEnd: timestamp("billing_current_period_end"),
+		billingLastSyncedAt: timestamp("billing_last_synced_at"),
+		billingLastEventAt: timestamp("billing_last_event_at"),
+	},
+	(table) => [
+		index("organization_billingStatus_idx").on(table.billingStatus),
+		index("organization_billingLastSyncedAt_idx").on(table.billingLastSyncedAt),
+		check(
+			"organization_billing_plan_check",
+			sql`${table.billingPlan} IS NULL OR ${table.billingPlan} IN ('legacy', 'hobby', 'startup')`,
+		),
+		check(
+			"organization_billing_status_check",
+			sql`${table.billingStatus} IS NULL OR ${table.billingStatus} IN ('active', 'trialing', 'past_due', 'canceled', 'paused', 'revoked')`,
+		),
+		check("organization_billing_seats_check", sql`${table.billingSeats} >= 0`),
+	],
+);
 
 export const organizationRole = pgTable(
 	"organization_role",

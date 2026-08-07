@@ -14,6 +14,7 @@ import {
 	cleanQueuesByPreviewDeployment,
 	myQueue,
 } from "@/server/queues/queueSetup";
+import { assertBillingEntitlement } from "@/server/utils/billing";
 import { deploy } from "@/server/utils/deploy";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 
@@ -73,6 +74,7 @@ export const previewDeploymentRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
+			await assertBillingEntitlement(ctx.session.activeOrganizationId);
 			const previewDeployment = await findPreviewDeploymentById(
 				input.previewDeploymentId,
 			);

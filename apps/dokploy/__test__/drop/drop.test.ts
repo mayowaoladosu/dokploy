@@ -195,7 +195,10 @@ describe("GHSA-66v7-g3fh-47h3 path traversal RCE", () => {
 	});
 });
 
-describe("security: existing symlink escape", () => {
+const describeSymlinks =
+	process.platform === "win32" ? describe.skip : describe;
+
+describeSymlinks("security: existing symlink escape", () => {
 	beforeAll(async () => {
 		await fs.rm(APPLICATIONS_PATH, { recursive: true, force: true });
 	});

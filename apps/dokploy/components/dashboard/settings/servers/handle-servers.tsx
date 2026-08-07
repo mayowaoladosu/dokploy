@@ -68,7 +68,7 @@ export const HandleServers = ({ serverId, asButton = false }: Props) => {
 	const utils = api.useUtils();
 	const [isOpen, setIsOpen] = useState(false);
 	const { data: canCreateMoreServers, refetch } =
-		api.stripe.canCreateMoreServers.useQuery();
+		api.polar.canCreateMoreServers.useQuery();
 
 	const { data, refetch: refetchServer } = api.server.one.useQuery(
 		{

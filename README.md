@@ -44,6 +44,8 @@ curl -sSL https://dokploy.com/install.sh | bash
 
 For detailed documentation, visit [docs.dokploy.com](https://docs.dokploy.com).
 
+For this fork's Layerrail, Polar, Neon, Cloudflare, AWS archive, and Grafana Cloud deployment contract, see [PRODUCTION_DEPLOYMENT.md](PRODUCTION_DEPLOYMENT.md).
+
 
 [Github Sponsors](https://github.com/sponsors/Siumauricio)
 

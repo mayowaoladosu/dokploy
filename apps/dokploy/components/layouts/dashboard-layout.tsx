@@ -11,7 +11,7 @@ interface Props {
 export const DashboardLayout = ({ children }: Props) => {
 	const { data: haveRootAccess } = api.user.haveRootAccess.useQuery();
 	const { data: isCloud } = api.settings.isCloud.useQuery();
-	const { data: currentPlan } = api.stripe.getCurrentPlan.useQuery(undefined, {
+	const { data: currentPlan } = api.polar.getCurrentPlan.useQuery(undefined, {
 		enabled: isCloud === true,
 		refetchOnWindowFocus: false,
 		refetchOnMount: false,

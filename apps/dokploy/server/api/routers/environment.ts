@@ -5,7 +5,7 @@ import {
 	filterEnvironmentServices,
 	findEnvironmentById,
 	findEnvironmentsByProjectId,
-	IS_CLOUD,
+	IS_HOSTED,
 	IS_MANAGED_PAAS,
 	updateEnvironmentById,
 } from "@dokploy/server";
@@ -73,7 +73,7 @@ export const environmentRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			try {
 				await checkEnvironmentCreationPermission(ctx, input.projectId);
-				if (IS_CLOUD) {
+				if (IS_HOSTED) {
 					await assertEnvironmentLimit(
 						ctx.session.activeOrganizationId,
 						input.projectId,

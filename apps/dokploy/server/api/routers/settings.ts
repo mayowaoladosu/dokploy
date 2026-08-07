@@ -277,6 +277,12 @@ export const settingsRouter = createTRPCRouter({
 	saveSSHPrivateKey: adminProcedure
 		.input(apiSaveSSHKey)
 		.mutation(async ({ input, ctx }) => {
+			if (IS_MANAGED_PAAS) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Local SSH keys are not available in managed mode",
+				});
+			}
 			if (IS_CLOUD) {
 				return true;
 			}
@@ -323,6 +329,12 @@ export const settingsRouter = createTRPCRouter({
 			return settings;
 		}),
 	cleanSSHPrivateKey: adminProcedure.mutation(async ({ ctx }) => {
+		if (IS_MANAGED_PAAS) {
+			throw new TRPCError({
+				code: "FORBIDDEN",
+				message: "Local SSH keys are not available in managed mode",
+			});
+		}
 		if (IS_CLOUD) {
 			return true;
 		}

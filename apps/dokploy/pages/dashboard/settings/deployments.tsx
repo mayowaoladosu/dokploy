@@ -1,4 +1,4 @@
-import { IS_CLOUD, validateRequest } from "@dokploy/server";
+import { IS_CLOUD, IS_HOSTED, validateRequest } from "@dokploy/server";
 import { createServerSideHelpers } from "@trpc/react-query/server";
 import type { GetServerSidePropsContext } from "next";
 import type { ReactElement } from "react";
@@ -100,7 +100,7 @@ export async function getServerSideProps(ctx: GetServerSidePropsContext) {
 		};
 	}
 	// Concurrent builds is a self-hosted feature only.
-	if (IS_CLOUD) {
+	if (IS_HOSTED) {
 		return {
 			redirect: {
 				permanent: false,

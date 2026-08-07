@@ -6,7 +6,7 @@
  * which can then be consumed by the documentation website
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateOpenApiDocument } from "@dokploy/trpc-openapi";
@@ -22,12 +22,30 @@ async function generateOpenAPI() {
 			process.env.DOKPLOY_BUILD_TARGET === "managed" ||
 			process.env.PLATFORM_MODE === "managed";
 		if (managedTarget) {
-			const document = JSON.parse(readFileSync(outputPath, "utf8")) as {
-				info: Record<string, unknown>;
-				tags?: Array<{ name?: string }>;
-				paths?: Record<string, unknown>;
-				servers?: Array<{ url: string }>;
-			};
+			const documentRouter = (await import("../server/api/managed-root"))
+				.managedTenantRouter;
+			const document = generateOpenApiDocument(documentRouter, {
+				title: "vlyv API",
+				version: "1.0.0",
+				baseUrl: "https://vlyv.dev/api",
+				docsUrl: "https://vlyv.dev",
+				tags: [
+					"application",
+					"deployment",
+					"domain",
+					"environment",
+					"gitProvider",
+					"managedData",
+					"observability",
+					"organization",
+					"polar",
+					"previewDeployment",
+					"project",
+					"settings",
+					"usage",
+					"user",
+				],
+			});
 			const forbiddenNamespaces = new Set([
 				"admin",
 				"backup",
@@ -51,6 +69,7 @@ async function generateOpenAPI() {
 				"server",
 				"sshKey",
 				"sshRouter",
+				"stripe",
 				"swarm",
 				"volumeBackups",
 			]);
@@ -74,6 +93,22 @@ async function generateOpenAPI() {
 					delete document.paths?.[route];
 				}
 			}
+			for (const pathItem of Object.values(document.paths ?? {})) {
+				if (!pathItem || typeof pathItem !== "object") continue;
+				for (const candidate of Object.values(pathItem)) {
+					if (!candidate || typeof candidate !== "object") continue;
+					const operation = candidate as {
+						security?: Array<Record<string, string[]>>;
+					};
+					if (!Array.isArray(operation.security)) continue;
+					operation.security = operation.security.map((requirement) => {
+						const { Authorization, ...retained } = requirement;
+						return Authorization === undefined
+							? requirement
+							: { ...retained, apiKey: Authorization };
+					});
+				}
+			}
 			document.tags = document.tags?.filter(
 				(tag) => !tag.name || !forbiddenNamespaces.has(tag.name),
 			);
@@ -88,10 +123,20 @@ async function generateOpenAPI() {
 					url: "https://github.com/mayowaoladosu/dokploy/blob/main/LICENSE.MD",
 				},
 			};
+			document.components = {
+				...document.components,
+				securitySchemes: {
+					apiKey: {
+						type: "apiKey",
+						in: "header",
+						name: "x-api-key",
+						description: "vlyv API key authentication.",
+					},
+				},
+			};
+			document.security = [{ apiKey: [] }];
 			document.servers = [{ url: "https://vlyv.dev/api" }];
-			(
-				document as { externalDocs?: { description: string; url: string } }
-			).externalDocs = {
+			document.externalDocs = {
 				description: "vlyv documentation",
 				url: "https://vlyv.dev",
 			};

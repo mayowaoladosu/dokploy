@@ -25,9 +25,26 @@ const BACKEND_KINDS = [
 const METRIC_NAME = /^[a-zA-Z_:][a-zA-Z0-9_:]{0,199}$/;
 const LABEL_VALUE = /^[a-zA-Z0-9._:/-]{1,200}$/;
 const TENANT_HEADER = /^[a-zA-Z0-9-]{1,100}$/;
+const BACKEND_HEADER = /^[a-zA-Z0-9!#$%&'*+.^_`|~-]{1,128}$/;
 const DEFAULT_QUERY_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
 const MAX_QUERY_RANGE_MS = 31 * 24 * 60 * 60 * 1_000;
+
+const backendHeaders = (backend: PlatformObservabilityBackend) => {
+	const headers: Record<string, string> = { Accept: "application/json" };
+	if (!backend.metadata.omitTenantHeader) {
+		headers[backend.tenantHeader] = backend.tenantId;
+	}
+	if (backend.authToken) {
+		if (backend.kind === "otlp") {
+			Object.assign(headers, backend.metadata.otlpHeaders ?? {});
+		}
+		headers.Authorization = `${backend.metadata.authScheme || "Bearer"} ${backend.authToken}`;
+	} else if (backend.kind === "otlp") {
+		Object.assign(headers, backend.metadata.otlpHeaders ?? {});
+	}
+	return headers;
+};
 
 const isPrivateHostname = (hostname: string) => {
 	const normalized = hostname.toLowerCase();
@@ -105,6 +122,17 @@ const validateBackendInput = (input: {
 		throw new Error("Observability tenant ID is invalid");
 	}
 	const metadata = input.metadata ?? {};
+	for (const [name, value] of Object.entries(metadata.otlpHeaders ?? {})) {
+		if (
+			!BACKEND_HEADER.test(name) ||
+			name.toLowerCase() === "authorization" ||
+			/[\r\n]/.test(value)
+		) {
+			throw new Error(
+				"OTLP metadata headers are invalid; authorization must use the encrypted auth token",
+			);
+		}
+	}
 	if (metadata.retentionManagedExternally !== true) {
 		throw new Error(
 			"Observability backends must enforce retention externally before activation",
@@ -269,6 +297,8 @@ export const activatePlatformObservabilityBackend = async (
 		});
 	}
 	let healthUrl: URL;
+	let method = "GET";
+	let body: string | undefined;
 	if (backend.metadata.healthEndpoint) {
 		healthUrl = new URL(
 			normalizeObservabilityEndpoint(
@@ -285,19 +315,18 @@ export const activatePlatformObservabilityBackend = async (
 		healthUrl = new URL(backend.endpoint);
 		healthUrl.searchParams.set("query", "SELECT 1");
 	} else {
-		throw new TRPCError({
-			code: "BAD_REQUEST",
-			message: "OTLP backends require a verified health endpoint",
-		});
+		healthUrl = new URL(`${backend.endpoint}/v1/metrics`);
+		method = "POST";
+		body = JSON.stringify({ resourceMetrics: [] });
 	}
-	const headers: Record<string, string> = {
-		Accept: "application/json, text/plain",
-		[backend.tenantHeader]: backend.tenantId,
-	};
-	if (backend.authToken) headers.Authorization = `Bearer ${backend.authToken}`;
+	const headers = backendHeaders(backend);
+	headers.Accept = "application/json, text/plain";
+	if (body) headers["Content-Type"] = "application/json";
 	try {
 		const response = await fetcher(healthUrl, {
+			method,
 			headers,
+			body,
 			signal: AbortSignal.timeout(10_000),
 		});
 		if (!response.ok) {
@@ -722,11 +751,7 @@ export const queryOrganizationObservability = async (
 		});
 	}
 	const tenantId = observabilityTenantId(input.organizationId);
-	const headers: Record<string, string> = {
-		Accept: "application/json",
-		[backend.tenantHeader]: backend.tenantId,
-	};
-	if (backend.authToken) headers.Authorization = `Bearer ${backend.authToken}`;
+	const headers = backendHeaders(backend);
 	let query = "";
 	let url: URL;
 	if (input.kind === "metrics") {

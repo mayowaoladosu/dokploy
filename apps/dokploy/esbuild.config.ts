@@ -1,30 +1,13 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { bundleWorkflowCode } from "@temporalio/worker";
-import dotenv, { type DotenvParseOutput } from "dotenv";
 import esbuild from "esbuild";
 
-const result = dotenv.config({ path: ".env.production" });
-
-function prepareDefine(config: DotenvParseOutput | undefined) {
-	const define = {};
-	// @ts-ignore
-	for (const [key, value] of Object.entries(config)) {
-		// Infrastructure endpoints and credentials must remain runtime-only.
-		if (key === "DATABASE_URL" || key.startsWith("TEMPORAL_")) {
-			continue;
-		}
-		// @ts-ignore
-		define[`process.env.${key}`] = JSON.stringify(value);
-	}
-	return define;
-}
-
-const define = prepareDefine(result.parsed);
-// @ts-ignore
-define["process.env.DOKPLOY_BUILD_TARGET"] = JSON.stringify(
-	process.env.DOKPLOY_BUILD_TARGET ?? "self-hosted",
-);
+const define: Record<string, string> = {
+	"process.env.DOKPLOY_BUILD_TARGET": JSON.stringify(
+		process.env.DOKPLOY_BUILD_TARGET ?? "self-hosted",
+	),
+};
 
 try {
 	await mkdir(path.resolve("dist"), { recursive: true });

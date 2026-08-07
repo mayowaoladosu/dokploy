@@ -1,5 +1,11 @@
 import { relations } from "drizzle-orm";
-import { pgTable, text, uniqueIndex } from "drizzle-orm/pg-core";
+import {
+	boolean,
+	integer,
+	pgTable,
+	text,
+	uniqueIndex,
+} from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
@@ -23,6 +29,8 @@ export const previewDeployments = pgTable(
 		pullRequestTitle: text("pullRequestTitle").notNull(),
 		pullRequestCommentId: text("pullRequestCommentId").notNull(),
 		previewStatus: applicationStatus("previewStatus").notNull().default("idle"),
+		billingSuspended: boolean("billing_suspended").notNull().default(false),
+		billingSuspendedReplicas: integer("billing_suspended_replicas"),
 		appName: text("appName")
 			.notNull()
 			.$defaultFn(() => generateAppName("preview"))

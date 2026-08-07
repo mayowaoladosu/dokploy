@@ -1,6 +1,9 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { isManagedTenantRoute } from "../managed-surface.config.js";
+import {
+	isManagedTenantRoute,
+	managedRequiredRoutes,
+} from "../managed-surface.config.js";
 
 const managedTarget =
 	process.env.DOKPLOY_BUILD_TARGET === "managed" ||
@@ -18,6 +21,14 @@ if (managedTarget) {
 	if (blockedRoutes.length > 0) {
 		throw new Error(
 			`Managed build contains blocked routes: ${blockedRoutes.join(", ")}`,
+		);
+	}
+	const missingRequiredRoutes = managedRequiredRoutes.filter(
+		(route) => !(route in pagesManifest),
+	);
+	if (missingRequiredRoutes.length > 0) {
+		throw new Error(
+			`Managed build is missing required hosted routes: ${missingRequiredRoutes.join(", ")}`,
 		);
 	}
 
@@ -58,8 +69,23 @@ if (managedTarget) {
 			);
 		}
 	}
+	const secretCanary = process.env.MANAGED_BUILD_ARTIFACT_CANARY;
+	if (secretCanary?.trim()) {
+		const artifacts = [
+			path.resolve("dist/server.mjs"),
+			path.resolve("dist/server.mjs.map"),
+		];
+		for (const file of artifacts) {
+			const content = await readFile(file, "utf8").catch(() => "");
+			if (content.includes(secretCanary)) {
+				throw new Error(
+					`Managed build artifact contains secret canary: ${file}`,
+				);
+			}
+		}
+	}
 
 	console.log(
-		`Verified managed tenant build: ${Object.keys(pagesManifest).length} routes, no BYOS pages or host/container WebSockets`,
+		`Verified managed tenant build: ${Object.keys(pagesManifest).length} routes, Polar billing retained, no BYOS pages or host/container WebSockets`,
 	);
 }

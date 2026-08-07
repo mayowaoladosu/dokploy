@@ -1,5 +1,5 @@
 import { db } from "@dokploy/server/db";
-import { IS_CLOUD, sendInvitationEmail } from "@dokploy/server/index";
+import { IS_HOSTED, sendInvitationEmail } from "@dokploy/server/index";
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, exists, ne } from "drizzle-orm";
 import { nanoid } from "nanoid";
@@ -27,14 +27,18 @@ export const organizationRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
-			if (ctx.user.role !== "owner" && ctx.user.role !== "admin" && !IS_CLOUD) {
+			if (
+				ctx.user.role !== "owner" &&
+				ctx.user.role !== "admin" &&
+				!IS_HOSTED
+			) {
 				throw new TRPCError({
 					code: "FORBIDDEN",
 					message: "Only the organization owner can create an organization",
 				});
 			}
 
-			if (IS_CLOUD) {
+			if (IS_HOSTED) {
 				await assertOrganizationLimit(ctx.user.id);
 			}
 
@@ -257,6 +261,13 @@ export const organizationRouter = createTRPCRouter({
 						"Delete all managed data services before deleting this organization",
 				});
 			}
+			if (org.polarCustomerId || org.polarSubscriptionId) {
+				throw new TRPCError({
+					code: "PRECONDITION_FAILED",
+					message:
+						"Cancel the Polar subscription and detach the billing customer before deleting this organization",
+				});
+			}
 			await db
 				.delete(managedDataResources)
 				.where(
@@ -289,7 +300,7 @@ export const organizationRouter = createTRPCRouter({
 			const orgId = ctx.session.activeOrganizationId;
 			const email = input.email.toLowerCase();
 
-			if (IS_CLOUD) {
+			if (IS_HOSTED) {
 				await assertMemberLimit(orgId);
 			}
 
@@ -368,11 +379,21 @@ export const organizationRouter = createTRPCRouter({
 				})
 				.returning();
 
-			if (IS_CLOUD && created) {
+			if (IS_HOSTED && created) {
 				const host =
 					process.env.NODE_ENV === "development"
 						? "http://localhost:3000"
-						: "https://app.dokploy.com";
+						: (
+								process.env.PLATFORM_URL ||
+								process.env.BETTER_AUTH_URL ||
+								""
+							).replace(/\/$/, "");
+				if (!host) {
+					throw new TRPCError({
+						code: "PRECONDITION_FAILED",
+						message: "Hosted invitation URL is not configured",
+					});
+				}
 				const inviteLink = `${host}/invitation?token=${created.id}`;
 
 				const org = await db.query.organization.findFirst({

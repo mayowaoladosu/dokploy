@@ -5,6 +5,7 @@ import { canUsePlatformOperatorSurface } from "@/server/api/surface-policy";
 import openApiDocument from "../../../../openapi.json";
 import {
 	isManagedTenantRoute,
+	managedRequiredRoutes,
 	managedTenantPageSourceFragments,
 	managedTenantRoutes,
 	selfHostedOnlyPageSourceFragments,
@@ -31,6 +32,7 @@ const forbiddenNamespaces = [
 	"schedule",
 	"server",
 	"sshKey",
+	"stripe",
 	"swarm",
 	"volumeBackups",
 ];
@@ -47,7 +49,7 @@ const allowedNamespaces = [
 	"previewDeployment",
 	"project",
 	"settings",
-	"stripe",
+	"polar",
 	"usage",
 	"user",
 ];
@@ -146,12 +148,18 @@ describe("managed tenant page surface", () => {
 	it.each([
 		"/dashboard/home",
 		"/dashboard/projects",
-		"/dashboard/settings/billing",
 		"/dashboard/settings/git-providers",
 		"/dashboard/project/project-1/environment/environment-1/services/application/app-1",
 	])("retains tenant product route %s", (route) => {
 		expect(isManagedTenantRoute(route)).toBe(false);
 	});
+
+	it.each(managedRequiredRoutes)(
+		"retains required hosted route %s",
+		(route) => {
+			expect(isManagedTenantRoute(route)).toBe(false);
+		},
+	);
 
 	it("has a build-time replacement source for every blocked page family", () => {
 		expect(managedTenantPageSourceFragments.length).toBeGreaterThanOrEqual(
@@ -173,6 +181,9 @@ describe("managed tenant page surface", () => {
 
 describe("managed tenant OpenAPI surface", () => {
 	const paths = Object.keys(openApiDocument.paths);
+	const securitySchemes = new Set(
+		Object.keys(openApiDocument.components?.securitySchemes ?? {}),
+	);
 	it.each(forbiddenNamespaces)("omits %s operations", (namespace) => {
 		expect(paths.some((path) => path.startsWith(`/${namespace}.`))).toBe(false);
 	});
@@ -180,4 +191,32 @@ describe("managed tenant OpenAPI surface", () => {
 	it("retains application operations", () => {
 		expect(paths.some((path) => path.startsWith("/application."))).toBe(true);
 	});
+
+	it("uses only defined API-key security schemes", () => {
+		const requirements = Object.values(openApiDocument.paths).flatMap(
+			(pathItem) =>
+				Object.values(pathItem).flatMap((candidate) => {
+					if (!candidate || typeof candidate !== "object") return [];
+					const operation = candidate as {
+						security?: Array<Record<string, string[]>>;
+					};
+					return operation.security ?? [];
+				}),
+		);
+		const referencedSchemes = requirements.flatMap(Object.keys);
+		expect(referencedSchemes.length).toBeGreaterThan(0);
+		expect(new Set(referencedSchemes)).toEqual(new Set(["apiKey"]));
+		expect(
+			referencedSchemes.every((scheme) => securitySchemes.has(scheme)),
+		).toBe(true);
+	});
+
+	it.each(["libsql", "mariadb", "mongo", "mysql", "redis"])(
+		"does not advertise legacy %s service inputs",
+		(service) => {
+			expect(JSON.stringify(openApiDocument.paths)).not.toContain(
+				`\"${service}\"`,
+			);
+		},
+	);
 });

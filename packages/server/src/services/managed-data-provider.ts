@@ -16,11 +16,13 @@ import { TRPCError } from "@trpc/server";
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import postgres from "postgres";
 import { z } from "zod";
+import { IS_MANAGED_PAAS } from "../constants";
 import { dbUrl } from "../db/constants";
 import { assertPublicHealthEndpoint } from "./runtime-scheduler";
 
 export const managedDataPlans = ["starter", "pro", "scale"] as const;
 export type ManagedDataPlan = (typeof managedDataPlans)[number];
+export const managedDataProductKinds = ["postgres"] as const;
 
 export const managedDataPlanPolicy: Record<
 	ManagedDataPlan,
@@ -253,6 +255,7 @@ export const listRegisteredManagedDataProviders = () =>
 
 export const listManagedDataServiceCatalog = () =>
 	Array.from(defaultProviders.keys())
+		.filter((kind) => kind === "postgres")
 		.sort()
 		.map((kind) => {
 			const capabilities = getDefaultManagedDataProvider(kind).capabilities;
@@ -873,6 +876,12 @@ export const reconcileManagedDataResource = async (
 export const provisionManagedDataResource = async (
 	input: ManagedDataProvisionInput,
 ) => {
+	if (input.kind !== "postgres") {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Only managed PostgreSQL is available",
+		});
+	}
 	await validateOwnership(input);
 	const provider = getDefaultManagedDataProvider(input.kind);
 	if (!provider.kinds.has(input.kind)) {
@@ -893,8 +902,8 @@ export const provisionManagedDataResource = async (
 	const providerRegion =
 		providerPolicy.regionMappings?.[region.slug] ?? region.slug;
 	const providerPlan = providerPolicy.planMappings[input.plan];
-	const pitrEnabled = input.kind !== "redis";
-	const poolingEnabled = input.kind !== "redis";
+	const pitrEnabled = true;
+	const poolingEnabled = true;
 	const backupEnabled = true;
 	for (const [required, supported, capability] of [
 		[
@@ -1227,6 +1236,11 @@ export const configureManagedDataProviderFromEnvironment = () => {
 	const baseUrl = process.env.MANAGED_DATA_PROVIDER_URL;
 	const token = process.env.MANAGED_DATA_PROVIDER_TOKEN;
 	if (!baseUrl || !token) return null;
+	if (IS_MANAGED_PAAS && process.env.NODE_ENV === "production") {
+		throw new Error(
+			"Managed production supports Neon only; generic managed data providers are disabled",
+		);
+	}
 	const capabilitiesValue = process.env.MANAGED_DATA_PROVIDER_CAPABILITIES;
 	if (!capabilitiesValue) {
 		throw new Error(
@@ -1250,7 +1264,7 @@ export const configureManagedDataProviderFromEnvironment = () => {
 		name: process.env.MANAGED_DATA_PROVIDER_NAME || "default",
 		baseUrl,
 		token,
-		kinds: ["postgres", "mysql", "mariadb", "mongo", "redis", "libsql"],
+		kinds: ["postgres"],
 		capabilities,
 		validateEndpoint:
 			process.env.MANAGED_DATA_PROVIDER_ALLOW_PRIVATE === "true"
@@ -1264,7 +1278,7 @@ export const configureManagedDataProviderFromEnvironment = () => {
 	const configuredPlans = parseMap(
 		process.env.MANAGED_DATA_PROVIDER_PLAN_MAPPINGS,
 	);
-	registerManagedDataProvider(provider, provider.kinds, {
+	registerManagedDataProvider(provider, ["postgres"], {
 		planMappings: {
 			starter: configuredPlans.starter || "starter",
 			pro: configuredPlans.pro || "pro",

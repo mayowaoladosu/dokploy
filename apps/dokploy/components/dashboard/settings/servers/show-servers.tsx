@@ -36,7 +36,7 @@ import { ShowServerActions } from "./actions/show-server-actions";
 import { HandleServers } from "./handle-servers";
 import { SetupServer } from "./setup-server";
 import { ShowMonitoringModal } from "./show-monitoring-modal";
-import { WelcomeSubscription } from "./welcome-stripe/welcome-subscription";
+import { WelcomeSubscription } from "./welcome-cloud/welcome-subscription";
 
 export const ShowServers = () => {
 	const router = useRouter();
@@ -46,7 +46,7 @@ export const ShowServers = () => {
 	const { data: sshKeys } = api.sshKey.all.useQuery();
 	const { data: isCloud } = api.settings.isCloud.useQuery();
 	const { data: canCreateMoreServers } =
-		api.stripe.canCreateMoreServers.useQuery();
+		api.polar.canCreateMoreServers.useQuery();
 	const { data: permissions } = api.user.getPermissions.useQuery();
 
 	return (

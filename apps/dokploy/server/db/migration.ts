@@ -6,15 +6,14 @@ import postgres from "postgres";
 const sql = postgres(dbUrl, { max: 1 });
 const db = drizzle(sql);
 
-export const migration = async () =>
-	await migrate(db, { migrationsFolder: "drizzle" })
-		.then(() => {
-			console.log("Migration complete");
-			sql.end();
-		})
-		.catch((error) => {
-			console.log("Migration failed", error);
-		})
-		.finally(() => {
-			sql.end();
-		});
+export const migration = async () => {
+	try {
+		await migrate(db, { migrationsFolder: "drizzle" });
+		console.log("Migration complete");
+	} catch (error) {
+		console.error("Migration failed", error);
+		throw error;
+	} finally {
+		await sql.end();
+	}
+};

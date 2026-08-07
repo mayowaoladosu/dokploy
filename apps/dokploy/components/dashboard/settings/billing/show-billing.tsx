@@ -1,21 +1,21 @@
-import { loadStripe } from "@stripe/stripe-js";
-import clsx from "clsx";
 import {
-	AlertTriangle,
+	ArrowUpRight,
 	Bell,
-	CheckIcon,
+	Check,
 	CreditCard,
+	Database,
 	FileText,
+	Gauge,
 	Loader2,
-	MinusIcon,
-	PlusIcon,
+	Minus,
+	Plus,
 	ShieldCheck,
+	Sparkles,
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { DialogAction } from "@/components/shared/dialog-action";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -33,48 +33,12 @@ import {
 	DialogTitle,
 	DialogTrigger,
 } from "@/components/ui/dialog";
-import { NumberInput } from "@/components/ui/input";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
-
-const stripePromise = loadStripe(
-	process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY!,
-);
-
-/** Precio legacy / Hobby: $4.50/mo primer servidor, $3.50 siguientes; anual $45.90 primero, $35.70 siguientes. */
-export const calculatePrice = (count: number, isAnnual = false) => {
-	if (isAnnual) {
-		if (count <= 1) return 45.9;
-		return 35.7 * count;
-	}
-	if (count <= 1) return 4.5;
-	return count * 3.5;
-};
-
-/** Hobby: $4.50/mo per server; annual 20% off = $43.20/yr per server (4.5 * 12 * 0.8). */
-export const calculatePriceHobby = (count: number, isAnnual = false) => {
-	const perServerMonthly = 4.5;
-	const perServerAnnual = 43.2; // 4.5 * 12 * 0.8
-	return isAnnual ? count * perServerAnnual : count * perServerMonthly;
-};
-
-/** Startup: 3 servers included ($15/mo); extra servers $4.50/mo each. Annual 20% off. */
-export const STARTUP_SERVERS_INCLUDED = 3;
-export const calculatePriceStartup = (count: number, isAnnual = false) => {
-	const baseMonthly = 15;
-	const extraMonthly = 4.5;
-	const baseAnnual = 144; // 15 * 12 * 0.8
-	const extraAnnual = 43.2; // 4.5 * 12 * 0.8, consistent with Hobby annual
-	if (count <= STARTUP_SERVERS_INCLUDED)
-		return isAnnual ? baseAnnual : baseMonthly;
-	return isAnnual
-		? baseAnnual + (count - STARTUP_SERVERS_INCLUDED) * extraAnnual
-		: baseMonthly + (count - STARTUP_SERVERS_INCLUDED) * extraMonthly;
-};
 
 const navigationItems = [
 	{
@@ -83,1189 +47,556 @@ const navigationItems = [
 		icon: CreditCard,
 	},
 	{
-		name: "Invoices",
+		name: "Orders & invoices",
 		href: "/dashboard/settings/invoices",
 		icon: FileText,
 	},
 ];
 
+const planCopy = {
+	legacy: {
+		label: "Legacy",
+		eyebrow: "Original",
+		features: ["Hosted deployments", "Managed PostgreSQL", "Usage reporting"],
+	},
+	hobby: {
+		label: "Hobby",
+		eyebrow: "For focused projects",
+		features: [
+			"Production deployments",
+			"Managed PostgreSQL",
+			"Metrics, logs, and traces",
+		],
+	},
+	startup: {
+		label: "Startup",
+		eyebrow: "For shipping teams",
+		features: [
+			"Everything in Hobby",
+			"Priority build capacity",
+			"Higher platform limits",
+		],
+	},
+} as const;
+
+const formatMoney = (amount: number, currency: string) =>
+	new Intl.NumberFormat("en-US", {
+		style: "currency",
+		currency: currency.toUpperCase(),
+		maximumFractionDigits: 2,
+	}).format(amount / 100);
+
+const formatDate = (value: string) =>
+	new Intl.DateTimeFormat("en-US", {
+		month: "short",
+		day: "numeric",
+		year: "numeric",
+	}).format(new Date(value));
+
+const normalizeQuantity = (value: string, minimum: number) => {
+	const parsed = Number.parseInt(value, 10);
+	return Number.isSafeInteger(parsed)
+		? Math.min(Math.max(parsed, minimum), 1_000)
+		: minimum;
+};
+
 export const ShowBilling = () => {
 	const router = useRouter();
-	const { data: servers } = api.server.count.useQuery();
-	const { data: admin } = api.user.get.useQuery();
-	const { data, isPending } = api.stripe.getProducts.useQuery();
-	const { mutateAsync: createCheckoutSession } =
-		api.stripe.createCheckoutSession.useMutation();
-
-	const { mutateAsync: createCustomerPortalSession } =
-		api.stripe.createCustomerPortalSession.useMutation();
-	const { mutateAsync: upgradeSubscription, isPending: isUpgrading } =
-		api.stripe.upgradeSubscription.useMutation();
-	const { mutateAsync: updateInvoiceNotifications } =
-		api.stripe.updateInvoiceNotifications.useMutation();
-	const utils = api.useUtils();
-
-	const [hobbyServerQuantity, setHobbyServerQuantity] = useState(1);
-	const [startupServerQuantity, setStartupServerQuantity] = useState(
-		STARTUP_SERVERS_INCLUDED,
-	);
+	const { data, isPending, refetch } = api.polar.getBillingOverview.useQuery();
+	const { mutateAsync: createCheckout, isPending: isCreatingCheckout } =
+		api.polar.createCheckoutSession.useMutation();
+	const { mutateAsync: createPortal, isPending: isCreatingPortal } =
+		api.polar.createCustomerPortalSession.useMutation();
+	const { mutateAsync: changeSubscription, isPending: isChangingSubscription } =
+		api.polar.changeSubscription.useMutation();
+	const { mutateAsync: updateNotifications } =
+		api.polar.updateInvoiceNotifications.useMutation();
 	const [isAnnual, setIsAnnual] = useState(false);
-	const [upgradeTier, setUpgradeTier] = useState<"hobby" | "startup" | null>(
-		null,
-	);
-	const [upgradeServerQty, setUpgradeServerQty] = useState(3);
-	/** Billing interval in the upgrade/update form; synced to current when data loads. */
-	const [updateFormAnnual, setUpdateFormAnnual] = useState(false);
+	const [quantities, setQuantities] = useState({ hobby: 1, startup: 3 });
+	const [pendingTier, setPendingTier] = useState<
+		"legacy" | "hobby" | "startup" | null
+	>(null);
 
 	useEffect(() => {
-		if (data?.isAnnualCurrent !== undefined) {
-			setUpdateFormAnnual(data.isAnnualCurrent);
-		}
-	}, [data?.isAnnualCurrent]);
+		if (router.query.success !== "true") return;
+		toast.success("Checkout complete. Your subscription is being activated.");
+		void refetch();
+		void router.replace("/dashboard/settings/billing", undefined, {
+			shallow: true,
+		});
+	}, [refetch, router]);
 
-	const handleCheckout = async (
-		tier: "legacy" | "hobby" | "startup",
-		productId: string,
-	) => {
-		const stripe = await stripePromise;
-		const serverQuantity =
-			tier === "startup"
-				? startupServerQuantity
-				: tier === "hobby"
-					? hobbyServerQuantity
-					: hobbyServerQuantity;
-		if (data && data.subscriptions.length === 0) {
-			createCheckoutSession({
-				tier,
-				productId,
-				serverQuantity,
-				isAnnual,
-			}).then(async (session) => {
-				await stripe?.redirectToCheckout({
-					sessionId: session.sessionId,
-				});
-			});
+	useEffect(() => {
+		if (!data?.subscription) return;
+		setIsAnnual(data.subscription.interval === "year");
+		setQuantities({
+			hobby: Math.max(data.subscription.seats, 1),
+			startup: Math.max(data.subscription.seats, 3),
+		});
+	}, [data?.subscription]);
+
+	const visibleProducts = useMemo(
+		() =>
+			data?.products.filter(
+				(product) => product.interval === (isAnnual ? "year" : "month"),
+			) ?? [],
+		[data?.products, isAnnual],
+	);
+
+	const openPortal = async () => {
+		try {
+			const session = await createPortal();
+			window.location.assign(session.url);
+		} catch {
+			toast.error("The billing portal could not be opened.");
 		}
 	};
 
-	const useNewPricing = data?.hobbyProductId && data?.startupProductId;
-	const products = data?.products.filter((product) => {
-		// @ts-ignore
-		const interval = product?.default_price?.recurring?.interval;
-		return isAnnual ? interval === "year" : interval === "month";
-	});
+	const startCheckout = async (tier: "legacy" | "hobby" | "startup") => {
+		if (data?.subscription) {
+			setPendingTier(tier);
+			try {
+				await changeSubscription({
+					tier,
+					isAnnual,
+					serverQuantity:
+						tier === "startup" ? quantities.startup : quantities.hobby,
+				});
+				await refetch();
+				toast.success("Subscription updated in Polar");
+			} catch {
+				toast.error("Subscription could not be updated.");
+			} finally {
+				setPendingTier(null);
+			}
+			return;
+		}
+		setPendingTier(tier);
+		try {
+			const session = await createCheckout({
+				tier,
+				isAnnual,
+				serverQuantity:
+					tier === "startup" ? quantities.startup : quantities.hobby,
+			});
+			window.location.assign(session.url);
+		} catch {
+			setPendingTier(null);
+			toast.error("Checkout could not be created.");
+		}
+	};
 
-	const isEnterpriseCloud = admin?.user.isEnterpriseCloud ?? false;
-	const maxServers = admin?.user.serversQuantity ?? 1;
-	const percentage = ((servers ?? 0) / maxServers) * 100;
-	const safePercentage = Math.min(percentage, 100);
+	if (isPending) {
+		return (
+			<div className="flex min-h-[45vh] items-center justify-center">
+				<div className="flex items-center gap-3 text-sm text-muted-foreground">
+					<Loader2 className="size-4 animate-spin" />
+					Loading billing state
+				</div>
+			</div>
+		);
+	}
 
 	return (
-		<div className="w-full">
-			<Card className="bg-sidebar p-2.5 rounded-xl max-w-6xl mx-auto">
-				<div className="rounded-xl bg-background shadow-md">
-					<CardHeader className="flex flex-row items-start justify-between">
-						<div>
-							<CardTitle className="text-xl flex flex-row gap-2">
-								<CreditCard className="size-6 text-muted-foreground self-center" />
-								Billing
-							</CardTitle>
-							<CardDescription>
-								Manage your subscription and invoices
-							</CardDescription>
+		<div className="mx-auto w-full max-w-6xl space-y-6">
+			<Card className="relative overflow-hidden border-border/70 bg-background shadow-sm">
+				<div
+					className="pointer-events-none absolute inset-0 opacity-[0.035] dark:opacity-[0.07]"
+					style={{
+						backgroundImage:
+							"linear-gradient(to right,currentColor 1px,transparent 1px),linear-gradient(to bottom,currentColor 1px,transparent 1px)",
+						backgroundSize: "28px 28px",
+					}}
+				/>
+				<CardHeader className="relative flex flex-row items-start justify-between gap-4 border-b pb-5">
+					<div className="space-y-2">
+						<div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+							<span className="size-2 rounded-full bg-emerald-500 shadow-[0_0_0_4px_rgba(16,185,129,0.12)]" />
+							Account control
 						</div>
-						{(admin?.user.stripeSubscriptionId || isEnterpriseCloud) && (
-							<Dialog>
-								<DialogTrigger asChild>
-									<Button variant="outline" size="icon">
-										<Bell className="size-4" />
-									</Button>
-								</DialogTrigger>
-								<DialogContent className="sm:max-w-md">
-									<DialogHeader>
-										<DialogTitle>Notification Settings</DialogTitle>
-										<DialogDescription>
-											Configure your billing email notifications.
-										</DialogDescription>
-									</DialogHeader>
-									<div className="flex items-center justify-between rounded-lg border p-4">
-										<div className="space-y-0.5">
-											<Label htmlFor="invoice-notifications">
-												Invoice Notifications
-											</Label>
-											<p className="text-sm text-muted-foreground">
-												Receive email notifications for payments and failed
-												charges.
-											</p>
-										</div>
-										<Switch
-											id="invoice-notifications"
-											checked={admin?.user.sendInvoiceNotifications ?? false}
-											onCheckedChange={async (checked) => {
-												await updateInvoiceNotifications({
-													enabled: checked,
-												})
-													.then(() => {
-														utils.user.get.invalidate();
-														toast.success(
-															checked
-																? "Invoice notifications enabled"
-																: "Invoice notifications disabled",
-														);
-													})
-													.catch(() => {
-														toast.error(
-															"Failed to update invoice notifications",
-														);
-													});
-											}}
-										/>
-									</div>
-								</DialogContent>
-							</Dialog>
-						)}
-					</CardHeader>
-					<CardContent className="space-y-4 py-4 border-t">
-						<nav className="flex space-x-2 border-b">
-							{navigationItems.map((item) => {
-								const Icon = item.icon;
-								const isActive = router.pathname === item.href;
-								return (
-									<Link
-										key={item.name}
-										href={item.href}
-										className={cn(
-											"flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors",
-											isActive
-												? "border-primary text-primary"
-												: "border-transparent text-muted-foreground hover:text-primary hover:border-muted",
-										)}
-									>
-										<Icon className="h-4 w-4" />
-										{item.name}
-									</Link>
-								);
-							})}
-						</nav>
-
-						<div className="flex flex-col gap-4 w-full mt-6">
-							{(admin?.user.stripeSubscriptionId || isEnterpriseCloud) && (
-								<div className="space-y-2 flex flex-col">
-									<h3 className="text-lg font-medium">Servers Plan</h3>
-									<p className="text-sm text-muted-foreground">
-										You have {servers} server on your plan of{" "}
-										{admin?.user.serversQuantity} servers
-									</p>
-									<div>
-										<Progress value={safePercentage} className="max-w-lg" />
-									</div>
-									{admin && admin.user.serversQuantity! <= (servers ?? 0) && (
-										<div className="flex flex-row gap-4 p-2 bg-yellow-50 dark:bg-yellow-950 rounded-lg items-center">
-											<AlertTriangle className="text-yellow-600 dark:text-yellow-400" />
-											<span className="text-sm text-yellow-600 dark:text-yellow-400">
-												You have reached the maximum number of servers you can
-												create, please upgrade your plan to add more servers.
-											</span>
-										</div>
-									)}
-								</div>
-							)}
-							{isEnterpriseCloud && (
-								<div className="flex items-start gap-3 rounded-xl border border-primary/30 bg-primary/5 p-4 max-w-2xl">
-									<ShieldCheck className="h-6 w-6 text-primary shrink-0 mt-0.5" />
-									<div className="flex flex-col gap-1">
-										<h3 className="text-base font-semibold text-foreground">
-											Enterprise Cloud Plan
-										</h3>
-										<p className="text-sm text-muted-foreground">
-											Your organization is on a managed Enterprise plan. Billing
-											is handled separately — contact your account manager for
-											any changes.
-										</p>
-										{admin?.user.stripeCustomerId && (
-											<Button
-												variant="secondary"
-												className="w-fit mt-2"
-												onClick={async () => {
-													const session = await createCustomerPortalSession();
-													window.open(session.url);
-												}}
-											>
-												Manage Subscription
-											</Button>
-										)}
-									</div>
-								</div>
-							)}
-							{/* Upgrade: solo para usuarios en plan legacy con nuevos planes disponibles */}
-							{!isEnterpriseCloud &&
-								useNewPricing &&
-								data?.currentPlan === "legacy" &&
-								data?.subscriptions?.length > 0 && (
-									<div className="rounded-xl border border-border bg-primary/5 p-4 space-y-4 max-w-2xl">
-										<h3 className="text-lg font-medium">Upgrade your plan</h3>
-										<p className="text-sm text-muted-foreground">
-											You’re on the legacy plan. Switch to Hobby or Startup
-											(same benefits). You can also choose annual billing (20%
-											off). Stripe will prorate the change.
-										</p>
-
-										<span className="text-sm font-medium block">
-											Billing interval
-										</span>
-										<div className="flex gap-2 flex-wrap">
-											<Button
-												variant={!updateFormAnnual ? "default" : "outline"}
-												size="sm"
-												className="min-w-24"
-												onClick={() => setUpdateFormAnnual(false)}
-											>
-												Monthly
-											</Button>
-											<Button
-												variant={updateFormAnnual ? "default" : "outline"}
-												size="sm"
-												className="min-w-24"
-												onClick={() => setUpdateFormAnnual(true)}
-											>
-												Annual (20% off)
-											</Button>
-										</div>
-
-										<span className="text-sm font-medium block">New plan</span>
-										<div className="flex gap-2 flex-wrap">
-											<Button
-												variant={
-													upgradeTier === "hobby" ? "default" : "outline"
-												}
-												size="sm"
-												className="min-w-24"
-												onClick={() => setUpgradeTier("hobby")}
-											>
-												Hobby
-											</Button>
-											<Button
-												variant={
-													upgradeTier === "startup" ? "default" : "outline"
-												}
-												size="sm"
-												className="min-w-24"
-												onClick={() => setUpgradeTier("startup")}
-											>
-												Startup
-											</Button>
-										</div>
-
-										{upgradeTier && (
-											<div className="flex flex-col gap-3 pt-1">
-												<span className="text-sm font-medium">
-													Servers
-													{upgradeTier === "startup" &&
-														` (min. ${STARTUP_SERVERS_INCLUDED})`}
-												</span>
-												<div className="flex items-center gap-2 w-fit">
-													<Button
-														variant="outline"
-														size="icon"
-														className="h-8 w-8"
-														disabled={
-															upgradeTier === "startup"
-																? upgradeServerQty <= STARTUP_SERVERS_INCLUDED
-																: upgradeServerQty <= 1
-														}
-														onClick={() =>
-															setUpgradeServerQty((q) =>
-																Math.max(
-																	upgradeTier === "startup"
-																		? STARTUP_SERVERS_INCLUDED
-																		: 1,
-																	q - 1,
-																),
-															)
-														}
-													>
-														<MinusIcon className="h-4 w-4" />
-													</Button>
-													<NumberInput
-														value={upgradeServerQty}
-														onChange={(e) => {
-															const v =
-																Number((e.target as HTMLInputElement).value) ||
-																0;
-															setUpgradeServerQty(
-																Math.max(
-																	upgradeTier === "startup"
-																		? STARTUP_SERVERS_INCLUDED
-																		: 1,
-																	v,
-																),
-															);
-														}}
-														className="w-20 h-8"
-													/>
-													<Button
-														variant="outline"
-														size="icon"
-														className="h-8 w-8"
-														onClick={() => setUpgradeServerQty((q) => q + 1)}
-													>
-														<PlusIcon className="h-4 w-4" />
-													</Button>
-												</div>
-												<p className="text-sm text-muted-foreground">
-													{upgradeTier === "hobby"
-														? `$${calculatePriceHobby(upgradeServerQty, updateFormAnnual).toFixed(2)} per ${updateFormAnnual ? "year" : "month"}`
-														: `$${calculatePriceStartup(upgradeServerQty, updateFormAnnual).toFixed(2)} per ${updateFormAnnual ? "year" : "month"}`}
-												</p>
-												<DialogAction
-													title="Confirm upgrade"
-													description={
-														<div className="space-y-2">
-															<p className="font-medium text-foreground">
-																Current plan: Legacy
-															</p>
-															<p className="font-medium text-foreground">
-																New plan:{" "}
-																{upgradeTier === "startup"
-																	? "Startup"
-																	: "Hobby"}{" "}
-																· {upgradeServerQty} server
-																{upgradeServerQty !== 1 ? "s" : ""} · $
-																{upgradeTier === "hobby"
-																	? calculatePriceHobby(
-																			upgradeServerQty,
-																			updateFormAnnual,
-																		).toFixed(2)
-																	: calculatePriceStartup(
-																			upgradeServerQty,
-																			updateFormAnnual,
-																		).toFixed(2)}
-																/{updateFormAnnual ? "yr" : "mo"} (
-																{updateFormAnnual ? "annual" : "monthly"})
-															</p>
-															<p className="text-sm text-muted-foreground">
-																Stripe will prorate the change.
-															</p>
-														</div>
-													}
-													type="default"
-													onClick={async () => {
-														if (!upgradeTier) return;
-														try {
-															await upgradeSubscription({
-																tier: upgradeTier,
-																serverQuantity: upgradeServerQty,
-																isAnnual: updateFormAnnual,
-															});
-															await utils.stripe.getProducts.invalidate();
-															await utils.user.get.invalidate();
-															setUpgradeTier(null);
-															toast.success("Plan upgraded successfully");
-														} catch {
-															toast.error("Error upgrading plan");
-														}
-													}}
-												>
-													<Button
-														className="w-full sm:w-auto"
-														disabled={
-															isUpgrading ||
-															(upgradeTier === "startup" &&
-																upgradeServerQty < STARTUP_SERVERS_INCLUDED)
-														}
-													>
-														{isUpgrading ? (
-															<>
-																<Loader2 className="mr-2 h-4 w-4 animate-spin" />
-																Upgrading…
-															</>
-														) : (
-															"Upgrade plan"
-														)}
-													</Button>
-												</DialogAction>
-											</div>
-										)}
-									</div>
-								)}
-							{/* Cambiar plan o cantidad de servidores (usuarios en Hobby o Startup; el portal no permite esto) */}
-							{!isEnterpriseCloud &&
-								useNewPricing &&
-								(data?.currentPlan === "hobby" ||
-									data?.currentPlan === "startup") &&
-								data?.subscriptions?.length > 0 && (
-									<div className="rounded-xl border border-border bg-primary/5 p-4 space-y-4 max-w-2xl">
-										<h3 className="text-lg font-medium">
-											Change plan or number of servers
-										</h3>
-										<p className="text-sm text-muted-foreground">
-											Your current plan:{" "}
-											<span className="font-medium text-foreground">
-												{data?.currentPlan === "startup" ? "Startup" : "Hobby"}
-											</span>
-											{" · "}
-											<span className="font-medium text-foreground">
-												{admin?.user.serversQuantity ?? 0} server
-												{(admin?.user.serversQuantity ?? 0) !== 1 ? "s" : ""}
-											</span>
-											{data?.currentPriceAmount != null && (
-												<>
-													{" · "}
-													<span className="font-medium text-foreground">
-														${data.currentPriceAmount.toFixed(2)}/
-														{data?.isAnnualCurrent ? "yr" : "mo"}
-													</span>
-												</>
-											)}{" "}
-											({data?.isAnnualCurrent ? "annual" : "monthly"} billing).
-										</p>
-										<p className="text-sm text-muted-foreground">
-											Add more servers, switch between Hobby and Startup, or
-											change to annual billing (20% off). Stripe will prorate
-											the change.
-										</p>
-
-										<span className="text-sm font-medium block">
-											Billing interval
-										</span>
-										<div className="flex gap-2 flex-wrap">
-											<Button
-												variant={!updateFormAnnual ? "default" : "outline"}
-												size="sm"
-												className="min-w-24"
-												onClick={() => setUpdateFormAnnual(false)}
-											>
-												Monthly
-											</Button>
-											<Button
-												variant={updateFormAnnual ? "default" : "outline"}
-												size="sm"
-												className="min-w-24"
-												onClick={() => setUpdateFormAnnual(true)}
-											>
-												Annual (20% off)
-											</Button>
-										</div>
-
-										<span className="text-sm font-medium block">Plan</span>
-										<div className="flex gap-2 flex-wrap">
-											<Button
-												variant={
-													upgradeTier === "hobby" ? "default" : "outline"
-												}
-												size="sm"
-												className="min-w-24"
-												onClick={() => setUpgradeTier("hobby")}
-											>
-												Hobby
-											</Button>
-											<Button
-												variant={
-													upgradeTier === "startup" ? "default" : "outline"
-												}
-												size="sm"
-												className="min-w-24"
-												onClick={() => setUpgradeTier("startup")}
-											>
-												Startup
-											</Button>
-										</div>
-
-										{upgradeTier && (
-											<div className="flex flex-col gap-3 pt-1">
-												<span className="text-sm font-medium">
-													Servers
-													{upgradeTier === "startup" &&
-														` (min. ${STARTUP_SERVERS_INCLUDED})`}
-												</span>
-												<div className="flex items-center gap-2 w-fit">
-													<Button
-														variant="outline"
-														size="icon"
-														className="h-8 w-8"
-														disabled={
-															upgradeTier === "startup"
-																? upgradeServerQty <= STARTUP_SERVERS_INCLUDED
-																: upgradeServerQty <= 1
-														}
-														onClick={() =>
-															setUpgradeServerQty((q) =>
-																Math.max(
-																	upgradeTier === "startup"
-																		? STARTUP_SERVERS_INCLUDED
-																		: 1,
-																	q - 1,
-																),
-															)
-														}
-													>
-														<MinusIcon className="h-4 w-4" />
-													</Button>
-													<NumberInput
-														value={upgradeServerQty}
-														onChange={(e) => {
-															const v =
-																Number((e.target as HTMLInputElement).value) ||
-																0;
-															setUpgradeServerQty(
-																Math.max(
-																	upgradeTier === "startup"
-																		? STARTUP_SERVERS_INCLUDED
-																		: 1,
-																	v,
-																),
-															);
-														}}
-														className="w-20 h-8"
-													/>
-													<Button
-														variant="outline"
-														size="icon"
-														className="h-8 w-8"
-														onClick={() => setUpgradeServerQty((q) => q + 1)}
-													>
-														<PlusIcon className="h-4 w-4" />
-													</Button>
-												</div>
-												<p className="text-sm text-muted-foreground">
-													{upgradeTier === "hobby"
-														? `$${calculatePriceHobby(upgradeServerQty, updateFormAnnual).toFixed(2)} per ${updateFormAnnual ? "year" : "month"}`
-														: `$${calculatePriceStartup(upgradeServerQty, updateFormAnnual).toFixed(2)} per ${updateFormAnnual ? "year" : "month"}`}
-												</p>
-												<DialogAction
-													title="Confirm plan change"
-													description={
-														<div className="space-y-2">
-															<p className="font-medium text-foreground">
-																Current plan:{" "}
-																{data?.currentPlan === "startup"
-																	? "Startup"
-																	: "Hobby"}{" "}
-																· {admin?.user.serversQuantity ?? 0} server
-																{(admin?.user.serversQuantity ?? 0) !== 1
-																	? "s"
-																	: ""}{" "}
-																·{" "}
-																{data?.currentPriceAmount != null
-																	? `$${data.currentPriceAmount.toFixed(2)}/${data?.isAnnualCurrent ? "yr" : "mo"}`
-																	: ""}{" "}
-																({data?.isAnnualCurrent ? "annual" : "monthly"})
-															</p>
-															<p className="font-medium text-foreground">
-																New plan:{" "}
-																{upgradeTier === "startup"
-																	? "Startup"
-																	: "Hobby"}{" "}
-																· {upgradeServerQty} server
-																{upgradeServerQty !== 1 ? "s" : ""} · $
-																{upgradeTier === "hobby"
-																	? calculatePriceHobby(
-																			upgradeServerQty,
-																			updateFormAnnual,
-																		).toFixed(2)
-																	: calculatePriceStartup(
-																			upgradeServerQty,
-																			updateFormAnnual,
-																		).toFixed(2)}
-																/{updateFormAnnual ? "yr" : "mo"} (
-																{updateFormAnnual ? "annual" : "monthly"})
-															</p>
-															<p className="text-sm text-muted-foreground">
-																Stripe will prorate the change.
-															</p>
-														</div>
-													}
-													type="default"
-													onClick={async () => {
-														if (!upgradeTier) return;
-														try {
-															await upgradeSubscription({
-																tier: upgradeTier,
-																serverQuantity: upgradeServerQty,
-																isAnnual: updateFormAnnual,
-															});
-															await utils.stripe.getProducts.invalidate();
-
-															// add delay of 3 seconds
-															await new Promise((resolve) =>
-																setTimeout(resolve, 3000),
-															);
-															await utils.user.get.invalidate();
-															setUpgradeTier(null);
-															toast.success(
-																"Subscription updated successfully",
-															);
-														} catch {
-															toast.error("Error updating subscription");
-														}
-													}}
-												>
-													<Button
-														className="w-auto"
-														disabled={
-															isUpgrading ||
-															(upgradeTier === "startup" &&
-																upgradeServerQty < STARTUP_SERVERS_INCLUDED)
-														}
-													>
-														{isUpgrading ? (
-															<>
-																<Loader2 className="mr-2 h-4 w-4 animate-spin" />
-																Updating…
-															</>
-														) : (
-															"Update subscription"
-														)}
-													</Button>
-												</DialogAction>
-											</div>
-										)}
-									</div>
-								)}
-							<div className="flex flex-col gap-1.5 mt-4">
-								<span className="text-base text-primary">
-									Need Help? We are here to help you.
-								</span>
-								<span className="text-sm text-muted-foreground">
-									Join to our Discord server and we will help you.
-								</span>
-								<Button className="rounded-full bg-[#5965F2] hover:bg-[#4A55E0] w-fit">
-									<Link
-										href="https://discord.gg/2tBnJ3jDJc"
-										aria-label="Dokploy on GitHub"
-										target="_blank"
-										className="flex flex-row items-center gap-2 text-white"
-									>
-										<svg
-											role="img"
-											className="h-6 w-6 fill-white"
-											viewBox="0 0 24 24"
-											xmlns="http://www.w3.org/2000/svg"
-										>
-											<path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z" />
-										</svg>
-										Join Discord
-									</Link>
+						<CardTitle className="text-2xl tracking-tight">Billing</CardTitle>
+						<CardDescription>
+							Plans, usage access, and payment history are managed securely by
+							Polar.
+						</CardDescription>
+					</div>
+					{data?.subscription && (
+						<Dialog>
+							<DialogTrigger asChild>
+								<Button
+									variant="outline"
+									size="icon"
+									aria-label="Billing notifications"
+								>
+									<Bell className="size-4" />
 								</Button>
-							</div>
-							{isPending ? (
-								<span className="text-base text-muted-foreground flex flex-row gap-3 items-center justify-center min-h-[10vh]">
-									Loading...
-									<Loader2 className="animate-spin" />
-								</span>
-							) : useNewPricing ? (
-								<>
-									<Tabs
-										defaultValue="monthly"
-										value={isAnnual ? "annual" : "monthly"}
-										className="w-full"
-										onValueChange={(e) => setIsAnnual(e === "annual")}
-									>
-										<TabsList className="">
-											<TabsTrigger value="monthly">Monthly</TabsTrigger>
-											<TabsTrigger value="annual">Annual (20% off)</TabsTrigger>
-										</TabsList>
-									</Tabs>
-									<div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-										{/* Hobby */}
-										<section className="flex flex-col rounded-2xl border border-border px-5 py-6 shadow-xs">
-											{isAnnual && (
-												<Badge className="mb-3 w-fit" variant="secondary">
-													20% off
-												</Badge>
-											)}
-											<h3 className="text-xl font-bold tracking-tight text-foreground">
-												Hobby
-											</h3>
-											<p className="mt-1 text-sm text-muted-foreground">
-												Everything an individual developer needs
-											</p>
-											<div className="mt-4">
-												<p className="text-2xl font-semibold text-foreground">
-													$
-													{calculatePriceHobby(
-														hobbyServerQuantity,
-														isAnnual,
-													).toFixed(2)}
-													/{isAnnual ? "yr" : "mo"}
-												</p>
-												<p className="text-xs text-muted-foreground mt-0.5">
-													Add more servers as you&apos;d like for{" "}
-													{isAnnual ? "$43.20/yr" : "$4.50/mo"}
-												</p>
-												{isAnnual && (
-													<p className="text-xs text-muted-foreground mt-2">
-														$
-														{(
-															calculatePriceHobby(hobbyServerQuantity, true) /
-															12
-														).toFixed(2)}
-														/mo
-													</p>
-												)}
-											</div>
-											<ul className="mt-5 flex flex-col gap-2 text-sm text-muted-foreground">
-												{[
-													"Unlimited Deployments",
-													"Unlimited Databases",
-													"Unlimited Applications",
-													"1 Server Included",
-													"1 Organization",
-													"1 User",
-													"2 Environments",
-													"1 Volume Backup per Application",
-													"1 Backup per Database",
-													"1 Scheduled Job per Application",
-													"Community Support (Discord)",
-												].map((f) => (
-													<li key={f} className="flex items-start gap-2">
-														<CheckIcon className="h-4 w-4 shrink-0 text-green-600 dark:text-green-500 mt-0.5" />
-														<span>{f}</span>
-													</li>
-												))}
-											</ul>
-											<div className="mt-6 flex flex-col gap-3">
-												<div className="flex items-center gap-2">
-													<span className="text-sm text-muted-foreground">
-														Servers:
-													</span>
-													<Button
-														disabled={hobbyServerQuantity <= 1}
-														variant="outline"
-														size="icon"
-														onClick={() =>
-															setHobbyServerQuantity((q) => Math.max(1, q - 1))
-														}
-													>
-														<MinusIcon className="h-4 w-4" />
-													</Button>
-													<NumberInput
-														value={hobbyServerQuantity}
-														onChange={(e) =>
-															setHobbyServerQuantity(
-																Math.max(
-																	1,
-																	Number(
-																		(e.target as HTMLInputElement).value,
-																	) || 1,
-																),
-															)
-														}
-														className="text-center"
-													/>
-													<Button
-														variant="outline"
-														size="icon"
-														onClick={() => setHobbyServerQuantity((q) => q + 1)}
-													>
-														<PlusIcon className="h-4 w-4" />
-													</Button>
-												</div>
-												<div className="flex flex-col gap-2 w-full">
-													{admin?.user.stripeCustomerId && (
-														<Button
-															variant="secondary"
-															className="w-full"
-															onClick={async () => {
-																const session =
-																	await createCustomerPortalSession();
-																window.open(session.url);
-															}}
-														>
-															Manage Subscription
-														</Button>
-													)}
-													{!isEnterpriseCloud &&
-														(data?.subscriptions?.length ?? 0) === 0 && (
-															<Button
-																className="w-full"
-																onClick={() =>
-																	handleCheckout("hobby", data!.hobbyProductId!)
-																}
-																disabled={hobbyServerQuantity < 1}
-															>
-																Get Started
-															</Button>
-														)}
-												</div>
-											</div>
-										</section>
+							</DialogTrigger>
+							<DialogContent className="sm:max-w-md">
+								<DialogHeader>
+									<DialogTitle>Billing notifications</DialogTitle>
+									<DialogDescription>
+										Receive payment confirmations and failed-payment alerts.
+									</DialogDescription>
+								</DialogHeader>
+								<div className="flex items-center justify-between rounded-lg border p-4">
+									<Label htmlFor="invoice-notifications" className="space-y-1">
+										<span className="block">Email notifications</span>
+										<span className="block text-xs font-normal text-muted-foreground">
+											Sent to the organization owner.
+										</span>
+									</Label>
+									<Switch
+										id="invoice-notifications"
+										checked={data.invoiceNotifications}
+										onCheckedChange={async (enabled) => {
+											try {
+												await updateNotifications({ enabled });
+												await refetch();
+												toast.success("Notification preference updated");
+											} catch {
+												toast.error(
+													"Notification preference could not be updated",
+												);
+											}
+										}}
+									/>
+								</div>
+							</DialogContent>
+						</Dialog>
+					)}
+				</CardHeader>
+				<CardContent className="relative pt-0">
+					<nav className="flex gap-1 border-b pt-2">
+						{navigationItems.map((item) => {
+							const Icon = item.icon;
+							const active = router.pathname === item.href;
+							return (
+								<Link
+									key={item.href}
+									href={item.href}
+									className={cn(
+										"flex items-center gap-2 border-b-2 px-4 py-3 text-sm font-medium transition-colors",
+										active
+											? "border-foreground text-foreground"
+											: "border-transparent text-muted-foreground hover:text-foreground",
+									)}
+								>
+									<Icon className="size-4" />
+									{item.name}
+								</Link>
+							);
+						})}
+					</nav>
+				</CardContent>
+			</Card>
 
-										{/* Startup - Recommended */}
-										<section className="flex flex-col rounded-2xl border-2 border-primary px-5 py-6 shadow-xs">
-											<div className="mb-3 flex flex-wrap gap-2">
-												<Badge className="w-fit" variant="default">
-													Recommended
-												</Badge>
-												{isAnnual && (
-													<Badge className="w-fit" variant="secondary">
-														20% off
-													</Badge>
-												)}
+			{!data?.configured && (
+				<Card className="border-amber-500/30 bg-amber-500/5">
+					<CardContent className="flex items-start gap-3 p-5">
+						<ShieldCheck className="mt-0.5 size-5 text-amber-600" />
+						<div>
+							<p className="font-medium">Billing is not configured</p>
+							<p className="mt-1 text-sm text-muted-foreground">
+								A platform operator must configure the Polar access token,
+								webhook, and product IDs.
+							</p>
+						</div>
+					</CardContent>
+				</Card>
+			)}
+
+			{data?.isEnterpriseCloud ? (
+				<Card className="border-emerald-500/30 bg-emerald-500/[0.04]">
+					<CardContent className="flex flex-col gap-4 p-6 sm:flex-row sm:items-center sm:justify-between">
+						<div className="flex items-start gap-4">
+							<div className="rounded-full border border-emerald-500/30 bg-emerald-500/10 p-2.5">
+								<ShieldCheck className="size-5 text-emerald-600" />
+							</div>
+							<div>
+								<p className="font-semibold">Enterprise Cloud</p>
+								<p className="mt-1 text-sm text-muted-foreground">
+									Your contract and limits are managed by the vlyv team.
+								</p>
+							</div>
+						</div>
+						{data.hasCustomer && (
+							<Button
+								variant="outline"
+								onClick={openPortal}
+								disabled={isCreatingPortal}
+							>
+								{isCreatingPortal ? (
+									<Loader2 className="size-4 animate-spin" />
+								) : (
+									<ArrowUpRight className="size-4" />
+								)}
+								Open billing portal
+							</Button>
+						)}
+					</CardContent>
+				</Card>
+			) : data?.subscription ? (
+				<Card className="overflow-hidden border-emerald-500/25">
+					<div className="h-1 bg-emerald-500" />
+					<CardContent className="grid gap-6 p-6 lg:grid-cols-[1.2fr_0.8fr]">
+						<div className="space-y-4">
+							<div className="flex flex-wrap items-center gap-2">
+								<Badge className="bg-emerald-500/10 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-400">
+									{data.subscription.status}
+								</Badge>
+								<span className="text-xs uppercase tracking-[0.16em] text-muted-foreground">
+									Current subscription
+								</span>
+							</div>
+							<div>
+								<h2 className="text-3xl font-semibold capitalize tracking-tight">
+									{data.currentPlan || "Hosted"}
+								</h2>
+								<p className="mt-1 text-sm text-muted-foreground">
+									{formatMoney(
+										data.subscription.amount,
+										data.subscription.currency,
+									)}{" "}
+									per {data.subscription.interval}
+								</p>
+							</div>
+							<Button onClick={openPortal} disabled={isCreatingPortal}>
+								{isCreatingPortal ? (
+									<Loader2 className="size-4 animate-spin" />
+								) : (
+									<ArrowUpRight className="size-4" />
+								)}
+								Manage in Polar
+							</Button>
+						</div>
+						<div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border bg-border">
+							<div className="bg-background p-4">
+								<Gauge className="mb-3 size-4 text-muted-foreground" />
+								<p className="text-xs text-muted-foreground">Capacity</p>
+								<p className="mt-1 font-semibold">
+									{data.managed
+										? "Managed"
+										: `${data.subscription.seats} server${
+												data.subscription.seats === 1 ? "" : "s"
+											}`}
+								</p>
+							</div>
+							<div className="bg-background p-4">
+								<Sparkles className="mb-3 size-4 text-muted-foreground" />
+								<p className="text-xs text-muted-foreground">
+									{data.subscription.cancelAtPeriodEnd
+										? "Access until"
+										: "Renews"}
+								</p>
+								<p className="mt-1 font-semibold">
+									{formatDate(data.subscription.currentPeriodEnd)}
+								</p>
+							</div>
+						</div>
+					</CardContent>
+				</Card>
+			) : null}
+
+			{data?.configured && !data.isEnterpriseCloud && (
+				<section className="space-y-4">
+					<div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+						<div>
+							<p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+								Catalog
+							</p>
+							<h2 className="mt-1 text-xl font-semibold tracking-tight">
+								{data.subscription ? "Explore your plan" : "Choose a plan"}
+							</h2>
+						</div>
+						<Tabs
+							value={isAnnual ? "annual" : "monthly"}
+							onValueChange={(value) => setIsAnnual(value === "annual")}
+						>
+							<TabsList>
+								<TabsTrigger value="monthly">Monthly</TabsTrigger>
+								<TabsTrigger value="annual">Annual</TabsTrigger>
+							</TabsList>
+						</Tabs>
+					</div>
+
+					<div className="grid gap-4 lg:grid-cols-2">
+						{visibleProducts
+							.filter((product) => product.tier !== "legacy")
+							.map((product) => {
+								const copy = planCopy[product.tier];
+								const quantity =
+									product.tier === "startup"
+										? quantities.startup
+										: quantities.hobby;
+								const seatTier = product.seatTiers.find(
+									(tier) =>
+										quantity >= tier.minSeats &&
+										(tier.maxSeats === null || quantity <= tier.maxSeats),
+								);
+								const total =
+									product.priceAmount == null
+										? null
+										: product.seatBased && !data.managed
+											? (seatTier?.pricePerSeat ?? product.priceAmount) *
+												quantity
+											: product.priceAmount;
+								const isCurrent =
+									data.currentPlan === product.tier &&
+									data.subscription?.interval === product.interval;
+								const capacityUnchanged =
+									data.managed ||
+									!product.seatBased ||
+									data.subscription?.seats === quantity;
+								return (
+									<Card
+										key={product.id}
+										className={cn(
+											"relative overflow-hidden transition-colors",
+											product.tier === "startup" && "border-foreground/30",
+										)}
+									>
+										{product.tier === "startup" && (
+											<div className="absolute right-0 top-0 rounded-bl-lg bg-foreground px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-background">
+												Recommended
 											</div>
-											<h3 className="text-xl font-bold tracking-tight text-foreground">
-												Startup
-											</h3>
-											<p className="mt-1 text-sm text-muted-foreground">
-												Perfect for small to mid-size teams
-											</p>
-											<div className="mt-4">
-												<p className="text-2xl font-semibold text-foreground">
-													$
-													{calculatePriceStartup(
-														startupServerQuantity,
-														isAnnual,
-													).toFixed(2)}
-													/{isAnnual ? "yr" : "mo"}
-												</p>
-												<p className="text-xs text-muted-foreground mt-0.5">
-													Add more servers as you&apos;d like for{" "}
-													{isAnnual ? "$43.20/yr" : "$4.50/mo"}
-												</p>
-												{isAnnual && (
-													<p className="text-xs text-muted-foreground mt-2">
-														$
-														{(
-															calculatePriceStartup(
-																startupServerQuantity,
-																true,
-															) / 12
-														).toFixed(2)}
-														/mo
-													</p>
+										)}
+										<CardHeader>
+											<div className="flex items-center gap-2 text-xs uppercase tracking-[0.14em] text-muted-foreground">
+												{product.tier === "startup" ? (
+													<Sparkles className="size-3.5" />
+												) : (
+													<Database className="size-3.5" />
 												)}
+												{copy.eyebrow}
 											</div>
-											<ul className="mt-5 flex flex-col gap-2 text-sm text-muted-foreground">
-												<li className="flex items-start gap-2 font-medium text-foreground">
-													<CheckIcon className="h-4 w-4 shrink-0 text-green-600 dark:text-green-500 mt-0.5" />
-													All the features of Hobby, plus…
-												</li>
-												{[
-													"3 Servers Included",
-													"3 Organizations",
-													"Unlimited Users",
-													"Unlimited Environments",
-													"Unlimited Volume Backups",
-													"Unlimited Database Backups",
-													"Unlimited Scheduled Jobs",
-													"Basic RBAC (Admin, Developer)",
-													"2FA",
-													"Email and Chat Support",
-												].map((f) => (
-													<li key={f} className="flex items-start gap-2">
-														<CheckIcon className="h-4 w-4 shrink-0 text-green-600 dark:text-green-500 mt-0.5" />
-														<span>{f}</span>
-													</li>
-												))}
-											</ul>
-											<div className="mt-6 flex flex-col gap-3">
-												<div className="flex flex-col gap-2">
-													<span className="text-sm font-medium text-foreground">
-														Servers (min. {STARTUP_SERVERS_INCLUDED} included)
-													</span>
+											<CardTitle className="text-2xl">{copy.label}</CardTitle>
+											<CardDescription className="min-h-10">
+												{product.description ||
+													"A production-ready vlyv subscription."}
+											</CardDescription>
+										</CardHeader>
+										<CardContent className="space-y-5">
+											<div>
+												<span className="text-3xl font-semibold tracking-tight">
+													{total == null
+														? "Custom"
+														: formatMoney(total, product.priceCurrency)}
+												</span>
+												<span className="ml-1 text-sm text-muted-foreground">
+													/{isAnnual ? "year" : "month"}
+												</span>
+											</div>
+											{product.seatBased && !data.managed && (
+												<div className="flex items-center justify-between rounded-lg border bg-muted/30 p-3">
+													<div>
+														<p className="text-sm font-medium">Servers</p>
+														<p className="text-xs text-muted-foreground">
+															Billed as plan capacity
+														</p>
+													</div>
 													<div className="flex items-center gap-2">
 														<Button
-															disabled={
-																startupServerQuantity <=
-																STARTUP_SERVERS_INCLUDED
-															}
 															variant="outline"
 															size="icon"
-															className="h-8 w-8"
+															className="size-8"
+															disabled={
+																quantity <= (product.tier === "startup" ? 3 : 1)
+															}
 															onClick={() =>
-																setStartupServerQuantity((q) =>
-																	Math.max(STARTUP_SERVERS_INCLUDED, q - 1),
-																)
+																setQuantities((current) => ({
+																	...current,
+																	[product.tier]: Math.max(
+																		product.tier === "startup" ? 3 : 1,
+																		quantity - 1,
+																	),
+																}))
 															}
 														>
-															<MinusIcon className="h-4 w-4" />
+															<Minus className="size-3.5" />
 														</Button>
-														<NumberInput
-															value={startupServerQuantity}
-															onChange={(e) =>
-																setStartupServerQuantity(
-																	Math.max(
-																		STARTUP_SERVERS_INCLUDED,
-																		Number(
-																			(e.target as HTMLInputElement).value,
-																		) || STARTUP_SERVERS_INCLUDED,
+														<Input
+															aria-label={`${copy.label} server quantity`}
+															type="number"
+															min={product.tier === "startup" ? 3 : 1}
+															max={1000}
+															className="h-8 w-16 text-center"
+															value={quantity}
+															onChange={(event) =>
+																setQuantities((current) => ({
+																	...current,
+																	[product.tier]: normalizeQuantity(
+																		event.target.value,
+																		product.tier === "startup" ? 3 : 1,
 																	),
-																)
+																}))
 															}
-															className="h-8 text-center"
 														/>
 														<Button
 															variant="outline"
 															size="icon"
-															className="h-8 w-8"
+															className="size-8"
 															onClick={() =>
-																setStartupServerQuantity((q) => q + 1)
+																setQuantities((current) => ({
+																	...current,
+																	[product.tier]: Math.min(quantity + 1, 1000),
+																}))
 															}
 														>
-															<PlusIcon className="h-4 w-4" />
+															<Plus className="size-3.5" />
 														</Button>
 													</div>
 												</div>
-												<div className="flex flex-col gap-2 w-full">
-													{admin?.user.stripeCustomerId && (
-														<Button
-															variant="secondary"
-															className="w-full"
-															onClick={async () => {
-																const session =
-																	await createCustomerPortalSession();
-																window.open(session.url);
-															}}
-														>
-															Manage Subscription
-														</Button>
-													)}
-													{!isEnterpriseCloud &&
-														(data?.subscriptions?.length ?? 0) === 0 && (
-															<Button
-																className="w-full"
-																onClick={() =>
-																	handleCheckout(
-																		"startup",
-																		data!.startupProductId!,
-																	)
-																}
-																disabled={
-																	startupServerQuantity <
-																	STARTUP_SERVERS_INCLUDED
-																}
-															>
-																Get Started
-															</Button>
-														)}
-												</div>
-											</div>
-										</section>
-
-										{/* Enterprise */}
-										<section className="flex flex-col rounded-2xl border border-border px-5 py-6 shadow-xs">
-											<h3 className="text-xl font-bold tracking-tight text-foreground">
-												Enterprise
-											</h3>
-											<p className="mt-1 text-sm text-muted-foreground">
-												For large organizations who want more control
-											</p>
-											<div className="mt-4">
-												<p className="text-2xl font-semibold text-foreground">
-													Contact Sales
-												</p>
-											</div>
-											<ul className="mt-5 flex flex-col gap-2 text-sm text-muted-foreground">
-												<li className="flex items-start gap-2 font-medium text-foreground">
-													<CheckIcon className="h-4 w-4 shrink-0 text-green-600 dark:text-green-500 mt-0.5" />
-													All the features of Startup, plus…
-												</li>
-												{[
-													"Up to Unlimited Servers",
-													"Up to Unlimited Organizations",
-													"Fine-grained RBAC",
-													"Complete Hosting Flexibility",
-													"SSO / SAML (Azure, OKTA, etc)",
-													"Audit Logs",
-													"MSA/SLA",
-													"White Labeling",
-													"Priority Support and Services",
-												].map((f) => (
-													<li key={f} className="flex items-start gap-2">
-														<CheckIcon className="h-4 w-4 shrink-0 text-green-600 dark:text-green-500 mt-0.5" />
-														<span>{f}</span>
+											)}
+											<ul className="space-y-2.5">
+												{copy.features.map((feature) => (
+													<li
+														key={feature}
+														className="flex items-center gap-2 text-sm"
+													>
+														<span className="flex size-5 items-center justify-center rounded-full bg-emerald-500/10">
+															<Check className="size-3 text-emerald-600" />
+														</span>
+														{feature}
 													</li>
 												))}
 											</ul>
-											<Button variant="outline" className="mt-6 w-full" asChild>
-												<Link
-													href="https://dokploy.com/contact"
-													target="_blank"
-													rel="noopener noreferrer"
-												>
-													Contact Sales
-												</Link>
+											<Button
+												className="w-full"
+												variant={
+													product.tier === "startup" ? "default" : "outline"
+												}
+												disabled={
+													isCreatingCheckout ||
+													isChangingSubscription ||
+													isCreatingPortal ||
+													(isCurrent && capacityUnchanged)
+												}
+												onClick={() => startCheckout(product.tier)}
+											>
+												{pendingTier === product.tier ? (
+													<Loader2 className="size-4 animate-spin" />
+												) : data.subscription ? (
+													<ArrowUpRight className="size-4" />
+												) : (
+													<CreditCard className="size-4" />
+												)}
+												{isCurrent && capacityUnchanged
+													? "Current plan"
+													: data.subscription
+														? "Update subscription"
+														: `Choose ${copy.label}`}
 											</Button>
-										</section>
-									</div>
-								</>
-							) : (
-								<>
-									<Tabs
-										defaultValue="monthly"
-										value={isAnnual ? "annual" : "monthly"}
-										className="w-full"
-										onValueChange={(e) => setIsAnnual(e === "annual")}
-									>
-										<TabsList className="grid w-full max-w-56 grid-cols-2">
-											<TabsTrigger value="monthly">Monthly</TabsTrigger>
-											<TabsTrigger value="annual">Annual (20% off)</TabsTrigger>
-										</TabsList>
-									</Tabs>
-									{products?.map((product) => {
-										const featured = true;
-										return (
-											<div key={product.id}>
-												<section
-													className={clsx(
-														"flex flex-col rounded-3xl  border-dashed border-2 px-4 max-w-sm",
-														featured
-															? "order-first  border py-8 lg:order-0"
-															: "lg:py-8",
-													)}
-												>
-													{isAnnual && (
-														<div className="mb-4 flex flex-row items-center gap-2">
-															<Badge>Recommended 🚀</Badge>
-														</div>
-													)}
-													{isAnnual ? (
-														<div className="flex flex-row gap-2 items-center">
-															<p className="text-2xl font-semibold tracking-tight text-primary ">
-																${" "}
-																{calculatePrice(
-																	hobbyServerQuantity,
-																	isAnnual,
-																).toFixed(2)}{" "}
-																USD
-															</p>
-															|
-															<p className="text-base font-semibold tracking-tight text-muted-foreground">
-																${" "}
-																{(
-																	calculatePrice(
-																		hobbyServerQuantity,
-																		isAnnual,
-																	) / 12
-																).toFixed(2)}{" "}
-																/ Month USD
-															</p>
-														</div>
-													) : (
-														<p className="text-2xl font-semibold tracking-tight text-primary ">
-															${" "}
-															{calculatePrice(
-																hobbyServerQuantity,
-																isAnnual,
-															).toFixed(2)}{" "}
-															USD
-														</p>
-													)}
-													<h3 className="mt-5 font-medium text-lg text-primary">
-														{product.name}
-													</h3>
-													<p
-														className={clsx(
-															"text-sm",
-															featured ? "text-white" : "text-slate-400",
-														)}
-													>
-														{product.description}
-													</p>
-
-													<ul
-														className={clsx(
-															" mt-4 flex flex-col gap-y-2 text-sm",
-															featured ? "text-white" : "text-slate-200",
-														)}
-													>
-														{[
-															"All the features of Dokploy",
-															"Unlimited deployments",
-															"Self-hosted on your own infrastructure",
-															"Full access to all deployment features",
-															"Dokploy integration",
-															"Backups",
-															"All Incoming features",
-														].map((feature) => (
-															<li
-																key={feature}
-																className="flex text-muted-foreground"
-															>
-																<CheckIcon />
-																<span className="ml-4">{feature}</span>
-															</li>
-														))}
-													</ul>
-													<div className="flex flex-col gap-2 mt-4">
-														<div className="flex items-center gap-2 justify-center">
-															<span className="text-sm text-muted-foreground">
-																{hobbyServerQuantity} Servers
-															</span>
-														</div>
-
-														<div className="flex items-center space-x-2">
-															<Button
-																disabled={hobbyServerQuantity <= 1}
-																variant="outline"
-																onClick={() => {
-																	if (hobbyServerQuantity <= 1) return;
-
-																	setHobbyServerQuantity(
-																		hobbyServerQuantity - 1,
-																	);
-																}}
-															>
-																<MinusIcon className="h-4 w-4" />
-															</Button>
-															<NumberInput
-																value={hobbyServerQuantity}
-																onChange={(e) => {
-																	setHobbyServerQuantity(
-																		e.target.value as unknown as number,
-																	);
-																}}
-															/>
-
-															<Button
-																variant="outline"
-																onClick={() => {
-																	setHobbyServerQuantity(
-																		hobbyServerQuantity + 1,
-																	);
-																}}
-															>
-																<PlusIcon className="h-4 w-4" />
-															</Button>
-														</div>
-														<div className="flex flex-col gap-2 mt-4 w-full">
-															{admin?.user.stripeCustomerId && (
-																<Button
-																	variant="secondary"
-																	className="w-full"
-																	onClick={async () => {
-																		const session =
-																			await createCustomerPortalSession();
-																		window.open(session.url);
-																	}}
-																>
-																	Manage Subscription
-																</Button>
-															)}
-															{!isEnterpriseCloud &&
-																(data?.subscriptions?.length ?? 0) === 0 && (
-																	<Button
-																		className="w-full"
-																		onClick={async () => {
-																			handleCheckout("legacy", product.id);
-																		}}
-																		disabled={hobbyServerQuantity < 1}
-																	>
-																		Subscribe
-																	</Button>
-																)}
-														</div>
-													</div>
-												</section>
-											</div>
-										);
-									})}
-								</>
-							)}
-						</div>
-					</CardContent>
-				</div>
-			</Card>
+										</CardContent>
+									</Card>
+								);
+							})}
+					</div>
+					<p className="text-center text-xs text-muted-foreground">
+						Payments, tax calculation, invoices, and subscription changes are
+						handled by Polar as merchant of record.
+					</p>
+				</section>
+			)}
 		</div>
 	);
 };

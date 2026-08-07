@@ -1,5 +1,4 @@
 import { Download, ExternalLink, FileText, Loader2 } from "lucide-react";
-import type Stripe from "stripe";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,9 +11,9 @@ import {
 } from "@/components/ui/table";
 import { api } from "@/utils/api";
 
-const formatDate = (timestamp: number | null) => {
+const formatDate = (timestamp: string | null) => {
 	if (!timestamp) return "-";
-	return new Date(timestamp * 1000).toLocaleDateString("en-US", {
+	return new Date(timestamp).toLocaleDateString("en-US", {
 		year: "numeric",
 		month: "short",
 		day: "numeric",
@@ -28,16 +27,20 @@ const formatAmount = (amount: number, currency: string) => {
 	}).format(amount / 100);
 };
 
-const getStatusBadge = (status: Stripe.Invoice.Status | null) => {
+const getStatusBadge = (status: string | null) => {
 	const statusConfig: Record<
-		Stripe.Invoice.Status,
+		string,
 		{ label: string; variant: "default" | "secondary" | "destructive" }
 	> = {
 		paid: { label: "Paid", variant: "default" },
-		open: { label: "Open", variant: "secondary" },
 		draft: { label: "Draft", variant: "secondary" },
+		pending: { label: "Pending", variant: "secondary" },
 		void: { label: "Void", variant: "destructive" },
-		uncollectible: { label: "Uncollectible", variant: "destructive" },
+		refunded: { label: "Refunded", variant: "secondary" },
+		partially_refunded: {
+			label: "Partially refunded",
+			variant: "secondary",
+		},
 	};
 
 	if (!status) {
@@ -53,14 +56,14 @@ const getStatusBadge = (status: Stripe.Invoice.Status | null) => {
 };
 
 export const ShowInvoices = () => {
-	const { data: invoices, isPending } = api.stripe.getInvoices.useQuery();
+	const { data: invoices, isPending } = api.polar.getOrders.useQuery();
 
 	return (
 		<div className="space-y-4">
 			{isPending ? (
 				<div className="flex items-center justify-center min-h-[20vh]">
 					<span className="text-base text-muted-foreground flex flex-row gap-3 items-center">
-						Loading invoices...
+						Loading orders...
 						<Loader2 className="animate-spin" />
 					</span>
 				</div>
@@ -71,8 +74,8 @@ export const ShowInvoices = () => {
 							<TableRow>
 								<TableHead>Invoice</TableHead>
 								<TableHead>Date</TableHead>
-								<TableHead>Due Date</TableHead>
-								<TableHead>Amount</TableHead>
+								<TableHead>Total</TableHead>
+								<TableHead>Balance</TableHead>
 								<TableHead>Status</TableHead>
 								<TableHead className="text-right">Actions</TableHead>
 							</TableRow>
@@ -83,34 +86,35 @@ export const ShowInvoices = () => {
 									<TableCell className="font-medium">
 										{invoice.number || invoice.id.slice(0, 12)}
 									</TableCell>
-									<TableCell>{formatDate(invoice.created)}</TableCell>
-									<TableCell>{formatDate(invoice.dueDate)}</TableCell>
+									<TableCell>{formatDate(invoice.createdAt)}</TableCell>
 									<TableCell>
-										{formatAmount(invoice.amountDue, invoice.currency)}
+										{formatAmount(invoice.totalAmount, invoice.currency)}
+									</TableCell>
+									<TableCell>
+										{invoice.amountDue > 0
+											? formatAmount(invoice.amountDue, invoice.currency)
+											: "—"}
 									</TableCell>
 									<TableCell>{getStatusBadge(invoice.status)}</TableCell>
 									<TableCell className="text-right">
 										<div className="flex justify-end gap-2">
-											{invoice.hostedInvoiceUrl && (
+											{invoice.invoiceUrl && (
 												<Button
 													variant="outline"
 													size="sm"
 													onClick={() =>
-														window.open(
-															invoice.hostedInvoiceUrl || "",
-															"_blank",
-														)
+														window.open(invoice.invoiceUrl || "", "_blank")
 													}
 												>
 													<ExternalLink className="h-4 w-4" />
 												</Button>
 											)}
-											{invoice.invoicePdf && (
+											{invoice.receiptUrl && (
 												<Button
 													variant="outline"
 													size="sm"
 													onClick={() =>
-														window.open(invoice.invoicePdf || "", "_blank")
+														window.open(invoice.receiptUrl || "", "_blank")
 													}
 												>
 													<Download className="h-4 w-4" />
@@ -126,9 +130,9 @@ export const ShowInvoices = () => {
 			) : (
 				<div className="flex flex-col items-center justify-center min-h-[20vh] gap-2">
 					<FileText className="size-12 text-muted-foreground" />
-					<p className="text-base text-muted-foreground">No invoices found</p>
+					<p className="text-base text-muted-foreground">No orders found</p>
 					<p className="text-sm text-muted-foreground">
-						Your invoices will appear here once you have a subscription
+						Your Polar orders will appear here after your first payment.
 					</p>
 				</div>
 			)}

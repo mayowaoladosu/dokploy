@@ -81,6 +81,7 @@ import {
 	killDockerBuild,
 	myQueue,
 } from "@/server/queues/queueSetup";
+import { assertBillingEntitlement } from "@/server/utils/billing";
 import { cancelDeployment, deploy } from "@/server/utils/deploy";
 
 const redactManagedApplicationInfrastructure = <T extends object>(
@@ -110,6 +111,7 @@ export const applicationRouter = createTRPCRouter({
 		.input(apiCreateApplication)
 		.mutation(async ({ input, ctx }) => {
 			try {
+				await assertBillingEntitlement(ctx.session.activeOrganizationId);
 				const environment = await findEnvironmentById(input.environmentId);
 				const project = await findProjectById(environment.projectId);
 
@@ -244,6 +246,7 @@ export const applicationRouter = createTRPCRouter({
 	reload: protectedProcedure
 		.input(apiReloadApplication)
 		.mutation(async ({ input, ctx }) => {
+			await assertBillingEntitlement(ctx.session.activeOrganizationId);
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				deployment: ["create"],
 			});
@@ -388,6 +391,7 @@ export const applicationRouter = createTRPCRouter({
 	start: protectedProcedure
 		.input(apiFindOneApplication)
 		.mutation(async ({ input, ctx }) => {
+			await assertBillingEntitlement(ctx.session.activeOrganizationId);
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				deployment: ["create"],
 			});
@@ -419,6 +423,7 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				deployment: ["create"],
 			});
+			await assertBillingEntitlement(ctx.session.activeOrganizationId);
 			const application = await findApplicationById(input.applicationId);
 			const jobData: DeploymentJob = {
 				applicationId: input.applicationId,
@@ -809,6 +814,7 @@ export const applicationRouter = createTRPCRouter({
 	deploy: protectedProcedure
 		.input(apiDeployApplication)
 		.mutation(async ({ input, ctx }) => {
+			await assertBillingEntitlement(ctx.session.activeOrganizationId);
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				deployment: ["create"],
 			});

@@ -1,69 +1,87 @@
-import { findUserById, IS_CLOUD } from "@dokploy/server";
-import { getOrganizationOwnerId } from "@dokploy/server/services/proprietary/sso";
-import Stripe from "stripe";
-import {
-	HOBBY_PRICE_ANNUAL_ID,
-	HOBBY_PRICE_MONTHLY_ID,
-	LEGACY_PRICE_IDS,
-	STARTUP_BASE_PRICE_ANNUAL_ID,
-	STARTUP_BASE_PRICE_MONTHLY_ID,
-} from "@/server/utils/stripe";
+import { IS_HOSTED } from "@dokploy/server";
+import { db } from "@dokploy/server/db";
+import { organization } from "@dokploy/server/db/schema";
+import { TRPCError } from "@trpc/server";
+import { eq } from "drizzle-orm";
 
 export type BillingPlan = "legacy" | "hobby" | "startup";
+const billingPlanRank: Record<BillingPlan, number> = {
+	legacy: 3,
+	startup: 2,
+	hobby: 1,
+};
 
 export const getCurrentPlanForUser = async (
 	userId: string,
 ): Promise<BillingPlan | null> => {
-	if (!IS_CLOUD) return null;
-
-	const owner = await findUserById(userId);
-	if (!owner?.stripeCustomerId) return null;
-
-	const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-		apiVersion: "2024-09-30.acacia",
+	if (!IS_HOSTED) return null;
+	const owned = await db.query.organization.findMany({
+		where: eq(organization.ownerId, userId),
+		columns: {
+			billingPlan: true,
+			billingStatus: true,
+			billingCurrentPeriodEnd: true,
+			billingLastSyncedAt: true,
+		},
 	});
-	const subscriptions = await stripe.subscriptions.list({
-		customer: owner.stripeCustomerId,
-		status: "active",
-		expand: ["data.items.data.price"],
+	const now = Date.now();
+	const activePlans = owned.flatMap((entry) => {
+		if (
+			!(
+				entry.billingStatus === "active" || entry.billingStatus === "trialing"
+			) ||
+			!entry.billingLastSyncedAt ||
+			now - entry.billingLastSyncedAt.getTime() > 24 * 60 * 60 * 1_000 ||
+			(entry.billingCurrentPeriodEnd !== null &&
+				entry.billingCurrentPeriodEnd.getTime() < now) ||
+			!entry.billingPlan
+		) {
+			return [];
+		}
+		return [entry.billingPlan as BillingPlan];
 	});
-	const activeSub = subscriptions.data[0];
-	if (!activeSub) return null;
-
-	const priceIds = activeSub.items.data.map(
-		(item) => (item.price as Stripe.Price).id,
+	return (
+		activePlans.sort(
+			(left, right) => billingPlanRank[right] - billingPlanRank[left],
+		)[0] ?? null
 	);
-
-	if (
-		priceIds.some(
-			(id) =>
-				id === STARTUP_BASE_PRICE_MONTHLY_ID ||
-				id === STARTUP_BASE_PRICE_ANNUAL_ID,
-		)
-	) {
-		return "startup";
-	}
-	if (
-		priceIds.some(
-			(id) => id === HOBBY_PRICE_MONTHLY_ID || id === HOBBY_PRICE_ANNUAL_ID,
-		)
-	) {
-		return "hobby";
-	}
-	if (priceIds.some((id) => LEGACY_PRICE_IDS.includes(id))) {
-		return "legacy";
-	}
-
-	return null;
 };
 
 export const getCurrentPlan = async (
 	organizationId: string,
 ): Promise<BillingPlan | null> => {
-	if (!IS_CLOUD) return null;
+	if (!IS_HOSTED) return null;
+	const current = await db.query.organization.findFirst({
+		where: eq(organization.id, organizationId),
+		columns: {
+			billingPlan: true,
+			billingStatus: true,
+			billingCurrentPeriodEnd: true,
+			billingLastSyncedAt: true,
+		},
+	});
+	const now = Date.now();
+	if (
+		!current ||
+		!(
+			current.billingStatus === "active" || current.billingStatus === "trialing"
+		) ||
+		!current.billingLastSyncedAt ||
+		now - current.billingLastSyncedAt.getTime() > 24 * 60 * 60 * 1_000 ||
+		(current.billingCurrentPeriodEnd !== null &&
+			current.billingCurrentPeriodEnd.getTime() < now)
+	) {
+		return null;
+	}
+	return current.billingPlan as BillingPlan | null;
+};
 
-	const ownerId = await getOrganizationOwnerId(organizationId);
-	if (!ownerId) return null;
-
-	return getCurrentPlanForUser(ownerId);
+export const assertBillingEntitlement = async (organizationId: string) => {
+	if (!IS_HOSTED) return;
+	if (!(await getCurrentPlan(organizationId))) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message: "An active subscription is required for this action.",
+		});
+	}
 };

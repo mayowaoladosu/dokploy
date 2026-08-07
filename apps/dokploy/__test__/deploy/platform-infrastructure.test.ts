@@ -117,6 +117,8 @@ describe("Kubernetes cluster readiness", () => {
 					certManagerEnabled: true,
 					certIssuerName: "letsencrypt-production",
 					externalDnsEnabled: true,
+					multiZoneEnabled: true,
+					readOnlyRootFilesystem: true,
 				},
 			}),
 		).not.toThrow();

@@ -1,4 +1,4 @@
-import { IS_CLOUD } from "@dokploy/server/constants";
+import { IS_HOSTED } from "@dokploy/server/constants";
 import { validateRequest } from "@dokploy/server/lib/auth";
 import { hasPermission } from "@dokploy/server/services/permission";
 import { Loader2 } from "lucide-react";
@@ -91,7 +91,7 @@ Dashboard.getLayout = (page: ReactElement) => {
 export async function getServerSideProps(
 	ctx: GetServerSidePropsContext<{ serviceId: string }>,
 ) {
-	if (IS_CLOUD) {
+	if (IS_HOSTED) {
 		return {
 			redirect: {
 				permanent: false,

@@ -49,7 +49,7 @@ import { securityRouter } from "./routers/security";
 import { serverRouter } from "./routers/server";
 import { settingsRouter } from "./routers/settings";
 import { sshRouter } from "./routers/ssh-key";
-import { stripeRouter } from "./routers/stripe";
+import { polarRouter } from "./routers/polar";
 import { swarmRouter } from "./routers/swarm";
 import { tagRouter } from "./routers/tag";
 import { usageRouter } from "./routers/usage";
@@ -99,7 +99,7 @@ export const appRouter = createTRPCRouter({
 	server: serverRouter,
 	settings: settingsRouter,
 	sshKey: sshRouter,
-	stripe: stripeRouter,
+	polar: polarRouter,
 	swarm: swarmRouter,
 	user: userRouter,
 	usage: usageRouter,

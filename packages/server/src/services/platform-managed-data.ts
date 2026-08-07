@@ -10,6 +10,7 @@ import {
 import { TRPCError } from "@trpc/server";
 import { and, eq, ne, sql } from "drizzle-orm";
 import { z } from "zod";
+import { IS_MANAGED_PAAS } from "../constants";
 import {
 	clearManagedDataProviders,
 	createHttpManagedDataProvider,
@@ -20,7 +21,6 @@ import {
 	removeManagedDataProviderDefaults,
 } from "./managed-data-provider";
 import { createNeonManagedDataProvider } from "./managed-data-providers/neon";
-import { createUpstashManagedDataProvider } from "./managed-data-providers/upstash";
 
 const cleanEndpoint = (
 	value: string,
@@ -56,15 +56,35 @@ const credentialsSchema = {
 		apiKey: z.string().min(1),
 		organizationId: z.string().min(1).optional(),
 	}),
-	upstash: z.object({
-		email: z.string().email(),
-		apiKey: z.string().min(1),
-		productionPackEnabled: z.literal(true),
-	}),
 	http: z.object({ token: z.string().min(1) }),
 };
 
+const assertPostgresOnlyProvider = (config: {
+	type: PlatformManagedDataProvider["type"];
+	kinds: ManagedDataKind[];
+	defaultKinds: ManagedDataKind[];
+}) => {
+	if (
+		config.type === "upstash" ||
+		config.kinds.length !== 1 ||
+		config.kinds[0] !== "postgres" ||
+		config.defaultKinds.some((kind) => kind !== "postgres")
+	) {
+		throw new Error("Managed data providers must be PostgreSQL-only");
+	}
+};
+
+const parseProviderCredentials = (
+	type: PlatformManagedDataProvider["type"],
+	credentials: unknown,
+) => {
+	if (type === "neon") return credentialsSchema.neon.parse(credentials);
+	if (type === "http") return credentialsSchema.http.parse(credentials);
+	throw new Error("Only Neon and PostgreSQL HTTP providers are supported");
+};
+
 const providerFor = (config: PlatformManagedDataProvider) => {
+	assertPostgresOnlyProvider(config);
 	let credentials: unknown;
 	try {
 		credentials = JSON.parse(config.credentials);
@@ -79,19 +99,6 @@ const providerFor = (config: PlatformManagedDataProvider) => {
 			name: config.managedDataProviderId,
 			apiKey: parsed.apiKey,
 			organizationId: parsed.organizationId,
-			apiBase: config.baseUrl,
-			validateEndpoint: config.metadata.allowPrivateEndpoint
-				? async () => undefined
-				: undefined,
-		});
-	}
-	if (config.type === "upstash") {
-		const parsed = credentialsSchema.upstash.parse(credentials);
-		return createUpstashManagedDataProvider({
-			name: config.managedDataProviderId,
-			email: parsed.email,
-			apiKey: parsed.apiKey,
-			productionPackEnabled: parsed.productionPackEnabled,
 			apiBase: config.baseUrl,
 			validateEndpoint: config.metadata.allowPrivateEndpoint
 				? async () => undefined
@@ -130,7 +137,7 @@ export const redactPlatformManagedDataProvider = <
 
 export const createPlatformManagedDataProvider = async (input: {
 	name: string;
-	type: "neon" | "upstash" | "http";
+	type: "neon" | "http";
 	baseUrl: string;
 	credentials: Record<string, unknown>;
 	kinds: ManagedDataKind[];
@@ -138,6 +145,16 @@ export const createPlatformManagedDataProvider = async (input: {
 	capabilities: ManagedDataProviderCapabilities;
 	metadata?: ManagedDataProviderMetadata;
 }) => {
+	if (
+		IS_MANAGED_PAAS &&
+		process.env.NODE_ENV === "production" &&
+		input.type !== "neon"
+	) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Managed production supports Neon providers only",
+		});
+	}
 	const metadata = input.metadata ?? {};
 	const endpoint = cleanEndpoint(input.baseUrl, metadata);
 	const capabilities = capabilitySchema.parse(input.capabilities);
@@ -149,6 +166,7 @@ export const createPlatformManagedDataProvider = async (input: {
 	}
 	const kinds = Array.from(new Set(input.kinds));
 	const defaultKinds = Array.from(new Set(input.defaultKinds ?? []));
+	assertPostgresOnlyProvider({ ...input, kinds, defaultKinds });
 	if (
 		kinds.length === 0 ||
 		defaultKinds.some((kind) => !kinds.includes(kind))
@@ -158,7 +176,7 @@ export const createPlatformManagedDataProvider = async (input: {
 			message: "Managed data provider kinds are invalid",
 		});
 	}
-	credentialsSchema[input.type].parse(input.credentials);
+	parseProviderCredentials(input.type, input.credentials);
 	const [created] = await db
 		.insert(platformManagedDataProviders)
 		.values({
@@ -235,6 +253,7 @@ export const updatePlatformManagedDataProvider = async (
 	const metadata = input.metadata ?? current.metadata;
 	const kinds = input.kinds ?? current.kinds;
 	const defaultKinds = input.defaultKinds ?? current.defaultKinds;
+	assertPostgresOnlyProvider({ ...current, kinds, defaultKinds });
 	if (defaultKinds.some((kind) => !kinds.includes(kind))) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
@@ -242,7 +261,7 @@ export const updatePlatformManagedDataProvider = async (
 		});
 	}
 	const credentials = input.credentials
-		? JSON.stringify(credentialsSchema[current.type].parse(input.credentials))
+		? JSON.stringify(parseProviderCredentials(current.type, input.credentials))
 		: current.credentials;
 	const capabilities = capabilitySchema.parse(
 		input.capabilities ?? current.capabilities,
@@ -386,6 +405,13 @@ export const loadPlatformManagedDataProviders = async () => {
 	}> = [];
 	for (const config of configs) {
 		try {
+			if (
+				IS_MANAGED_PAAS &&
+				process.env.NODE_ENV === "production" &&
+				config.type !== "neon"
+			) {
+				throw new Error("Managed production supports Neon providers only");
+			}
 			const provider = providerFor(config);
 			if (config.status === "active") await provider.verify();
 			verified.push({ config, provider });
@@ -467,34 +493,6 @@ export const configureFirstPartyManagedDataProvidersFromEnvironment = () => {
 				? z
 						.record(z.string(), z.string().min(1))
 						.parse(JSON.parse(process.env.NEON_REGION_MAPPINGS))
-				: undefined,
-		});
-		configured += 1;
-	}
-	if (
-		process.env.UPSTASH_EMAIL?.trim() &&
-		process.env.UPSTASH_API_KEY?.trim()
-	) {
-		const provider = createUpstashManagedDataProvider({
-			name: process.env.UPSTASH_PROVIDER_NAME || "upstash",
-			email: process.env.UPSTASH_EMAIL,
-			apiKey: process.env.UPSTASH_API_KEY,
-			apiBase:
-				process.env.UPSTASH_API_URL?.trim() ||
-				"https://api.upstash.com/v2/redis",
-			productionPackEnabled:
-				process.env.UPSTASH_PRODUCTION_PACK_ENABLED === "true",
-		});
-		registerManagedDataProvider(provider, ["redis"], {
-			planMappings: {
-				starter: "fixed_1gb",
-				pro: "fixed_10gb",
-				scale: "fixed_100gb",
-			},
-			regionMappings: process.env.UPSTASH_REGION_MAPPINGS
-				? z
-						.record(z.string(), z.string().min(1))
-						.parse(JSON.parse(process.env.UPSTASH_REGION_MAPPINGS))
 				: undefined,
 		});
 		configured += 1;

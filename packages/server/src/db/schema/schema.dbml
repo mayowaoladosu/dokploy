@@ -699,6 +699,14 @@ table organization {
   created_at timestamp [not null]
   metadata text
   owner_id text [not null]
+  polar_customer_id text [unique]
+  polar_subscription_id text
+  billing_plan text
+  billing_status text
+  billing_seats integer [not null, default: 0]
+  billing_current_period_end timestamp
+  billing_last_synced_at timestamp
+  billing_last_event_at timestamp
 }
 
 table port {
@@ -750,6 +758,8 @@ table preview_deployments {
   pullRequestTitle text [not null]
   pullRequestCommentId text [not null]
   previewStatus applicationStatus [not null, default: 'idle']
+  billing_suspended boolean [not null, default: false]
+  billing_suspended_replicas integer
   appName text [not null, unique]
   applicationId text [not null]
   domainId text
@@ -947,8 +957,6 @@ table user_temp {
   cleanupCacheApplications boolean [not null, default: false]
   cleanupCacheOnPreviews boolean [not null, default: false]
   cleanupCacheOnCompose boolean [not null, default: false]
-  stripeCustomerId text
-  stripeSubscriptionId text
   serversQuantity integer [not null, default: 0]
 }
 

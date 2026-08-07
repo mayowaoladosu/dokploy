@@ -1,3 +1,4 @@
+import { IS_MANAGED_PAAS } from "@dokploy/server/constants";
 import { decryptValue, encryptValue } from "@dokploy/server/lib/encryption";
 import { generatePassword } from "@dokploy/server/templates";
 import { faker } from "@faker-js/faker";
@@ -19,7 +20,8 @@ export const encryptedText = customType<{ data: string; driverData: string }>({
 	fromDriver(value) {
 		try {
 			return decryptValue(value);
-		} catch {
+		} catch (error) {
+			if (IS_MANAGED_PAAS) throw error;
 			// Fail open so a key mismatch (e.g. restoring a backup under a
 			// different BETTER_AUTH_SECRET) degrades to showing ciphertext
 			// instead of breaking every query that touches the row.

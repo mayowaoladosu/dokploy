@@ -171,7 +171,9 @@ async function cleanupFiles(appName: string) {
 	}
 }
 
-describe(
+const describeUnix = process.platform === "win32" ? describe.skip : describe;
+
+describeUnix(
 	"deployApplication - REAL Execution Tests",
 	() => {
 		let currentAppName: string;

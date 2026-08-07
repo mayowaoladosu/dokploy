@@ -1,4 +1,4 @@
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import {
 	boolean,
 	index,
@@ -87,6 +87,9 @@ export const platformRegions = pgTable(
 	},
 	(table) => [
 		uniqueIndex("platformRegion_slug_unique").on(table.slug),
+		uniqueIndex("platformRegion_default_unique")
+			.on(table.isDefault)
+			.where(sql`${table.isDefault} = true`),
 		index("platformRegion_status_idx").on(table.status),
 	],
 );
@@ -150,6 +153,9 @@ export const platformClusters = pgTable(
 	},
 	(table) => [
 		uniqueIndex("platformCluster_slug_unique").on(table.slug),
+		uniqueIndex("platformCluster_default_unique")
+			.on(table.isDefault)
+			.where(sql`${table.isDefault} = true`),
 		index("platformCluster_regionId_idx").on(table.regionId),
 		index("platformCluster_runtimeStatus_idx").on(table.runtime, table.status),
 	],

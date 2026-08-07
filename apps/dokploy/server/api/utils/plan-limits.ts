@@ -63,7 +63,13 @@ const assertLimitForPlan = (
 	resource: PlanLimitResource,
 	currentCount: number,
 ) => {
-	const limit = PLAN_LIMITS[plan ?? "legacy"][resource];
+	if (!plan) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message: "An active subscription is required for this action.",
+		});
+	}
+	const limit = PLAN_LIMITS[plan][resource];
 
 	if (currentCount >= limit) {
 		throw new TRPCError({

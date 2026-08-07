@@ -1,4 +1,4 @@
-import { IS_CLOUD } from "@dokploy/server/constants";
+import { IS_HOSTED } from "@dokploy/server/constants";
 import { validateRequest } from "@dokploy/server/lib/auth";
 import { createServerSideHelpers } from "@trpc/react-query/server";
 import type { GetServerSidePropsContext } from "next";
@@ -20,7 +20,7 @@ Page.getLayout = (page: ReactElement) => {
 export async function getServerSideProps(
 	ctx: GetServerSidePropsContext<{ serviceId: string }>,
 ) {
-	if (!IS_CLOUD) {
+	if (!IS_HOSTED) {
 		return {
 			redirect: {
 				permanent: false,

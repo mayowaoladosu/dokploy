@@ -148,6 +148,37 @@ describe("Kubernetes observability collector", () => {
 		);
 	});
 
+	it("exports every signal and node log through one authenticated OTLP backend", () => {
+		const unified = buildKubernetesObservabilityCollectorManifests({
+			image: `otel/opentelemetry-collector-contrib@sha256:${"b".repeat(64)}`,
+			otlp: {
+				endpoint: "https://otlp-gateway.grafana.net/otlp",
+				headers: { Authorization: "Basic instance-token" },
+			},
+		});
+		const config = findManifest(unified, "ConfigMap");
+		const secret = findManifest(unified, "Secret");
+		const collector = JSON.parse(config.data["collector.json"]);
+		const logAgent = JSON.parse(config.data["log-agent.json"]);
+
+		expect(secret.data.OTLP_HEADER_0).toBe(
+			Buffer.from("Basic instance-token").toString("base64"),
+		);
+		expect(JSON.stringify(config)).not.toContain("instance-token");
+		expect(collector.exporters["otlphttp/platform"]).toEqual({
+			endpoint: "https://otlp-gateway.grafana.net/otlp",
+			headers: { Authorization: "${env:OTLP_HEADER_0}" },
+		});
+		for (const signal of ["metrics", "logs", "traces"]) {
+			expect(collector.service.pipelines[signal].exporters).toContain(
+				"otlphttp/platform",
+			);
+		}
+		expect(logAgent.exporters["otlphttp/logs"]).toEqual(
+			collector.exporters["otlphttp/platform"],
+		);
+	});
+
 	it("rejects mutable images and empty backends", () => {
 		expect(() =>
 			buildKubernetesObservabilityCollectorManifests({

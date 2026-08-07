@@ -124,6 +124,44 @@ export const ensureBootstrapPlatformAdmin = async (
 };
 
 export const assertManagedPlatformConfiguration = () => {
+	if (IS_MANAGED_PAAS && process.env.NODE_ENV === "production") {
+		const databaseUrl = process.env.DATABASE_URL?.trim();
+		if (
+			!databaseUrl ||
+			!(
+				databaseUrl.startsWith("postgres://") ||
+				databaseUrl.startsWith("postgresql://")
+			)
+		) {
+			throw new Error("Managed mode requires a PostgreSQL DATABASE_URL");
+		}
+		if ((process.env.BETTER_AUTH_SECRET?.length ?? 0) < 32) {
+			throw new Error(
+				"Managed mode requires BETTER_AUTH_SECRET with at least 32 characters",
+			);
+		}
+		if (
+			(process.env.ENCRYPTION_KEY?.length ?? 0) < 32 &&
+			!process.env.ENCRYPTION_KEY_FILE?.trim()
+		) {
+			throw new Error(
+				"Managed mode requires ENCRYPTION_KEY with at least 32 characters or ENCRYPTION_KEY_FILE",
+			);
+		}
+		const smtpRequired = [
+			"SMTP_FROM_ADDRESS",
+			"SMTP_SERVER",
+			"SMTP_PORT",
+			"SMTP_USERNAME",
+			"SMTP_PASSWORD",
+		] as const;
+		const missingSmtp = smtpRequired.filter(
+			(name) => !process.env[name]?.trim(),
+		);
+		if (missingSmtp.length > 0) {
+			throw new Error(`Managed mode requires ${missingSmtp.join(", ")}`);
+		}
+	}
 	if (
 		IS_MANAGED_PAAS &&
 		process.env.NODE_ENV === "production" &&

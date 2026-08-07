@@ -18,7 +18,7 @@ const navigationItems = [
 		icon: CreditCard,
 	},
 	{
-		name: "Invoices",
+		name: "Orders & invoices",
 		href: "/dashboard/settings/invoices",
 		icon: FileText,
 	},

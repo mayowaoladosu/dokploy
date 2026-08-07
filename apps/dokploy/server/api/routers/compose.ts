@@ -78,6 +78,7 @@ import {
 	killDockerBuild,
 	myQueue,
 } from "@/server/queues/queueSetup";
+import { assertBillingEntitlement } from "@/server/utils/billing";
 import { cancelDeployment, deploy } from "@/server/utils/deploy";
 import { generatePassword } from "@/templates/utils";
 import {
@@ -96,6 +97,7 @@ export const composeRouter = createTRPCRouter({
 		.input(apiCreateCompose)
 		.mutation(async ({ ctx, input }) => {
 			try {
+				await assertBillingEntitlement(ctx.session.activeOrganizationId);
 				const environment = await findEnvironmentById(input.environmentId);
 				const project = await findProjectById(environment.projectId);
 
@@ -426,6 +428,7 @@ export const composeRouter = createTRPCRouter({
 	deploy: protectedProcedure
 		.input(apiDeployCompose)
 		.mutation(async ({ input, ctx }) => {
+			await assertBillingEntitlement(ctx.session.activeOrganizationId);
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				deployment: ["create"],
 			});
@@ -476,6 +479,7 @@ export const composeRouter = createTRPCRouter({
 	redeploy: protectedProcedure
 		.input(apiRedeployCompose)
 		.mutation(async ({ input, ctx }) => {
+			await assertBillingEntitlement(ctx.session.activeOrganizationId);
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				deployment: ["create"],
 			});
@@ -540,6 +544,7 @@ export const composeRouter = createTRPCRouter({
 	start: protectedProcedure
 		.input(apiFindCompose)
 		.mutation(async ({ input, ctx }) => {
+			await assertBillingEntitlement(ctx.session.activeOrganizationId);
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				deployment: ["create"],
 			});
@@ -591,6 +596,7 @@ export const composeRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
+			await assertBillingEntitlement(ctx.session.activeOrganizationId);
 			const environment = await findEnvironmentById(input.environmentId);
 
 			await checkServiceAccess(ctx, environment.projectId, "create");

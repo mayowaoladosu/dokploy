@@ -451,9 +451,9 @@ const MENU: Menu = {
 			title: "Billing",
 			url: "/dashboard/settings/billing",
 			icon: CreditCard,
-			// Only enabled for owners in cloud environments
-			isEnabled: ({ auth, isCloud, isManaged }) =>
-				!!(auth?.role === "owner" && isCloud && !isManaged),
+			// Hosted billing is available to organization owners in cloud and managed mode.
+			isEnabled: ({ auth, isCloud }) =>
+				!!(auth?.role === "owner" && isCloud),
 		},
 		{
 			isSingle: true,

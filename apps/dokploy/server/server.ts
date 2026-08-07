@@ -2,13 +2,14 @@ import http from "node:http";
 import {
 	assertManagedDataBackupPlatformReadiness,
 	assertManagedPlatformConfiguration,
+	bootstrapManagedPlatformFromEnvironment,
 	configureFirstPartyManagedDataProvidersFromEnvironment,
 	configureManagedDataProviderFromEnvironment,
 	createDefaultMiddlewares,
 	createDefaultServerTraefikConfig,
 	createDefaultTraefikConfig,
+	createPolarEventClient,
 	createReleaseStateMachine,
-	createStripeMeterEventClient,
 	handleHttpRequestWithTelemetry,
 	IS_CLOUD,
 	IS_HOSTED,
@@ -26,6 +27,7 @@ import {
 	reconcileDomainVerifications,
 	reconcileExpiredPreviewDeployments,
 	reconcileKubernetesPlacements,
+	reconcileManagedBillingSuspensions,
 	reconcileManagedDataBackups,
 	reconcileManagedDataResources,
 	reconcileManagedDataUsage,
@@ -35,7 +37,7 @@ import {
 	setupDirectories,
 	shutdownOpenTelemetry,
 	synchronizeManagedDataBindingSecrets,
-	synchronizeStripeUsage,
+	synchronizePolarUsage,
 	verifyRegisteredManagedDataProviders,
 } from "@dokploy/server";
 import { config } from "dotenv";
@@ -45,6 +47,14 @@ import { reconcileGitDelivery } from "./git-delivery";
 import { closeTemporalClient } from "./temporal/client";
 import { temporalConfiguration } from "./temporal/config";
 import { startTemporalWorker, stopTemporalWorker } from "./temporal/worker";
+import {
+	assertPolarConfiguration,
+	getPolarClient,
+	polarAccessToken,
+	polarEnvironment,
+	reconcilePolarCustomerStates,
+	verifyPolarConfiguration,
+} from "./utils/polar";
 import { setupDrawerLogsWebSocketServer } from "./wss/drawer-logs";
 import { setupDeploymentLogsWebSocketServer } from "./wss/listen-deployment";
 
@@ -56,6 +66,7 @@ if (telemetry.enabled) {
 	);
 }
 assertManagedPlatformConfiguration();
+assertPolarConfiguration();
 if (IS_MANAGED_PAAS && !temporalConfiguration().enabled) {
 	throw new Error(
 		"Managed mode requires TEMPORAL_ENABLED=true and a configured Temporal service",
@@ -82,6 +93,13 @@ void app.prepare().then(async () => {
 		| undefined;
 	try {
 		console.log("Running DokployVersion: ", packageInfo.version);
+		await verifyPolarConfiguration();
+		const bootstrap = await bootstrapManagedPlatformFromEnvironment();
+		if (bootstrap.enabled) {
+			console.log(
+				`Managed platform bootstrap reconciled cluster ${bootstrap.clusterId}${bootstrap.activated ? " and activated infrastructure" : " in provisioning mode"}`,
+			);
+		}
 		const databaseProviderCount = await loadPlatformManagedDataProviders();
 		const firstPartyProviderCount =
 			configureFirstPartyManagedDataProvidersFromEnvironment();
@@ -96,6 +114,12 @@ void app.prepare().then(async () => {
 		await verifyRegisteredManagedDataProviders();
 		if (IS_MANAGED_PAAS) {
 			await assertManagedDataBackupPlatformReadiness();
+			const observability = await reconcilePlatformObservabilityCollectors();
+			if (observability.failed > 0 || observability.active === 0) {
+				throw new Error(
+					`Managed observability is not ready (${observability.active} active, ${observability.failed} failed, ${observability.skipped} skipped)`,
+				);
+			}
 		}
 		console.log(
 			`Managed data providers active: ${listRegisteredManagedDataProviders()
@@ -182,6 +206,14 @@ void app.prepare().then(async () => {
 			console.log(`Initialized ${reconciledDomains} domain verification(s)`);
 		}
 		const reconcilePlacements = async () => {
+			if (IS_MANAGED_PAAS) {
+				const billing = await reconcileManagedBillingSuspensions();
+				if (billing.suspended + billing.resumed + billing.failed > 0) {
+					console.log(
+						`Reconciled billing suspensions: ${billing.suspended} suspended, ${billing.resumed} resumed, ${billing.failed} failed`,
+					);
+				}
+			}
 			const result = await reconcileKubernetesPlacements();
 			if (result.active + result.pending + result.failed > 0) {
 				console.log(
@@ -412,38 +444,63 @@ void app.prepare().then(async () => {
 			observabilityTimer.unref();
 			timers.push(observabilityTimer);
 
-			const stripeSecretKey = process.env.STRIPE_SECRET_KEY?.trim();
-			if (stripeSecretKey) {
-				const stripeUsageClient = createStripeMeterEventClient({
-					apiKey: stripeSecretKey,
-				});
-				let stripeUsageRunning = false;
-				const synchronizeUsage = async () => {
-					if (stripeUsageRunning) return;
-					stripeUsageRunning = true;
+			const polarToken = process.env.POLAR_ACCESS_TOKEN?.trim();
+			if (polarToken) {
+				const polar = getPolarClient();
+				let polarStateRunning = false;
+				const reconcilePolarState = async () => {
+					if (polarStateRunning) return;
+					polarStateRunning = true;
 					try {
-						const result = await synchronizeStripeUsage({
-							client: stripeUsageClient,
-						});
-						if (result.attempted > 0) {
-							console.log(
-								`Exported Stripe usage: ${result.delivered} delivered, ${result.failed} failed`,
+						const result = await reconcilePolarCustomerStates(polar);
+						if (result.failed > 0) {
+							console.error(
+								`Polar state reconciliation failed for ${result.failed} organization(s)`,
 							);
 						}
 					} finally {
-						stripeUsageRunning = false;
+						polarStateRunning = false;
+					}
+				};
+				await reconcilePolarState();
+				const polarStateTimer = setInterval(() => {
+					void reconcilePolarState().catch((error) =>
+						console.error("Failed to reconcile Polar customer states", error),
+					);
+				}, 60 * 60_000);
+				polarStateTimer.unref();
+				timers.push(polarStateTimer);
+				const polarUsageClient = createPolarEventClient({
+					accessToken: polarAccessToken(),
+					environment: polarEnvironment(),
+				});
+				let polarUsageRunning = false;
+				const synchronizeUsage = async () => {
+					if (polarUsageRunning) return;
+					polarUsageRunning = true;
+					try {
+						const result = await synchronizePolarUsage({
+							client: polarUsageClient,
+						});
+						if (result.attempted > 0) {
+							console.log(
+								`Exported Polar usage: ${result.delivered} delivered, ${result.failed} failed`,
+							);
+						}
+					} finally {
+						polarUsageRunning = false;
 					}
 				};
 				await synchronizeUsage().catch((error) =>
-					console.error("Failed to export Stripe usage", error),
+					console.error("Failed to export Polar usage", error),
 				);
-				const stripeUsageTimer = setInterval(() => {
+				const polarUsageTimer = setInterval(() => {
 					void synchronizeUsage().catch((error) =>
-						console.error("Failed to export Stripe usage", error),
+						console.error("Failed to export Polar usage", error),
 					);
 				}, 5 * 60_000);
-				stripeUsageTimer.unref();
-				timers.push(stripeUsageTimer);
+				polarUsageTimer.unref();
+				timers.push(polarUsageTimer);
 			}
 		}
 		if (

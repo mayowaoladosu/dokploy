@@ -68,4 +68,21 @@ describe("tenant observability authorization", () => {
 			}),
 		).toBe("http://loki.monitoring.svc:3100");
 	});
+
+	it("rejects plaintext authorization in OTLP metadata", async () => {
+		const { createPlatformObservabilityBackend } = await import(
+			"@dokploy/server/services/observability"
+		);
+		await expect(
+			createPlatformObservabilityBackend({
+				name: "unsafe-otlp",
+				kind: "otlp",
+				endpoint: "https://otlp.example.com/otlp",
+				metadata: {
+					retentionManagedExternally: true,
+					otlpHeaders: { Authorization: "Basic plaintext" },
+				},
+			}),
+		).rejects.toThrow("authorization must use the encrypted auth token");
+	});
 });

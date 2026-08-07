@@ -27,7 +27,7 @@ import { whitelabelingRouter } from "./routers/proprietary/whitelabeling";
 import { redirectsRouter } from "./routers/redirects";
 import { rollbackRouter } from "./routers/rollbacks";
 import { securityRouter } from "./routers/security";
-import { stripeRouter } from "./routers/stripe";
+import { polarRouter } from "./routers/polar";
 import { tagRouter } from "./routers/tag";
 import { usageRouter } from "./routers/usage";
 import { userRouter } from "./routers/user";
@@ -67,7 +67,7 @@ export const managedTenantRouter = createTRPCRouter({
 	security: securityRouter,
 	settings: managedSettingsRouter,
 	sso: ssoRouter,
-	stripe: stripeRouter,
+	polar: polarRouter,
 	tag: tagRouter,
 	usage: usageRouter,
 	user: userRouter,

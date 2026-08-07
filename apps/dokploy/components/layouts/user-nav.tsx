@@ -23,6 +23,8 @@ export const UserNav = () => {
 	const { data } = api.user.get.useQuery();
 	const { data: permissions } = api.user.getPermissions.useQuery();
 	const { data: isCloud } = api.settings.isCloud.useQuery();
+	const { data: platformCapabilities } =
+		api.settings.platformCapabilities.useQuery();
 
 	// const { mutateAsync } = api.auth.logout.useMutation();
 
@@ -118,7 +120,7 @@ export const UserNav = () => {
 								</DropdownMenuItem>
 							)}
 						</>
-					) : (
+					) : platformCapabilities?.mode !== "managed" ? (
 						permissions?.organization.update && (
 							<DropdownMenuItem
 								className="cursor-pointer"
@@ -129,7 +131,7 @@ export const UserNav = () => {
 								Servers
 							</DropdownMenuItem>
 						)
-					)}
+					) : null}
 				</DropdownMenuGroup>
 				{isCloud && data?.role === "owner" && (
 					<DropdownMenuItem

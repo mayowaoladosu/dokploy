@@ -29,6 +29,8 @@ const backendMetadata = z.object({
 	retentionManagedExternally: z.boolean().optional(),
 	healthEndpoint: z.string().url().optional(),
 	otlpHeaders: z.record(z.string(), z.string()).optional(),
+	authScheme: z.enum(["Bearer", "Basic"]).optional(),
+	omitTenantHeader: z.boolean().optional(),
 });
 
 const policyInput = z.object({

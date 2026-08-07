@@ -9,6 +9,7 @@ export const managedTenantRoutes = [
 	"/dashboard/settings/certificates",
 	"/dashboard/settings/cluster",
 	"/dashboard/settings/destinations",
+	"/dashboard/settings/deployments",
 	"/dashboard/settings/license",
 	"/dashboard/settings/registry",
 	"/dashboard/settings/server",
@@ -32,6 +33,7 @@ export const managedTenantPageSourceFragments = [
 	"pages/dashboard/settings/certificates.tsx",
 	"pages/dashboard/settings/cluster.tsx",
 	"pages/dashboard/settings/destinations.tsx",
+	"pages/dashboard/settings/deployments.tsx",
 	"pages/dashboard/settings/license.tsx",
 	"pages/dashboard/settings/registry.tsx",
 	"pages/dashboard/settings/server.tsx",
@@ -48,6 +50,12 @@ export const managedTenantPageSourceFragments = [
 
 export const selfHostedOnlyPageSourceFragments = [
 	"pages/api/operator/trpc/[trpc].ts",
+];
+
+export const managedRequiredRoutes = [
+	"/api/polar/webhook",
+	"/dashboard/settings/billing",
+	"/dashboard/settings/invoices",
 ];
 
 /** @param {string} pathname */

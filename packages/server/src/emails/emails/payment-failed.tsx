@@ -7,7 +7,6 @@ import {
 	Heading,
 	Hr,
 	Html,
-	Img,
 	Link,
 	Preview,
 	Row,
@@ -32,9 +31,9 @@ export const PaymentFailedEmail = ({
 	amountDue = "$4.50",
 	currency = "usd",
 	date = "2024-01-01",
-	hostedInvoiceUrl = "https://invoice.stripe.com/example",
+	hostedInvoiceUrl = "https://vlyv.dev/dashboard/settings/billing",
 }: TemplateProps) => {
-	const previewText = `Action required: Your Dokploy payment for ${amountDue} failed`;
+	const previewText = `Action required: Your vlyv payment for ${amountDue} failed`;
 	return (
 		<Html>
 			<Head />
@@ -44,13 +43,9 @@ export const PaymentFailedEmail = ({
 					<Container className="my-[40px] mx-auto max-w-[520px]">
 						{/* Header */}
 						<Section className="bg-[#09090b] rounded-t-xl px-[40px] py-[32px] text-center">
-							<Img
-								src="https://raw.githubusercontent.com/Dokploy/website/refs/heads/main/apps/docs/public/logo-dokploy-blackpng.png"
-								width="190"
-								height="120"
-								alt="Dokploy"
-								className="my-0 mx-auto"
-							/>
+							<Text className="text-white text-[28px] font-bold tracking-[-1px] m-0">
+								vlyv
+							</Text>
 						</Section>
 
 						{/* Body */}
@@ -118,9 +113,8 @@ export const PaymentFailedEmail = ({
 							{/* Warning */}
 							<Section className="bg-[#fefce8] border border-solid border-[#fef08a] rounded-lg px-[20px] py-[16px] mb-[24px]">
 								<Text className="text-[#854d0e] text-[13px] leading-[20px] m-0">
-									If the payment issue is not resolved, your servers will be
-									deactivated. Please update your payment method as soon as
-									possible.
+									If the payment issue is not resolved, hosted service access may
+									be paused. Please update your payment method as soon as possible.
 								</Text>
 							</Section>
 
@@ -140,15 +134,15 @@ export const PaymentFailedEmail = ({
 							<Text className="text-[#a1a1aa] text-[12px] leading-[18px] m-0">
 								This is an automated email from{" "}
 								<Link
-									href="https://dokploy.com"
+									href="https://vlyv.dev"
 									className="text-[#71717a] underline"
 								>
-									Dokploy Cloud
+									vlyv
 								</Link>
 								. If you have any questions about your billing, please contact
 								our{" "}
 								<Link
-									href="https://discord.gg/2tBnJ3jDJc"
+									href="https://vlyv.dev"
 									className="text-[#71717a] underline"
 								>
 									support team

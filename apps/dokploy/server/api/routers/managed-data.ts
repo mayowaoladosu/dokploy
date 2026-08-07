@@ -38,18 +38,12 @@ import {
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
+import { assertBillingEntitlement } from "@/server/utils/billing";
 import { createTRPCRouter, withPermission } from "../trpc";
 import { audit } from "../utils/audit";
 
 const resourceIdInput = z.object({ resourceId: z.string().min(1) });
-const managedKind = z.enum([
-	"postgres",
-	"mysql",
-	"mariadb",
-	"mongo",
-	"redis",
-	"libsql",
-]);
+const managedKind = z.literal("postgres");
 
 const tenantManagedDataOperation = async <T>(
 	operation: string,
@@ -205,19 +199,13 @@ export const managedDataRouter = createTRPCRouter({
 				idempotencyKey: z.string().min(8).max(200),
 				projectId: z.string().min(1),
 				environmentId: z.string().min(1),
-				kind: z.enum([
-					"postgres",
-					"mysql",
-					"mariadb",
-					"mongo",
-					"redis",
-					"libsql",
-				]),
+				kind: managedKind,
 				name: z.string().min(1).max(100),
 				plan: z.enum(managedDataPlans),
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
+			await assertBillingEntitlement(ctx.session.activeOrganizationId);
 			await assertProvisionAccess(ctx, input.projectId, input.environmentId);
 			const resource = await tenantManagedDataOperation("provision", () =>
 				provisionManagedDataResource({
@@ -389,6 +377,7 @@ export const managedDataRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
+			await assertBillingEntitlement(ctx.session.activeOrganizationId);
 			await checkPermission(ctx, { backup: ["create"] });
 			await assertResourceOrganization(
 				input.resourceId,
@@ -426,6 +415,7 @@ export const managedDataRouter = createTRPCRouter({
 	restoreBackup: withPermission("managedData", "restore")
 		.input(z.object({ backupId: z.string().min(1) }))
 		.mutation(async ({ ctx, input }) => {
+			await assertBillingEntitlement(ctx.session.activeOrganizationId);
 			await checkPermission(ctx, { backup: ["restore"] });
 			await assertBackupOrganization(
 				input.backupId,

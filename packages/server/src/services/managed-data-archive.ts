@@ -146,7 +146,9 @@ export const assertManagedDataBackupPlatformReadiness = async () => {
 		(candidate) => candidate.metadata.managedDataBackups === true,
 	);
 	if (!storage) throw new Error("Managed data backup storage is not ready");
-	await createS3ObjectStorageClient({ storage }).verifyManagedDataBackups();
+	const objects = createS3ObjectStorageClient({ storage });
+	await objects.verifyManagedDataBackups();
+	await objects.verifyManagedDataBackupWrite();
 	return true;
 };
 

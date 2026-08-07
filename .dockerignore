@@ -1,5 +1,17 @@
 node_modules
+**/node_modules
+.next
+**/.next
 .git
 .gitignore
 *.md
 dist
+**/dist
+.docker
+**/.docker
+*.tsbuildinfo
+**/*.tsbuildinfo
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.production.example
