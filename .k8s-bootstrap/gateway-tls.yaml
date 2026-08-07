@@ -1,0 +1,20 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: vlyv-bootstrap-selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vlyv-gateway-tls
+  namespace: vlyv-system
+spec:
+  secretName: vlyv-gateway-tls
+  dnsNames:
+    - apps.vlyv.dev
+    - "*.apps.vlyv.dev"
+  issuerRef:
+    name: vlyv-bootstrap-selfsigned
+    kind: ClusterIssuer

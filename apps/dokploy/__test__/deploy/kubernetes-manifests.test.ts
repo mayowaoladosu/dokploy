@@ -239,6 +239,11 @@ describe("Kubernetes build manifests", () => {
 		buildSecrets: {
 			NODE_ENV: "production",
 		},
+		registryCredentials: {
+			server: "registry.example.com",
+			username: "robot",
+			password: "pull-secret",
+		},
 		resources: {
 			memoryLimitBytes: 4_294_967_296,
 			memoryRequestBytes: 536_870_912,
@@ -262,6 +267,7 @@ describe("Kubernetes build manifests", () => {
 			restartPolicy: "Never",
 			automountServiceAccountToken: false,
 			runtimeClassName: "gvisor",
+			imagePullSecrets: [{ name: expect.stringContaining("environment") }],
 		});
 		expect(builder.image).toContain("@sha256:def");
 		expect(builder.args[0]).toContain("dockerd-rootless.sh");
@@ -286,17 +292,35 @@ describe("Kubernetes build manifests", () => {
 		const buildSecret = secrets.find((manifest) =>
 			manifest.metadata?.name?.includes("environment"),
 		) as any;
-		expect(buildSecret.data).toEqual({
+		expect(buildSecret.type).toBe("kubernetes.io/dockerconfigjson");
+		expect(buildSecret.data).toMatchObject({
 			NODE_ENV: Buffer.from("production").toString("base64"),
 		});
+		expect(buildSecret.data).toHaveProperty(".dockerconfigjson");
 		expect(builder.securityContext.capabilities.drop).toEqual(["ALL"]);
 		expect(builder.securityContext.capabilities.add).toEqual([
 			"SETUID",
 			"SETGID",
 		]);
 		expect(builder.securityContext.allowPrivilegeEscalation).toBe(true);
+		expect(builder.securityContext.seccompProfile).toEqual({
+			type: "Unconfined",
+		});
+		expect(builder.securityContext.appArmorProfile).toEqual({
+			type: "Unconfined",
+		});
+		expect(builder.volumeMounts).toContainEqual({
+			name: "tun",
+			mountPath: "/dev/net/tun",
+		});
+		expect(
+			podSpec.volumes.find((volume: any) => volume.name === "tun"),
+		).toMatchObject({
+			hostPath: { path: "/dev/net/tun", type: "CharDevice" },
+		});
+		expect(sourceFetcher.securityContext).not.toHaveProperty("seccompProfile");
 		expect(findManifest(manifests, "Namespace").metadata.labels).toMatchObject({
-			"pod-security.kubernetes.io/enforce": "baseline",
+			"pod-security.kubernetes.io/enforce": "privileged",
 			"pod-security.kubernetes.io/audit": "restricted",
 		});
 		expect(findManifest(manifests, "ResourceQuota").spec.hard).toHaveProperty(
@@ -329,6 +353,11 @@ describe("Kubernetes framework output publisher", () => {
 		storageBucket: "vlyv-assets",
 		storageAccessKeyId: "storage-access-key",
 		storageSecretAccessKey: "storage-secret-key",
+		registryCredentials: {
+			server: "registry.example.com",
+			username: "robot",
+			password: "pull-secret",
+		},
 		runtimeClassName: "gvisor",
 		activeDeadlineSeconds: 900,
 		resources: {
@@ -349,6 +378,7 @@ describe("Kubernetes framework output publisher", () => {
 			automountServiceAccountToken: false,
 			runtimeClassName: "gvisor",
 			restartPolicy: "Never",
+			imagePullSecrets: [{ name: secret.metadata.name }],
 		});
 		expect(publisher.image).toContain("@sha256:");
 		expect(publisher.volumeMounts).toContainEqual(
@@ -360,6 +390,7 @@ describe("Kubernetes framework output publisher", () => {
 		expect(publisher.args[0]).toContain("manifest digest mismatch");
 		expect(publisher.args[0]).toContain("symbolic links");
 		expect(secret.data).toHaveProperty("RCLONE_CONFIG_VLYV_ACCESS_KEY_ID");
+		expect(secret.data).toHaveProperty(".dockerconfigjson");
 		expect(JSON.stringify(job)).not.toContain("storage-access-key");
 		expect(JSON.stringify(job)).not.toContain("storage-secret-key");
 		expect(JSON.stringify(outputManifests)).not.toContain("source-secret");
@@ -403,6 +434,11 @@ describe("Kubernetes publisher manifests", () => {
 			VLYV_PLATFORM_REGISTRY_USERNAME: "robot",
 			VLYV_PLATFORM_REGISTRY_PASSWORD: "registry-secret",
 		},
+		registryCredentials: {
+			server: "registry.example.com",
+			username: "robot",
+			password: "registry-secret",
+		},
 		resources: {
 			memoryLimitBytes: 2_147_483_648,
 			memoryRequestBytes: 536_870_912,
@@ -418,6 +454,12 @@ describe("Kubernetes publisher manifests", () => {
 		expect(publisher.args[0]).toContain("/dev/termination-log");
 		expect(publisher.args[0]).not.toContain("registry-secret");
 		expect(publisher.envFrom[0].secretRef.name).toContain("registry");
+		expect(job.spec.template.spec.imagePullSecrets).toEqual([
+			{ name: publisher.envFrom[0].secretRef.name },
+		]);
+		expect(findManifest(manifests, "Secret").data).toHaveProperty(
+			".dockerconfigjson",
+		);
 		expect(job.spec.template.spec.volumes[0]).toHaveProperty(
 			"persistentVolumeClaim.claimName",
 		);
@@ -455,6 +497,16 @@ describe("Kubernetes supply-chain manifests", () => {
 			VLYV_PLATFORM_REGISTRY_USERNAME: "robot",
 			VLYV_PLATFORM_REGISTRY_PASSWORD: "super-secret",
 		},
+		registryCredentials: {
+			server: "registry.example.com",
+			username: "robot",
+			password: "super-secret",
+		},
+		signingSecrets: {
+			AZURE_TENANT_ID: "tenant-id",
+			AZURE_CLIENT_ID: "client-id",
+			AZURE_CLIENT_SECRET: "azure-client-secret",
+		},
 		resources: {
 			memoryLimitBytes: 2_147_483_648,
 			memoryRequestBytes: 536_870_912,
@@ -474,12 +526,14 @@ describe("Kubernetes supply-chain manifests", () => {
 		expect(verifier.args[0]).toContain("cosign attest");
 		expect(verifier.args[0]).toContain("cosign verify");
 		expect(verifier.args[0]).not.toContain("super-secret");
+		expect(JSON.stringify(job)).not.toContain("azure-client-secret");
 		expect(verifier.volumeMounts.map((entry: any) => entry.name)).not.toContain(
 			"workspace",
 		);
 		expect(podSpec).toMatchObject({
 			automountServiceAccountToken: false,
 			runtimeClassName: "gvisor",
+			imagePullSecrets: [{ name: expect.stringContaining("registry") }],
 		});
 		expect(verifier.securityContext).toMatchObject({
 			allowPrivilegeEscalation: false,
@@ -501,6 +555,14 @@ describe("Kubernetes supply-chain manifests", () => {
 		expect(findManifest(manifests, "Secret").data).toMatchObject({
 			VLYV_PLATFORM_REGISTRY_PASSWORD:
 				Buffer.from("super-secret").toString("base64"),
+		});
+		expect(findManifest(manifests, "Secret").data).toHaveProperty(
+			".dockerconfigjson",
+		);
+		expect(findManifest(manifests, "Secret").data).toMatchObject({
+			AZURE_CLIENT_SECRET: Buffer.from("azure-client-secret").toString(
+				"base64",
+			),
 		});
 		expect(
 			findManifest(manifests, "ServiceAccount").metadata.annotations,

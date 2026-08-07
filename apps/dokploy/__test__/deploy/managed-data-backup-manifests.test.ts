@@ -24,6 +24,11 @@ describe("managed data platform archive manifests", () => {
 		storageSecretAccessKey: "storage-secret",
 		serverSideEncryption: "aws:kms",
 		kmsKeyId: "arn:aws:kms:us-east-1:123456789012:key/abc",
+		registryCredentials: {
+			server: "registry.vlyv.dev",
+			username: "backup-puller",
+			password: "registry-secret",
+		},
 		activeDeadlineSeconds: 3600,
 	});
 
@@ -45,8 +50,14 @@ describe("managed data platform archive manifests", () => {
 		expect(secret.data).toHaveProperty(
 			"RCLONE_CONFIG_VLYV_SERVER_SIDE_ENCRYPTION",
 		);
+		expect(secret.type).toBe("kubernetes.io/dockerconfigjson");
+		expect(secret.data).toHaveProperty(".dockerconfigjson");
+		expect(job.spec.template.spec.imagePullSecrets).toEqual([
+			{ name: secret.metadata.name },
+		]);
 		expect(JSON.stringify(job)).not.toContain("database-secret");
 		expect(JSON.stringify(job)).not.toContain("storage-secret");
+		expect(JSON.stringify(job)).not.toContain("registry-secret");
 	});
 
 	it("default-denies ingress and private network egress", () => {

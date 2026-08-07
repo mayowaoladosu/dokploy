@@ -113,6 +113,9 @@ export type KubernetesBuildJobSpec = {
 	artifactStorageClassName: string;
 	sourceSecrets: Record<string, string>;
 	buildSecrets: Record<string, string>;
+	registryCredentials?: NonNullable<
+		KubernetesPlacementSpec["registryCredentials"]
+	>;
 	allowedEgressCidrs?: string[];
 };
 
@@ -132,6 +135,9 @@ export type KubernetesPublisherJobSpec = {
 	activeDeadlineSeconds: number;
 	resources: KubernetesResourceSpec;
 	registrySecrets: Record<string, string>;
+	registryCredentials?: NonNullable<
+		KubernetesPlacementSpec["registryCredentials"]
+	>;
 };
 
 export type KubernetesSupplyChainJobSpec = {
@@ -154,6 +160,10 @@ export type KubernetesSupplyChainJobSpec = {
 	activeDeadlineSeconds: number;
 	resources: KubernetesResourceSpec;
 	registrySecrets: Record<string, string>;
+	signingSecrets?: Record<string, string>;
+	registryCredentials?: NonNullable<
+		KubernetesPlacementSpec["registryCredentials"]
+	>;
 };
 
 export type KubernetesOutputPublisherJobSpec = {
@@ -182,6 +192,9 @@ export type KubernetesOutputPublisherJobSpec = {
 	podAnnotations?: Record<string, string>;
 	activeDeadlineSeconds: number;
 	resources: KubernetesResourceSpec;
+	registryCredentials?: NonNullable<
+		KubernetesPlacementSpec["registryCredentials"]
+	>;
 };
 
 const k8sName = (value: string, maxLength = 63) => {
@@ -1080,7 +1093,10 @@ cat /artifacts/image.json >/dev/termination-log
 				labels: {
 					"app.kubernetes.io/managed-by": "vlyv",
 					"vlyv.dev/managed": "true",
-					"pod-security.kubernetes.io/enforce": "baseline",
+					// The non-root builder needs nested user/mount namespaces and the
+					// host TUN character device for RootlessKit networking. The
+					// container itself remains UID 1000 with only SETUID/SETGID.
+					"pod-security.kubernetes.io/enforce": "privileged",
 					"pod-security.kubernetes.io/audit": "restricted",
 					"pod-security.kubernetes.io/warn": "restricted",
 				},
@@ -1153,8 +1169,19 @@ cat /artifacts/image.json >/dev/termination-log
 			apiVersion: "v1",
 			kind: "Secret",
 			metadata: { name: buildSecretName, namespace: spec.namespace, labels },
-			type: "Opaque",
-			data: secretData(spec.buildSecrets),
+			type: spec.registryCredentials
+				? "kubernetes.io/dockerconfigjson"
+				: "Opaque",
+			data: {
+				...secretData(spec.buildSecrets),
+				...(spec.registryCredentials
+					? {
+							".dockerconfigjson": registryDockerConfig(
+								spec.registryCredentials,
+							),
+						}
+					: {}),
+			},
 		},
 		{
 			apiVersion: "batch/v1",
@@ -1165,10 +1192,19 @@ cat /artifacts/image.json >/dev/termination-log
 				activeDeadlineSeconds: spec.activeDeadlineSeconds,
 				ttlSecondsAfterFinished: 900,
 				template: {
-					metadata: { labels },
+					metadata: {
+						labels,
+						annotations: {
+							"container.apparmor.security.beta.kubernetes.io/builder":
+								"unconfined",
+						},
+					},
 					spec: {
 						restartPolicy: "Never",
 						automountServiceAccountToken: false,
+						imagePullSecrets: spec.registryCredentials
+							? [{ name: buildSecretName }]
+							: undefined,
 						runtimeClassName: spec.runtimeClassName || undefined,
 						nodeSelector: spec.nodeSelector,
 						tolerations: spec.tolerations,
@@ -1225,6 +1261,8 @@ cat /artifacts/image.json >/dev/termination-log
 								resources: workloadResources(spec.resources),
 								securityContext: {
 									allowPrivilegeEscalation: true,
+									appArmorProfile: { type: "Unconfined" },
+									seccompProfile: { type: "Unconfined" },
 									capabilities: {
 										drop: ["ALL"],
 										add: ["SETUID", "SETGID"],
@@ -1238,6 +1276,7 @@ cat /artifacts/image.json >/dev/termination-log
 									{ name: "tmp", mountPath: "/tmp" },
 									{ name: "home", mountPath: "/home/builder" },
 									{ name: "artifacts", mountPath: "/artifacts" },
+									{ name: "tun", mountPath: "/dev/net/tun" },
 								],
 							},
 						],
@@ -1253,6 +1292,10 @@ cat /artifacts/image.json >/dev/termination-log
 							{ name: "tmp", emptyDir: { sizeLimit: "2Gi" } },
 							{ name: "home", emptyDir: { sizeLimit: "2Gi" } },
 							{ name: "source-home", emptyDir: { sizeLimit: "512Mi" } },
+							{
+								name: "tun",
+								hostPath: { path: "/dev/net/tun", type: "CharDevice" },
+							},
 							{
 								name: "artifacts",
 								persistentVolumeClaim: {
@@ -1312,8 +1355,19 @@ printf '{"imageId":"%s","repoDigests":["%s@%s"],"imageSizeBytes":%s}' "$image_id
 			apiVersion: "v1",
 			kind: "Secret",
 			metadata: { name: secretName, namespace: spec.namespace, labels },
-			type: "Opaque",
-			data: secretData(spec.registrySecrets),
+			type: spec.registryCredentials
+				? "kubernetes.io/dockerconfigjson"
+				: "Opaque",
+			data: {
+				...secretData(spec.registrySecrets),
+				...(spec.registryCredentials
+					? {
+							".dockerconfigjson": registryDockerConfig(
+								spec.registryCredentials,
+							),
+						}
+					: {}),
+			},
 		},
 		{
 			apiVersion: "v1",
@@ -1343,6 +1397,9 @@ printf '{"imageId":"%s","repoDigests":["%s@%s"],"imageSizeBytes":%s}' "$image_id
 						restartPolicy: "Never",
 						serviceAccountName,
 						automountServiceAccountToken: false,
+						imagePullSecrets: spec.registryCredentials
+							? [{ name: secretName }]
+							: undefined,
 						runtimeClassName: spec.runtimeClassName || undefined,
 						nodeSelector: spec.nodeSelector,
 						tolerations: spec.tolerations,
@@ -1492,27 +1549,38 @@ trap - EXIT
 			apiVersion: "v1",
 			kind: "Secret",
 			metadata: { name: secretName, namespace: spec.namespace, labels },
-			type: "Opaque",
-			data: secretData({
-				RCLONE_CONFIG_VLYV_TYPE: "s3",
-				RCLONE_CONFIG_VLYV_PROVIDER:
-					spec.storageProvider === "r2" ? "Cloudflare" : "Other",
-				RCLONE_CONFIG_VLYV_ACCESS_KEY_ID: spec.storageAccessKeyId,
-				RCLONE_CONFIG_VLYV_SECRET_ACCESS_KEY: spec.storageSecretAccessKey,
-				RCLONE_CONFIG_VLYV_ENDPOINT: spec.storageEndpoint,
-				RCLONE_CONFIG_VLYV_REGION: spec.storageRegion,
-				RCLONE_CONFIG_VLYV_ACL: "private",
-				RCLONE_CONFIG_VLYV_NO_CHECK_BUCKET: "true",
-				...(spec.serverSideEncryption
+			type: spec.registryCredentials
+				? "kubernetes.io/dockerconfigjson"
+				: "Opaque",
+			data: {
+				...secretData({
+					RCLONE_CONFIG_VLYV_TYPE: "s3",
+					RCLONE_CONFIG_VLYV_PROVIDER:
+						spec.storageProvider === "r2" ? "Cloudflare" : "Other",
+					RCLONE_CONFIG_VLYV_ACCESS_KEY_ID: spec.storageAccessKeyId,
+					RCLONE_CONFIG_VLYV_SECRET_ACCESS_KEY: spec.storageSecretAccessKey,
+					RCLONE_CONFIG_VLYV_ENDPOINT: spec.storageEndpoint,
+					RCLONE_CONFIG_VLYV_REGION: spec.storageRegion,
+					RCLONE_CONFIG_VLYV_ACL: "private",
+					RCLONE_CONFIG_VLYV_NO_CHECK_BUCKET: "true",
+					...(spec.serverSideEncryption
+						? {
+								RCLONE_CONFIG_VLYV_SERVER_SIDE_ENCRYPTION:
+									spec.serverSideEncryption,
+							}
+						: {}),
+					...(spec.kmsKeyId
+						? { RCLONE_CONFIG_VLYV_SSE_KMS_KEY_ID: spec.kmsKeyId }
+						: {}),
+				}),
+				...(spec.registryCredentials
 					? {
-							RCLONE_CONFIG_VLYV_SERVER_SIDE_ENCRYPTION:
-								spec.serverSideEncryption,
+							".dockerconfigjson": registryDockerConfig(
+								spec.registryCredentials,
+							),
 						}
 					: {}),
-				...(spec.kmsKeyId
-					? { RCLONE_CONFIG_VLYV_SSE_KMS_KEY_ID: spec.kmsKeyId }
-					: {}),
-			}),
+			},
 		},
 		{
 			apiVersion: "batch/v1",
@@ -1531,6 +1599,9 @@ trap - EXIT
 						restartPolicy: "Never",
 						serviceAccountName,
 						automountServiceAccountToken: false,
+						imagePullSecrets: spec.registryCredentials
+							? [{ name: secretName }]
+							: undefined,
 						runtimeClassName: spec.runtimeClassName || undefined,
 						nodeSelector: spec.nodeSelector,
 						tolerations: spec.tolerations,
@@ -1662,11 +1733,23 @@ printf '{"sbomDigest":"sha256:%s","vulnerabilityReportDigest":"sha256:%s","criti
 			apiVersion: "v1",
 			kind: "Secret",
 			metadata: { name: secretName, namespace: spec.namespace, labels },
-			type: "Opaque",
-			data: secretData({
-				...spec.registrySecrets,
-				VLYV_COSIGN_KEY_REF: spec.signingKeyRef,
-			}),
+			type: spec.registryCredentials
+				? "kubernetes.io/dockerconfigjson"
+				: "Opaque",
+			data: {
+				...secretData({
+					...spec.registrySecrets,
+					...spec.signingSecrets,
+					VLYV_COSIGN_KEY_REF: spec.signingKeyRef,
+				}),
+				...(spec.registryCredentials
+					? {
+							".dockerconfigjson": registryDockerConfig(
+								spec.registryCredentials,
+							),
+						}
+					: {}),
+			},
 		},
 		{
 			apiVersion: "v1",
@@ -1696,6 +1779,9 @@ printf '{"sbomDigest":"sha256:%s","vulnerabilityReportDigest":"sha256:%s","criti
 						restartPolicy: "Never",
 						serviceAccountName,
 						automountServiceAccountToken: false,
+						imagePullSecrets: spec.registryCredentials
+							? [{ name: secretName }]
+							: undefined,
 						runtimeClassName: spec.runtimeClassName || undefined,
 						nodeSelector: spec.nodeSelector,
 						tolerations: spec.tolerations,

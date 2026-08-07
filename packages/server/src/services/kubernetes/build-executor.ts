@@ -237,6 +237,28 @@ const registrySecretsFor = async (buildPool: PlatformBuildPool) => {
 	return secrets;
 };
 
+const signingSecretsFor = (buildPool: PlatformBuildPool) => {
+	if (!buildPool.signingCredentials) return {};
+	let candidate: unknown;
+	try {
+		candidate = JSON.parse(buildPool.signingCredentials);
+	} catch {
+		throw new Error("Build pool signing credentials are invalid JSON");
+	}
+	if (
+		!candidate ||
+		typeof candidate !== "object" ||
+		Array.isArray(candidate) ||
+		Object.entries(candidate).some(
+			([key, value]) =>
+				!/^[A-Z_][A-Z0-9_]*$/.test(key) || typeof value !== "string" || !value,
+		)
+	) {
+		throw new Error("Build pool signing credentials are invalid");
+	}
+	return candidate as Record<string, string>;
+};
+
 export const buildPoolImageRef = (
 	buildPool: Pick<
 		PlatformBuildPool,
@@ -554,6 +576,18 @@ export const createKubernetesBuildExecutor = ({
 				throw new Error("The selected build pool has no supply-chain policy");
 			}
 			const registrySecrets = await registrySecretsFor(buildPool);
+			const signingSecrets = signingSecretsFor(buildPool);
+			const registryCredentials =
+				buildPool.registryAuthMode === "basic" &&
+				buildPool.registryHost &&
+				buildPool.registryUsername &&
+				buildPool.registryPassword
+					? {
+							server: buildPool.registryHost,
+							username: buildPool.registryUsername,
+							password: buildPool.registryPassword,
+						}
+					: undefined;
 			const sourceSecrets = await sourceSecretsFor(input.application);
 			const buildSecrets = getEnvironmentVariablesObject(
 				input.application.env,
@@ -588,6 +622,7 @@ export const createKubernetesBuildExecutor = ({
 				artifactStorageClassName: supplyChain.artifactStorageClassName,
 				sourceSecrets,
 				buildSecrets,
+				registryCredentials,
 				allowedEgressCidrs: clusterMetadata.allowedEgressCidrs,
 			});
 			const buildCredentialSecrets = buildManifests.filter(
@@ -649,6 +684,7 @@ export const createKubernetesBuildExecutor = ({
 					),
 					resources: buildResources(),
 					registrySecrets,
+					registryCredentials,
 				});
 				const publisherCredentialSecret = publisherManifests.find(
 					(manifest) => manifest.kind === "Secret",
@@ -723,6 +759,8 @@ export const createKubernetesBuildExecutor = ({
 					),
 					resources: buildResources(),
 					registrySecrets,
+					signingSecrets,
+					registryCredentials,
 				});
 				const verifierCredentialSecret = verifierManifests.find(
 					(manifest) => manifest.kind === "Secret",
@@ -804,6 +842,7 @@ export const createKubernetesBuildExecutor = ({
 							60,
 						),
 						resources: buildResources(),
+						registryCredentials,
 					});
 				const outputCredentialSecret = outputPublisherManifests.find(
 					(manifest) => manifest.kind === "Secret",

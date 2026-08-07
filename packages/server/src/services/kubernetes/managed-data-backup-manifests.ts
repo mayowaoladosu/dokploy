@@ -19,6 +19,11 @@ export type KubernetesManagedDataBackupSpec = {
 	operation?: "backup" | "restore";
 	expectedChecksum?: string;
 	nodeSelector?: Record<string, string>;
+	registryCredentials?: {
+		server: string;
+		username: string;
+		password: string;
+	};
 	tolerations?: Array<{
 		key: string;
 		value?: string;
@@ -37,6 +42,26 @@ const secretData = (values: Record<string, string>) =>
 			Buffer.from(value, "utf8").toString("base64"),
 		]),
 	);
+
+const registryDockerConfig = ({
+	server,
+	username,
+	password,
+}: NonNullable<KubernetesManagedDataBackupSpec["registryCredentials"]>) =>
+	Buffer.from(
+		JSON.stringify({
+			auths: {
+				[server]: {
+					username,
+					password,
+					auth: Buffer.from(`${username}:${password}`, "utf8").toString(
+						"base64",
+					),
+				},
+			},
+		}),
+		"utf8",
+	).toString("base64");
 
 const dumpCommand = (kind: ManagedDataKind) => {
 	switch (kind) {
@@ -248,34 +273,45 @@ jq -cn --arg objectKey "$VLYV_OBJECT_KEY" --arg checksum "$checksum" --argjson s
 				labels,
 				annotations: { "vlyv.dev/garbage-collect-with-job": "true" },
 			},
-			type: "Opaque",
-			data: secretData({
-				VLYV_DATABASE_URI: spec.connectionUri,
-				VLYV_STORAGE_BUCKET: spec.storageBucket,
-				VLYV_OBJECT_KEY: spec.objectKey,
-				...(operation === "restore"
-					? { VLYV_EXPECTED_CHECKSUM: spec.expectedChecksum! }
-					: {}),
-				RCLONE_CONFIG_VLYV_TYPE: "s3",
-				RCLONE_CONFIG_VLYV_PROVIDER:
-					spec.storageProvider === "r2" ? "Cloudflare" : "Other",
-				RCLONE_CONFIG_VLYV_ACCESS_KEY_ID: spec.storageAccessKeyId,
-				RCLONE_CONFIG_VLYV_SECRET_ACCESS_KEY: spec.storageSecretAccessKey,
-				RCLONE_CONFIG_VLYV_ENDPOINT: spec.storageEndpoint,
-				RCLONE_CONFIG_VLYV_REGION: spec.storageRegion,
-				RCLONE_CONFIG_VLYV_ACL: "private",
-				RCLONE_CONFIG_VLYV_NO_CHECK_BUCKET: "true",
-				RCLONE_CONFIG_VLYV_UPLOAD_CHECKSUM: "true",
-				...(spec.serverSideEncryption
+			type: spec.registryCredentials
+				? "kubernetes.io/dockerconfigjson"
+				: "Opaque",
+			data: {
+				...secretData({
+					VLYV_DATABASE_URI: spec.connectionUri,
+					VLYV_STORAGE_BUCKET: spec.storageBucket,
+					VLYV_OBJECT_KEY: spec.objectKey,
+					...(operation === "restore"
+						? { VLYV_EXPECTED_CHECKSUM: spec.expectedChecksum! }
+						: {}),
+					RCLONE_CONFIG_VLYV_TYPE: "s3",
+					RCLONE_CONFIG_VLYV_PROVIDER:
+						spec.storageProvider === "r2" ? "Cloudflare" : "Other",
+					RCLONE_CONFIG_VLYV_ACCESS_KEY_ID: spec.storageAccessKeyId,
+					RCLONE_CONFIG_VLYV_SECRET_ACCESS_KEY: spec.storageSecretAccessKey,
+					RCLONE_CONFIG_VLYV_ENDPOINT: spec.storageEndpoint,
+					RCLONE_CONFIG_VLYV_REGION: spec.storageRegion,
+					RCLONE_CONFIG_VLYV_ACL: "private",
+					RCLONE_CONFIG_VLYV_NO_CHECK_BUCKET: "true",
+					RCLONE_CONFIG_VLYV_UPLOAD_CHECKSUM: "true",
+					...(spec.serverSideEncryption
+						? {
+								RCLONE_CONFIG_VLYV_SERVER_SIDE_ENCRYPTION:
+									spec.serverSideEncryption,
+							}
+						: {}),
+					...(spec.kmsKeyId
+						? { RCLONE_CONFIG_VLYV_SSE_KMS_KEY_ID: spec.kmsKeyId }
+						: {}),
+				}),
+				...(spec.registryCredentials
 					? {
-							RCLONE_CONFIG_VLYV_SERVER_SIDE_ENCRYPTION:
-								spec.serverSideEncryption,
+							".dockerconfigjson": registryDockerConfig(
+								spec.registryCredentials,
+							),
 						}
 					: {}),
-				...(spec.kmsKeyId
-					? { RCLONE_CONFIG_VLYV_SSE_KMS_KEY_ID: spec.kmsKeyId }
-					: {}),
-			}),
+			},
 		},
 		{
 			apiVersion: "networking.k8s.io/v1",
@@ -337,6 +373,9 @@ jq -cn --arg objectKey "$VLYV_OBJECT_KEY" --arg checksum "$checksum" --argjson s
 						serviceAccountName: spec.name,
 						automountServiceAccountToken: false,
 						restartPolicy: "Never",
+						imagePullSecrets: spec.registryCredentials
+							? [{ name: secretName }]
+							: undefined,
 						nodeSelector: spec.nodeSelector,
 						tolerations: spec.tolerations,
 						securityContext: {

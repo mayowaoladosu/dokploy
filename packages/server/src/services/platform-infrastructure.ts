@@ -536,6 +536,7 @@ export const createPlatformBuildPool = async (
 				| "registryAuthMode"
 				| "registryUsername"
 				| "registryPassword"
+				| "signingCredentials"
 				| "runtimeRegistrySecretName"
 				| "metadata"
 			>
@@ -624,6 +625,7 @@ export const updatePlatformBuildPool = async (
 			| "registryAuthMode"
 			| "registryUsername"
 			| "registryPassword"
+			| "signingCredentials"
 			| "runtimeRegistrySecretName"
 			| "metadata"
 		>
@@ -932,4 +934,5 @@ export const redactPlatformBuildPool = <T extends PlatformBuildPool>(
 	...pool,
 	registryUsername: pool.registryUsername ? "[REDACTED]" : null,
 	registryPassword: pool.registryPassword ? "[REDACTED]" : null,
+	signingCredentials: pool.signingCredentials ? "[REDACTED]" : null,
 });

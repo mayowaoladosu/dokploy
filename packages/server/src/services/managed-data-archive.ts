@@ -115,7 +115,7 @@ const clusterFor = async (resource: ManagedDataResource) => {
 				? [eq(platformClusters.regionId, resource.regionId)]
 				: []),
 		),
-		with: { nodePools: true },
+		with: { nodePools: true, buildPools: true },
 	});
 	return clusters.find((cluster) => cluster.isDefault) ?? clusters[0] ?? null;
 };
@@ -252,6 +252,14 @@ export const createManagedDataPlatformArchive = async ({
 	const systemPool = cluster.nodePools.find(
 		(pool) => pool.purpose === "system" && pool.status === "active",
 	);
+	const registryBuildPool = cluster.buildPools.find(
+		(pool) =>
+			pool.status === "active" &&
+			pool.registryAuthMode === "basic" &&
+			pool.registryHost &&
+			pool.registryUsername &&
+			pool.registryPassword,
+	);
 	const client = createKubernetesControlPlane({
 		kubeconfig: cluster.kubeconfig,
 		inCluster: cluster.metadata.inCluster,
@@ -272,6 +280,13 @@ export const createManagedDataPlatformArchive = async ({
 		serverSideEncryption: storage.metadata.serverSideEncryption,
 		kmsKeyId: storage.metadata.kmsKeyId,
 		nodeSelector: systemPool?.labels,
+		registryCredentials: registryBuildPool
+			? {
+					server: registryBuildPool.registryHost!,
+					username: registryBuildPool.registryUsername!,
+					password: registryBuildPool.registryPassword!,
+				}
+			: undefined,
 		tolerations: systemPool?.taints,
 		activeDeadlineSeconds: 3_600,
 	});
@@ -448,6 +463,14 @@ export const restoreManagedDataPlatformArchive = async ({
 	const systemPool = cluster.nodePools.find(
 		(pool) => pool.purpose === "system" && pool.status === "active",
 	);
+	const registryBuildPool = cluster.buildPools.find(
+		(pool) =>
+			pool.status === "active" &&
+			pool.registryAuthMode === "basic" &&
+			pool.registryHost &&
+			pool.registryUsername &&
+			pool.registryPassword,
+	);
 	const client = createKubernetesControlPlane({
 		kubeconfig: cluster.kubeconfig,
 		inCluster: cluster.metadata.inCluster,
@@ -470,6 +493,13 @@ export const restoreManagedDataPlatformArchive = async ({
 		operation: "restore",
 		expectedChecksum: archive.checksum,
 		nodeSelector: systemPool?.labels,
+		registryCredentials: registryBuildPool
+			? {
+					server: registryBuildPool.registryHost!,
+					username: registryBuildPool.registryUsername!,
+					password: registryBuildPool.registryPassword!,
+				}
+			: undefined,
 		tolerations: systemPool?.taints,
 		activeDeadlineSeconds: 3_600,
 	});

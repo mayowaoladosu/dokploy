@@ -1,0 +1,1 @@
+ALTER TABLE "platform_build_pool" ADD COLUMN "signing_credentials" text;

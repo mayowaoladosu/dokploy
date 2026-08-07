@@ -496,6 +496,9 @@ const bootstrapKubernetes = async (activate: boolean) => {
 			registryAuthMode === "basic"
 				? required("PLATFORM_REGISTRY_PASSWORD")
 				: null,
+		signingCredentials: JSON.stringify(
+			stringRecord("PLATFORM_SUPPLY_CHAIN_SIGNING_SECRETS_JSON"),
+		),
 		runtimeRegistrySecretName:
 			registryAuthMode === "basic"
 				? required("PLATFORM_RUNTIME_REGISTRY_SECRET_NAME")

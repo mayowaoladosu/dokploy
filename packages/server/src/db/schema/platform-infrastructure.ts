@@ -296,6 +296,7 @@ export const platformBuildPools = pgTable(
 			.default("basic"),
 		registryUsername: encryptedText("registry_username"),
 		registryPassword: encryptedText("registry_password"),
+		signingCredentials: encryptedText("signing_credentials"),
 		runtimeRegistrySecretName: text("runtime_registry_secret_name"),
 		metadata: jsonb("metadata")
 			.$type<PlatformBuildPoolMetadata>()
