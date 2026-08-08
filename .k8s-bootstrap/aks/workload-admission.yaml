@@ -1,0 +1,174 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: vlyv-managed-pod-isolation
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  matchConditions:
+    - name: vlyv-tenant-namespace
+      expression: >-
+        request.namespace.startsWith('vlyv-app-') ||
+        request.namespace.startsWith('vlyv-build-')
+  validations:
+    - expression: >-
+        has(object.spec.runtimeClassName) &&
+        object.spec.runtimeClassName == 'kata-vm-isolation'
+      message: Managed tenant pods must use the AKS Kata VM isolation runtime.
+      reason: Forbidden
+    - expression: >-
+        has(object.spec.automountServiceAccountToken) &&
+        object.spec.automountServiceAccountToken == false
+      message: Managed tenant pods must disable service-account token automounting.
+      reason: Forbidden
+    - expression: >-
+        object.spec.containers.all(container,
+          container.image.matches('^[^@ ]+@sha256:[a-f0-9]{64}$')) &&
+        (!has(object.spec.initContainers) ||
+          object.spec.initContainers.all(container,
+            container.image.matches('^[^@ ]+@sha256:[a-f0-9]{64}$'))) &&
+        (!has(object.spec.ephemeralContainers) ||
+          object.spec.ephemeralContainers.all(container,
+            container.image.matches('^[^@ ]+@sha256:[a-f0-9]{64}$')))
+      message: Managed tenant containers must use immutable sha256 image digests.
+      reason: Forbidden
+    - expression: >-
+        (!has(object.spec.hostNetwork) || object.spec.hostNetwork == false) &&
+        (!has(object.spec.hostPID) || object.spec.hostPID == false) &&
+        (!has(object.spec.hostIPC) || object.spec.hostIPC == false) &&
+        (!has(object.spec.volumes) ||
+          object.spec.volumes.all(volume, !has(volume.hostPath)))
+      message: Managed tenant pods may not share host namespaces or mount host paths.
+      reason: Forbidden
+    - expression: >-
+        !request.namespace.startsWith('vlyv-app-') ||
+        (has(object.spec.nodeSelector) &&
+          'vlyv.dev/pool' in object.spec.nodeSelector &&
+          object.spec.nodeSelector['vlyv.dev/pool'] == 'runtime')
+      message: Runtime pods must target the isolated runtime pool.
+      reason: Forbidden
+    - expression: >-
+        !request.namespace.startsWith('vlyv-build-') ||
+        (has(object.spec.nodeSelector) &&
+          'vlyv.dev/build' in object.spec.nodeSelector &&
+          object.spec.nodeSelector['vlyv.dev/build'] == 'true')
+      message: Build pods must target the isolated build pool.
+      reason: Forbidden
+    - expression: >-
+        !request.namespace.startsWith('vlyv-build-') ||
+        (has(object.spec.tolerations) &&
+          object.spec.tolerations.exists(toleration,
+            toleration.key == 'vlyv.dev/build' &&
+            toleration.value == 'true' &&
+            toleration.effect == 'NoSchedule'))
+      message: Build pods must explicitly tolerate only the build-pool scheduling taint.
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: vlyv-managed-pod-isolation
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+spec:
+  policyName: vlyv-managed-pod-isolation
+  validationActions:
+    - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: vlyv-observability-pod-boundary
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  matchConditions:
+    - name: vlyv-observability-namespace
+      expression: request.namespace == 'vlyv-observability'
+  validations:
+    - expression: >-
+        has(object.metadata.labels) &&
+        'app.kubernetes.io/name' in object.metadata.labels &&
+        object.metadata.labels['app.kubernetes.io/name'] in
+          ['vlyv-otel-collector', 'vlyv-otel-log-agent']
+      message: Only Vlyv observability agents may create pods in this namespace.
+      reason: Forbidden
+    - expression: >-
+        object.spec.serviceAccountName in
+          ['vlyv-otel-collector', 'vlyv-otel-log-agent']
+      message: Observability pods must use a fixed least-privilege service account.
+      reason: Forbidden
+    - expression: >-
+        object.spec.containers.all(container,
+          container.image.matches('^[^@ ]+@sha256:[a-f0-9]{64}$')) &&
+        (!has(object.spec.initContainers) ||
+          object.spec.initContainers.all(container,
+            container.image.matches('^[^@ ]+@sha256:[a-f0-9]{64}$')))
+      message: Observability containers must use immutable sha256 image digests.
+      reason: Forbidden
+    - expression: >-
+        (!has(object.spec.hostNetwork) || object.spec.hostNetwork == false) &&
+        (!has(object.spec.hostPID) || object.spec.hostPID == false) &&
+        (!has(object.spec.hostIPC) || object.spec.hostIPC == false) &&
+        has(object.spec.securityContext) &&
+        has(object.spec.securityContext.seccompProfile) &&
+        object.spec.securityContext.seccompProfile.type == 'RuntimeDefault' &&
+        object.spec.containers.all(container,
+          has(container.securityContext) &&
+          has(container.securityContext.allowPrivilegeEscalation) &&
+          container.securityContext.allowPrivilegeEscalation == false &&
+          has(container.securityContext.readOnlyRootFilesystem) &&
+          container.securityContext.readOnlyRootFilesystem == true &&
+          has(container.securityContext.capabilities) &&
+          container.securityContext.capabilities.drop.exists(capability,
+            capability == 'ALL'))
+      message: Observability pods must retain the hardened security context.
+      reason: Forbidden
+    - expression: >-
+        object.spec.serviceAccountName != 'vlyv-otel-collector' ||
+        ((has(object.spec.securityContext.runAsNonRoot) &&
+          object.spec.securityContext.runAsNonRoot == true) &&
+          (!has(object.spec.volumes) ||
+            object.spec.volumes.all(volume, !has(volume.hostPath))))
+      message: The OTLP collector must run as non-root without host mounts.
+      reason: Forbidden
+    - expression: >-
+        object.spec.serviceAccountName != 'vlyv-otel-log-agent' ||
+        (has(object.spec.volumes) &&
+          object.spec.volumes.filter(volume, has(volume.hostPath)).size() == 1 &&
+          object.spec.volumes.filter(volume, has(volume.hostPath)).all(volume,
+            volume.name == 'pod-logs' &&
+            volume.hostPath.path == '/var/log/pods' &&
+            volume.hostPath.type == 'Directory') &&
+          object.spec.containers.all(container,
+            has(container.volumeMounts) &&
+            container.volumeMounts.filter(mount, mount.name == 'pod-logs').size() == 1 &&
+            container.volumeMounts.filter(mount, mount.name == 'pod-logs').all(mount,
+              has(mount.readOnly) && mount.readOnly == true)))
+      message: The log agent may mount only the pod log directory and only read-only.
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: vlyv-observability-pod-boundary
+  labels:
+    app.kubernetes.io/managed-by: vlyv
+spec:
+  policyName: vlyv-observability-pod-boundary
+  validationActions:
+    - Deny

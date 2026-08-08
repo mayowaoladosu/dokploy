@@ -33,6 +33,8 @@ The bootstrap validates rather than silently installing security-critical cluste
 - an artifact StorageClass;
 - a KMS-backed signing key and digest-pinned builder, verifier, publisher, backup-worker, and OpenTelemetry Collector images.
 
+For AKS, use the pinned, three-zone bootstrap assets and apply order in [.k8s-bootstrap/aks/README.md](.k8s-bootstrap/aks/README.md). AKS owns the `kata-vm-isolation` RuntimeClass; do not replace it with a custom RuntimeClass object.
+
 Prepare and verify these capabilities before launching the tenant control plane. Production startup requires `PLATFORM_BOOTSTRAP_ACTIVATE=true` and fails closed when a prerequisite is unavailable.
 
 ## 4. Configure Polar

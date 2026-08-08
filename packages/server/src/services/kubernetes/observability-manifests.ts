@@ -76,11 +76,17 @@ export const buildKubernetesObservabilityCollectorManifests = (
 	const pipelines: Record<string, unknown> = {};
 	const tenantProcessors = [
 		"memory_limiter",
-		"k8sattributes",
+		"k8s_attributes",
 		"filter/tenant",
 		"transform/tenant",
 		"resource/vlyv",
 		"batch",
+	];
+	const tenantTransformStatements = [
+		'set(resource.attributes["vlyv.organization.id"], resource.attributes["vlyv.enforced.organization.id"])',
+		'set(resource.attributes["vlyv.application.id"], resource.attributes["vlyv.enforced.application.id"])',
+		'delete_key(resource.attributes, "vlyv.enforced.organization.id")',
+		'delete_key(resource.attributes, "vlyv.enforced.application.id")',
 	];
 	const backendPorts = new Set<number>([443]);
 	const addHeaders = (name: string, backend: ObservabilityCollectorBackend) => {
@@ -109,24 +115,24 @@ export const buildKubernetesObservabilityCollectorManifests = (
 		backendPorts.add(
 			Number(url.port || (url.protocol === "https:" ? 443 : 80)),
 		);
-		exporters["otlphttp/platform"] = {
+		exporters["otlp_http/platform"] = {
 			endpoint,
 			headers: addRawHeaders("otlp", spec.otlp.headers ?? {}),
 		};
 		pipelines.metrics = {
 			receivers: ["otlp"],
 			processors: tenantProcessors,
-			exporters: ["prometheus", "otlphttp/platform"],
+			exporters: ["prometheus", "otlp_http/platform"],
 		};
 		pipelines.logs = {
 			receivers: ["otlp"],
 			processors: tenantProcessors,
-			exporters: ["otlphttp/platform"],
+			exporters: ["otlp_http/platform"],
 		};
 		pipelines.traces = {
 			receivers: ["otlp"],
 			processors: tenantProcessors,
-			exporters: ["otlphttp/platform"],
+			exporters: ["otlp_http/platform"],
 		};
 	}
 	if (spec.metrics && !spec.otlp) {
@@ -135,7 +141,7 @@ export const buildKubernetesObservabilityCollectorManifests = (
 		backendPorts.add(
 			Number(url.port || (url.protocol === "https:" ? 443 : 80)),
 		);
-		exporters["prometheusremotewrite/metrics"] = {
+		exporters["prometheus_remote_write/metrics"] = {
 			endpoint: `${endpoint}/api/v1/write`,
 			headers: addHeaders("metrics", spec.metrics),
 			resource_to_telemetry_conversion: { enabled: true },
@@ -143,7 +149,7 @@ export const buildKubernetesObservabilityCollectorManifests = (
 		pipelines.metrics = {
 			receivers: ["otlp"],
 			processors: tenantProcessors,
-			exporters: ["prometheus", "prometheusremotewrite/metrics"],
+			exporters: ["prometheus", "prometheus_remote_write/metrics"],
 		};
 	}
 	if (spec.logs && !spec.otlp) {
@@ -152,14 +158,14 @@ export const buildKubernetesObservabilityCollectorManifests = (
 		backendPorts.add(
 			Number(url.port || (url.protocol === "https:" ? 443 : 80)),
 		);
-		exporters["otlphttp/logs"] = {
+		exporters["otlp_http/logs"] = {
 			endpoint,
 			headers: addHeaders("logs", spec.logs),
 		};
 		pipelines.logs = {
 			receivers: ["otlp"],
 			processors: tenantProcessors,
-			exporters: ["otlphttp/logs"],
+			exporters: ["otlp_http/logs"],
 		};
 	}
 	if (spec.traces && !spec.otlp) {
@@ -168,14 +174,14 @@ export const buildKubernetesObservabilityCollectorManifests = (
 		backendPorts.add(
 			Number(url.port || (url.protocol === "https:" ? 443 : 80)),
 		);
-		exporters["otlphttp/traces"] = {
+		exporters["otlp_http/traces"] = {
 			endpoint,
 			headers: addHeaders("traces", spec.traces),
 		};
 		pipelines.traces = {
 			receivers: ["otlp"],
 			processors: tenantProcessors,
-			exporters: ["otlphttp/traces"],
+			exporters: ["otlp_http/traces"],
 		};
 	}
 	const collectorConfig = {
@@ -194,7 +200,7 @@ export const buildKubernetesObservabilityCollectorManifests = (
 				spike_limit_mib: 96,
 			},
 			batch: { timeout: "5s", send_batch_size: 1024 },
-			k8sattributes: {
+			k8s_attributes: {
 				auth_type: "serviceAccount",
 				passthrough: false,
 				pod_association: [
@@ -245,34 +251,19 @@ export const buildKubernetesObservabilityCollectorManifests = (
 				trace_statements: [
 					{
 						context: "resource",
-						statements: [
-							'set(attributes["vlyv.organization.id"], attributes["vlyv.enforced.organization.id"])',
-							'set(attributes["vlyv.application.id"], attributes["vlyv.enforced.application.id"])',
-							'delete_key(attributes, "vlyv.enforced.organization.id")',
-							'delete_key(attributes, "vlyv.enforced.application.id")',
-						],
+						statements: tenantTransformStatements,
 					},
 				],
 				metric_statements: [
 					{
 						context: "resource",
-						statements: [
-							'set(attributes["vlyv.organization.id"], attributes["vlyv.enforced.organization.id"])',
-							'set(attributes["vlyv.application.id"], attributes["vlyv.enforced.application.id"])',
-							'delete_key(attributes, "vlyv.enforced.organization.id")',
-							'delete_key(attributes, "vlyv.enforced.application.id")',
-						],
+						statements: tenantTransformStatements,
 					},
 				],
 				log_statements: [
 					{
 						context: "resource",
-						statements: [
-							'set(attributes["vlyv.organization.id"], attributes["vlyv.enforced.organization.id"])',
-							'set(attributes["vlyv.application.id"], attributes["vlyv.enforced.application.id"])',
-							'delete_key(attributes, "vlyv.enforced.organization.id")',
-							'delete_key(attributes, "vlyv.enforced.application.id")',
-						],
+						statements: tenantTransformStatements,
 					},
 				],
 			},
@@ -287,17 +278,30 @@ export const buildKubernetesObservabilityCollectorManifests = (
 		service: {
 			extensions: ["health_check"],
 			pipelines,
-			telemetry: { metrics: { address: "0.0.0.0:8888" } },
+			telemetry: {
+				metrics: {
+					level: "normal",
+					readers: [
+						{
+							pull: {
+								exporter: {
+									prometheus: { host: "0.0.0.0", port: 8888 },
+								},
+							},
+						},
+					],
+				},
+			},
 		},
 	};
 	const logExporter = spec.otlp
-		? exporters["otlphttp/platform"]
-		: exporters["otlphttp/logs"];
+		? exporters["otlp_http/platform"]
+		: exporters["otlp_http/logs"];
 	const logAgentConfig =
 		spec.logs || spec.otlp
 			? {
 					receivers: {
-						filelog: {
+						file_log: {
 							include: ["/var/log/pods/*/*/*.log"],
 							start_at: "end",
 							include_file_path: true,
@@ -334,7 +338,7 @@ export const buildKubernetesObservabilityCollectorManifests = (
 						},
 					},
 					processors: {
-						k8sattributes: {
+						k8s_attributes: {
 							auth_type: "serviceAccount",
 							passthrough: false,
 							pod_association: [
@@ -393,19 +397,19 @@ export const buildKubernetesObservabilityCollectorManifests = (
 							],
 						},
 					},
-					exporters: { "otlphttp/logs": logExporter },
+					exporters: { "otlp_http/logs": logExporter },
 					service: {
 						pipelines: {
 							logs: {
-								receivers: ["filelog"],
+								receivers: ["file_log"],
 								processors: [
 									"memory_limiter",
-									"k8sattributes",
+									"k8s_attributes",
 									"filter/tenant",
 									"resource/vlyv",
 									"batch",
 								],
-								exporters: ["otlphttp/logs"],
+								exporters: ["otlp_http/logs"],
 							},
 						},
 					},

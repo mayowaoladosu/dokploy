@@ -82,19 +82,31 @@ describe("Kubernetes observability collector", () => {
 
 		expect(collector.service.pipelines.traces.processors).toEqual([
 			"memory_limiter",
-			"k8sattributes",
+			"k8s_attributes",
 			"filter/tenant",
 			"transform/tenant",
 			"resource/vlyv",
 			"batch",
 		]);
+		expect(collector.service.telemetry.metrics).toEqual({
+			level: "normal",
+			readers: [
+				{
+					pull: {
+						exporter: {
+							prometheus: { host: "0.0.0.0", port: 8888 },
+						},
+					},
+				},
+			],
+		});
 		expect(collector.processors["filter/tenant"].traces.span).toContain(
 			'resource.attributes["vlyv.enforced.organization.id"] == nil',
 		);
 		expect(
 			collector.processors["transform/tenant"].trace_statements[0].statements,
 		).toContain(
-			'set(attributes["vlyv.organization.id"], attributes["vlyv.enforced.organization.id"])',
+			'set(resource.attributes["vlyv.organization.id"], resource.attributes["vlyv.enforced.organization.id"])',
 		);
 		expect(role.rules).toEqual([
 			expect.objectContaining({
@@ -115,12 +127,12 @@ describe("Kubernetes observability collector", () => {
 		expect(JSON.stringify(config)).not.toContain("metrics-secret");
 		const collector = JSON.parse(config.data["collector.json"]);
 		expect(
-			collector.exporters["prometheusremotewrite/metrics"].headers[
+			collector.exporters["prometheus_remote_write/metrics"].headers[
 				"X-Scope-OrgID"
 			],
 		).toBe("vlyv-platform");
 		expect(
-			collector.exporters["prometheusremotewrite/metrics"]
+			collector.exporters["prometheus_remote_write/metrics"]
 				.resource_to_telemetry_conversion,
 		).toEqual({ enabled: true });
 	});
@@ -152,7 +164,7 @@ describe("Kubernetes observability collector", () => {
 				verbs: ["get", "list", "watch"],
 			}),
 		]);
-		expect(agentConfig.processors.k8sattributes.extract.labels).toEqual(
+		expect(agentConfig.processors.k8s_attributes.extract.labels).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({
 					tag_name: "vlyv.organization.id",
@@ -182,17 +194,17 @@ describe("Kubernetes observability collector", () => {
 			Buffer.from("Basic instance-token").toString("base64"),
 		);
 		expect(JSON.stringify(config)).not.toContain("instance-token");
-		expect(collector.exporters["otlphttp/platform"]).toEqual({
+		expect(collector.exporters["otlp_http/platform"]).toEqual({
 			endpoint: "https://otlp-gateway.grafana.net/otlp",
 			headers: { Authorization: "${env:OTLP_HEADER_0}" },
 		});
 		for (const signal of ["metrics", "logs", "traces"]) {
 			expect(collector.service.pipelines[signal].exporters).toContain(
-				"otlphttp/platform",
+				"otlp_http/platform",
 			);
 		}
-		expect(logAgent.exporters["otlphttp/logs"]).toEqual(
-			collector.exporters["otlphttp/platform"],
+		expect(logAgent.exporters["otlp_http/logs"]).toEqual(
+			collector.exporters["otlp_http/platform"],
 		);
 	});
 

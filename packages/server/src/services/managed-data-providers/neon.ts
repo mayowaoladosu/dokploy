@@ -10,6 +10,8 @@ import { assertPublicHealthEndpoint } from "../runtime-scheduler";
 
 const NEON_API_BASE = "https://console.neon.tech/api/v2";
 const IDENTIFIER = /^[a-z0-9-]{1,60}$/;
+const MAX_REQUEST_RETRIES = 8;
+const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 const neonProjectRefSchema = z.object({
 	projectId: z.string().regex(IDENTIFIER),
@@ -173,33 +175,63 @@ export const createNeonManagedDataProvider = ({
 	if (base.protocol !== "https:" || base.username || base.password) {
 		throw new Error("Neon API endpoint must use clean HTTPS");
 	}
+	const retryDelayMs = (response: Response, attempt: number) => {
+		const retryAfter = response.headers.get("retry-after")?.trim();
+		if (retryAfter) {
+			const seconds = Number(retryAfter);
+			const parsed = Number.isFinite(seconds)
+				? seconds * 1_000
+				: Date.parse(retryAfter) - Date.now();
+			if (Number.isFinite(parsed) && parsed >= 0) {
+				return Math.min(Math.max(parsed, 250), 30_000);
+			}
+		}
+		return Math.min(Math.max(pollIntervalMs * 2 ** attempt, 250), 10_000);
+	};
+	const canRetryResponse = (method: string, status: number) =>
+		status === 423 ||
+		status === 429 ||
+		status === 503 ||
+		(IDEMPOTENT_METHODS.has(method) && [500, 502, 504].includes(status));
 	const request = async <T>(
 		path: string,
 		init: RequestInit,
 		schema: z.ZodType<T>,
 		allowNotFound = false,
 	) => {
-		await validateEndpoint(base.toString());
-		const response = await fetcher(
-			new URL(path, `${base.toString().replace(/\/$/, "")}/`),
-			{
-				...init,
-				headers: {
-					Accept: "application/json",
-					Authorization: `Bearer ${apiKey}`,
-					"Content-Type": "application/json",
-					...init.headers,
+		const method = (init.method || "GET").toUpperCase();
+		for (let attempt = 0; ; attempt += 1) {
+			await validateEndpoint(base.toString());
+			const response = await fetcher(
+				new URL(path, `${base.toString().replace(/\/$/, "")}/`),
+				{
+					...init,
+					headers: {
+						Accept: "application/json",
+						Authorization: `Bearer ${apiKey}`,
+						"Content-Type": "application/json",
+						...init.headers,
+					},
+					redirect: "error",
+					signal: AbortSignal.timeout(30_000),
 				},
-				redirect: "error",
-				signal: AbortSignal.timeout(30_000),
-			},
-		);
-		if (allowNotFound && response.status === 404) return undefined as T;
-		if (!response.ok) {
-			throw new Error(`Neon API returned HTTP ${response.status}`);
+			);
+			if (allowNotFound && response.status === 404) return undefined as T;
+			if (
+				!response.ok &&
+				attempt < MAX_REQUEST_RETRIES &&
+				canRetryResponse(method, response.status)
+			) {
+				await response.body?.cancel().catch(() => undefined);
+				await sleep(retryDelayMs(response, attempt));
+				continue;
+			}
+			if (!response.ok) {
+				throw new Error(`Neon API returned HTTP ${response.status}`);
+			}
+			if (response.status === 204) return schema.parse({});
+			return schema.parse(await response.json());
 		}
-		if (response.status === 204) return schema.parse({});
-		return schema.parse(await response.json());
 	};
 	const connectionUri = async (ref: NeonProjectRef) => {
 		const query = new URLSearchParams({
@@ -312,7 +344,9 @@ export const createNeonManagedDataProvider = ({
 			}),
 		);
 		assertOperationsSucceeded(operations);
-		return operationsReady(operations) ? ("ready" as const) : ("pending" as const);
+		return operationsReady(operations)
+			? ("ready" as const)
+			: ("pending" as const);
 	};
 	return {
 		name,
@@ -409,7 +443,9 @@ export const createNeonManagedDataProvider = ({
 				.filter((operation) => !operationsReady([operation]))
 				.map((operation) => operation.id);
 			if (pendingOperationIds.some((id) => !id)) {
-				throw new Error("Neon project did not return durable operation identities");
+				throw new Error(
+					"Neon project did not return durable operation identities",
+				);
 			}
 			return {
 				providerResourceId: encodeNeonProjectRef({
@@ -417,8 +453,8 @@ export const createNeonManagedDataProvider = ({
 					branchId: created.branch.id,
 					roleName: role.name,
 					databaseName: database.name,
-					operationIds: pendingOperationIds.filter(
-						(id): id is string => Boolean(id),
+					operationIds: pendingOperationIds.filter((id): id is string =>
+						Boolean(id),
 					),
 				}),
 				status: operationsReady(created.operations) ? "ready" : "provisioning",

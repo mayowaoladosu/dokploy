@@ -160,9 +160,15 @@ describe("Neon managed Postgres provider", () => {
 	});
 
 	it("persists the new branch identity returned by a terminal restore", async () => {
+		let restoreAttempts = 0;
+		const sleep = vi.fn(async () => undefined);
 		const fetcher = vi.fn<typeof fetch>(async (input, init) => {
 			const url = String(input);
 			if (url.endsWith("/snapshots/snapshot-1/restore")) {
+				restoreAttempts += 1;
+				if (restoreAttempts === 1) {
+					return response({ detail: "Project operation is locked" }, 423);
+				}
 				return response({
 					branch: { id: "br-restored-1", name: "restored" },
 					operations: [{ status: "finished" }],
@@ -179,6 +185,8 @@ describe("Neon managed Postgres provider", () => {
 			apiKey: "neon-api-key",
 			fetcher,
 			validateEndpoint: async () => undefined,
+			pollIntervalMs: 1,
+			sleep,
 		});
 		const resourceId = `neon.${Buffer.from(
 			JSON.stringify({
@@ -196,5 +204,7 @@ describe("Neon managed Postgres provider", () => {
 			branchId: "br-restored-1",
 		});
 		expect(restored.connectionUri).toContain("restored.neon.tech");
+		expect(restoreAttempts).toBe(2);
+		expect(sleep).toHaveBeenCalledOnce();
 	});
 });
