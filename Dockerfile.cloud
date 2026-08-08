@@ -20,7 +20,7 @@ COPY packages/server/package.json ./packages/server/package.json
 ENV NODE_OPTIONS=--max-old-space-size=4096
 ENV CI=true
 ENV PNPM_DISABLE_SELF_UPDATE_CHECK=true
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile --prefer-offline --child-concurrency=1 --network-concurrency=1 --reporter=silent
+RUN pnpm install --frozen-lockfile --prefer-offline --child-concurrency=1 --network-concurrency=1 --reporter=silent
 
 COPY . /usr/src/app
 
